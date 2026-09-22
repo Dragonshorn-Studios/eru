@@ -17,7 +17,7 @@ Never call it Eruka. Never merge into Maomao. Never DeepWiki.com SaaS.
 ## Stack locks
 
 - Language: **Node.js >= 22** + **TypeScript**. Python is Belldandy; Go is Alyssa; this repo is Node.
-- HTTP: **Hono** on `@hono/node-server`. UI is server-rendered HTML + **HTMX** + **Tailwind** + **CSS variables**. No React SPA for chrome, no DaisyUI, Bootstrap, or Material.
+- HTTP: **Hono** on `@hono/node-server`. UI is server-rendered HTML + **HTMX** + **CSS variables** + **hand CSS** (no Tailwind pipeline). No React SPA for chrome, no DaisyUI, Bootstrap, or Material.
 - Data: **SQLite** via `better-sqlite3`. Pages and repos persist here. Compose for the app. **MIT**.
 - Mapping: **OpenCode** with deny `bash` / `edit` / `write` / `webfetch`. Model output is untrusted.
 - Chrome tokens (locked): cream `#F7F5F0`, lavender `#E9E4F7`, pink `#FBE9EC`, ink `#1B1A18`, mint `#CDE8DF`, moss `#A8B99A`, rose `#FADADD`. Serif titles, sans body, mono paths. Soft radius. Pastel glow. No vine/hair chrome, no character art, no purple SaaS.

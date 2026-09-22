@@ -10,6 +10,7 @@ import {
   LoginLimiter,
   SESSION_COOKIE,
   SESSION_TTL_MS,
+  clientKey,
   cookieSecure,
   csrfOK,
   isMutating,
@@ -62,7 +63,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     if (session) c.set("session", session);
 
     if (isPublicPath(path)) {
-      if (path === "/login" && isMutating(c.req.method) && !limiter.allow(clientKey(c))) {
+      if (path === "/login" && isMutating(c.req.method) && !limiter.allow(requestClientKey(c))) {
         return c.text("too many requests", 429);
       }
       await next();
@@ -71,7 +72,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
 
     if (!session) {
       if (isMutating(c.req.method)) {
-        if (!limiter.allow(clientKey(c))) return c.text("too many requests", 429);
+        if (!limiter.allow(requestClientKey(c))) return c.text("too many requests", 429);
         return c.text("unauthorized", 401);
       }
       if (c.req.header("HX-Request") === "true") return c.text("unauthorized", 401);
@@ -157,9 +158,9 @@ function html(c: Context<Env>, body: string, status: ContentfulStatusCode = 200)
   return c.body(body, status);
 }
 
-function clientKey(c: Context<Env>): string {
+function requestClientKey(c: Context<Env>): string {
   const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming;
-  return incoming?.socket?.remoteAddress || "local";
+  return clientKey(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"), incoming?.socket?.remoteAddress);
 }
 
 function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: string): ChromeModel {

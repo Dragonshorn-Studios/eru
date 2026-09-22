@@ -4,6 +4,8 @@ Agents: read [AGENTS.md](AGENTS.md) first, then the two skills [eru-shape](.curs
 
 Prefer **squash** merges. One PR per ticketed slice.
 
+Chrome is CSS variables plus hand CSS in `src/theme.ts` (served at `/assets/eru.css`). This is not a Tailwind pipeline; do not add Tailwind in this slice.
+
 ## Build and test
 
 Node.js >= 22.
@@ -46,10 +48,10 @@ Source of truth is `AGENTS.md` plus the two skills. Other tools get **pointers o
 | Tool | Instructions | Skills |
 | --- | --- | --- |
 | Cursor | `AGENTS.md` | `.cursor/skills/eru-shape`, `.cursor/skills/eru-security` |
-| Codex | `AGENTS.md` | `.agents/skills/` (symlinks to the Cursor skills) |
+| Codex | `AGENTS.md` | `.agents/skills/` (thin pointers to the Cursor skills) |
 | OpenCode | `AGENTS.md` | `.agents/skills/` (OpenCode also searches this path) |
 | zcode | `AGENTS.md` | none extra; follow the skill links in `AGENTS.md` |
 | Devin | `AGENTS.md` | `.devin/global_rules.md` points at `AGENTS.md` and the two skills |
 | Vibe | `AGENTS.md` | `.agents/skills/` (Vibe also searches this path) |
 
-Do not add a third skill. Do not duplicate `AGENTS.md` into `CLAUDE.md`, `DEVIN.md`, or per-tool long-form copies.
+Do not add a third skill. Do not copy Cursor skill bodies into `.agents/skills/`. Do not duplicate `AGENTS.md` into `CLAUDE.md`, `DEVIN.md`, or per-tool long-form copies.

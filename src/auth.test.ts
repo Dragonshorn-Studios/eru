@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LoginLimiter,
+  clientKey,
   cookieSecure,
   csrfOK,
   isPublicPath,
@@ -33,10 +34,14 @@ describe("session helpers", () => {
     expect(safeNextPath("/login")).toBe("/");
   });
 
-  it("keeps health, login, and assets public", () => {
+  it("keeps health, login, and an exact asset allowlist public", () => {
     expect(isPublicPath("/health")).toBe(true);
     expect(isPublicPath("/login")).toBe(true);
     expect(isPublicPath("/assets/eru.css")).toBe(true);
+    expect(isPublicPath("/assets/htmx.min.js")).toBe(true);
+    expect(isPublicPath("/assets/")).toBe(false);
+    expect(isPublicPath("/assets/secret.css")).toBe(false);
+    expect(isPublicPath("/assets/eru.css.bak")).toBe(false);
     expect(isPublicPath("/")).toBe(false);
     expect(isPublicPath("/ask")).toBe(false);
   });
@@ -69,5 +74,19 @@ describe("login limiter", () => {
     expect(limiter.allow("1.2.3.4", 1_200)).toBe(true);
     expect(limiter.allow("1.2.3.4", 1_300)).toBe(false);
     expect(limiter.allow("9.9.9.9", 1_300)).toBe(true);
+  });
+});
+
+describe("clientKey", () => {
+  it("uses the first X-Forwarded-For hop when it is IP-like", () => {
+    expect(clientKey("203.0.113.10, 10.0.0.1", "198.51.100.5", "127.0.0.1")).toBe("203.0.113.10");
+    expect(clientKey("2001:db8::1, 10.0.0.1")).toBe("2001:db8::1");
+  });
+
+  it("falls through to X-Real-IP, then the socket, then local", () => {
+    expect(clientKey("unknown", "198.51.100.5", "127.0.0.1")).toBe("198.51.100.5");
+    expect(clientKey("not-an-ip", "also-not", "10.1.2.3")).toBe("10.1.2.3");
+    expect(clientKey("unknown", "nope", undefined)).toBe("local");
+    expect(clientKey(undefined, undefined, undefined)).toBe("local");
   });
 });

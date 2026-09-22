@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 export const SESSION_COOKIE = "eru_session";
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -86,8 +87,24 @@ export function cookieSecure(url: string, forwardedProto?: string | null): boole
   }
 }
 
+const PUBLIC_PATHS = new Set(["/health", "/login", "/assets/eru.css", "/assets/htmx.min.js"]);
+
 export function isPublicPath(path: string): boolean {
-  return path === "/health" || path === "/login" || path.startsWith("/assets/");
+  return PUBLIC_PATHS.has(path);
+}
+
+export function clientKey(
+  forwardedFor?: string | null,
+  realIp?: string | null,
+  remoteAddress?: string | null,
+): string {
+  const hop = forwardedFor?.split(",")[0]?.trim();
+  if (hop && isIP(hop)) return hop;
+  const real = realIp?.trim();
+  if (real && isIP(real)) return real;
+  const remote = remoteAddress?.trim();
+  if (remote) return remote;
+  return "local";
 }
 
 export function isMutating(method: string): boolean {
