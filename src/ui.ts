@@ -171,8 +171,8 @@ function pageArticle(model: ChromeModel): string {
 
 export function appPage(model: ChromeModel): string {
   const askNotice = model.askNotice
-    ? `<p class="ask-stub" id="ask-result">${escapeHtml(model.askNotice)}</p>`
-    : `<p class="ask-stub" id="ask-result" hidden></p>`;
+    ? `<p class="ask-answer" id="ask-result">${escapeHtml(model.askNotice)}</p>`
+    : `<p class="ask-answer" id="ask-result" hidden></p>`;
 
   return layout(
     "Eru",
@@ -191,10 +191,10 @@ export function appPage(model: ChromeModel): string {
       </article>
       <section class="card" aria-label="Ask">
         <h2>Ask</h2>
-        <form class="ask-form" method="post" action="/ask" hx-post="/ask" hx-target="#ask-result" hx-swap="innerHTML">
+        <form class="ask-form" method="post" action="/ask" hx-post="/ask" hx-target="#ask-result" hx-swap="outerHTML">
           ${csrfInput(model.csrf)}
           <label class="sr-only" for="q">What do you want to know?</label>
-          <input id="q" type="text" name="q" placeholder="What do you want to know?" autocomplete="off"/>
+          <input id="q" type="text" name="q" placeholder="What do you want to know?" autocomplete="off" maxlength="2000"/>
           <button class="ask-eru" type="submit">Ask Eru</button>
         </form>
         ${askNotice}
@@ -210,8 +210,6 @@ export function themeCss(): string {
   return THEME_CSS;
 }
 
-export const ASK_STUB_MESSAGE = "Ask is not wired yet. OpenCode against the map lands in issue #4.";
-
-export function askStubFragment(): string {
-  return `<p class="ask-stub">${escapeHtml(ASK_STUB_MESSAGE)}</p>`;
+export function askResultFragment(notice: string): string {
+  return `<p class="ask-answer" id="ask-result">${escapeHtml(notice)}</p>`;
 }

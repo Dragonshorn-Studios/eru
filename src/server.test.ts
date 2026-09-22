@@ -6,7 +6,7 @@ import { getForgeCredential, getPrimaryRepo, openDb, upsertConnectedRepo, upsert
 import { decryptForgeToken } from "./forge.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
-import { ASK_STUB_MESSAGE } from "./ui.js";
+import type { AskRunner } from "./opencode.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -17,14 +17,20 @@ function gatedConfig(overrides: Partial<Config> = {}): Config {
     sessionSecret: "test-session-secret",
     loginLimit: 5,
     loginWindowMs: 60_000,
+    openCodeBin: "opencode",
+    openCodeTimeoutMs: 120_000,
     ...overrides,
   };
 }
 
-function app(overrides: Partial<Config> = {}, fetchImpl?: (url: string, init: RequestInit) => Promise<Response>) {
+function app(
+  overrides: Partial<Config> = {},
+  fetchImpl?: (url: string, init: RequestInit) => Promise<Response>,
+  askRunner?: AskRunner,
+) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
-  return { app: createApp({ config, db, fetchImpl }), config, db };
+  return { app: createApp({ config, db, fetchImpl, askRunner }), config, db };
 }
 
 async function login(instance: ReturnType<typeof app>["app"], password = "test-ui-password") {
@@ -119,7 +125,7 @@ describe("operator gate", () => {
     expect(res.status).toBe(403);
   });
 
-  it("accepts Ask stub with CSRF and HTMX", async () => {
+  it("accepts Ask with CSRF and HTMX", async () => {
     const { app: instance, config } = app();
     const loggedIn = await login(instance);
     const token = cookieValue(cookieLine(loggedIn));
@@ -134,7 +140,9 @@ describe("operator gate", () => {
       },
     });
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain(ASK_STUB_MESSAGE);
+    const body = await res.text();
+    expect(body).toContain("Connect a repo before asking.");
+    expect(body).toContain('id="ask-result"');
   });
 
   it("throttles login bursts", async () => {
@@ -288,21 +296,24 @@ describe("forge connect", () => {
   });
 });
 
-describe("durable Brief pages", () => {
-  async function seed(instance: ReturnType<typeof app>, pages: { slug: string; title: string; body: string; sortOrder: number }[]) {
-    const repoId = upsertConnectedRepo(
-      instance.db,
-      { forge: "github", owner: "acme", name: "box" },
-      "2026-01-01T00:00:00Z",
-    );
-    for (const page of pages) {
-      upsertPage(instance.db, repoId, { ...page, mappedRef: "main" }, "2026-01-01T00:00:00Z");
-    }
-    const loggedIn = await login(instance.app);
-    const token = cookieValue(cookieLine(loggedIn));
-    return `${SESSION_COOKIE}=${token}`;
+async function seed(
+  instance: ReturnType<typeof app>,
+  pages: { slug: string; title: string; body: string; sortOrder: number }[],
+) {
+  const repoId = upsertConnectedRepo(
+    instance.db,
+    { forge: "github", owner: "acme", name: "box" },
+    "2026-01-01T00:00:00Z",
+  );
+  for (const page of pages) {
+    upsertPage(instance.db, repoId, { ...page, mappedRef: "main" }, "2026-01-01T00:00:00Z");
   }
+  const loggedIn = await login(instance.app);
+  const token = cookieValue(cookieLine(loggedIn));
+  return `${SESSION_COOKIE}=${token}`;
+}
 
+describe("durable Brief pages", () => {
   const PAGES = [
     { slug: "arch", title: "Architecture", body: "arch body line\nmore arch", sortOrder: 0 },
     { slug: "auth", title: "Auth", body: "auth body", sortOrder: 1 },
@@ -353,6 +364,79 @@ describe("durable Brief pages", () => {
     const body2 = await res2.text();
     expect(body2).toContain("No repo connected");
     expect(body2).toContain("/connect");
+  });
+});
+
+describe("ask OpenCode", () => {
+  async function ask(instance: ReturnType<typeof app>, q: string, htmx = true) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return instance.app.request("/ask", {
+      method: "POST",
+      body: new URLSearchParams({ q, [CSRF_FIELD]: session.csrf }),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: `${SESSION_COOKIE}=${token}`,
+        ...(htmx ? { "HX-Request": "true" } : {}),
+      },
+    });
+  }
+
+  it("answers via the runner with pages and repo label, escaped", async () => {
+    let seen: { q: string; slugs: string[]; label: string } | undefined;
+    const runner: AskRunner = async (q, pages, label) => {
+      seen = { q, slugs: pages.map((p) => p.slug), label };
+      return { ok: true, answer: "See map/arch.md\n<script>alert(1)</script>" };
+    };
+    const instance = app({}, undefined, runner);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "bodies", sortOrder: 0 }]);
+    const res = await ask(instance, "how is auth?");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("See map/arch.md");
+    expect(body).toContain("&lt;script&gt;");
+    expect(body).not.toContain("<script>");
+    expect(seen).toEqual({ q: "how is auth?", slugs: ["arch"], label: "acme/box" });
+  });
+
+  it("renders the answer into the full page without HTMX", async () => {
+    const instance = app({}, undefined, async () => ({ ok: true, answer: "plain answer" }));
+    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    const res = await ask(instance, "q", false);
+    const body = await res.text();
+    expect(body).toContain("plain answer");
+    expect(body).toContain('class="ask-answer"');
+  });
+
+  it("refuses empty and oversized questions before touching OpenCode", async () => {
+    let called = false;
+    const runner: AskRunner = async () => {
+      called = true;
+      return { ok: true, answer: "x" };
+    };
+    const instance = app({}, undefined, runner);
+    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    expect(await (await ask(instance, "   ")).text()).toContain("Ask something first.");
+    expect(await (await ask(instance, "x".repeat(2001))).text()).toContain("under 2000 characters");
+    expect(called).toBe(false);
+  });
+
+  it("fails closed without a repo or without map pages", async () => {
+    const instance = app();
+    expect(await (await ask(instance, "q")).text()).toContain("Connect a repo before asking.");
+    await seed(instance, []);
+    expect(await (await ask(instance, "q")).text()).toContain("no pages yet");
+  });
+
+  it("surfaces unconfigured and failed OpenCode honestly", async () => {
+    const unconfigured = app({}, undefined, async () => ({ ok: false, error: "unconfigured" as const }));
+    await seed(unconfigured, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    expect(await (await ask(unconfigured, "q")).text()).toContain("not configured");
+
+    const failed = app({}, undefined, async () => ({ ok: false, error: "failed" as const }));
+    await seed(failed, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    expect(await (await ask(failed, "q")).text()).toContain("could not answer");
   });
 });
 

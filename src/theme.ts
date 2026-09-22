@@ -212,10 +212,11 @@ body::before {
   padding: 0.75rem 1.6rem;
   border-radius: 999px;
 }
-.ask-stub, .flash {
+.ask-answer, .flash {
   color: color-mix(in srgb, var(--ink) 70%, white);
   font-size: 0.92rem;
 }
+.ask-answer { white-space: pre-wrap; }
 .flash { color: #7a3b44; }
 
 .foot {

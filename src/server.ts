@@ -26,16 +26,17 @@ import {
   deleteForgeCredential,
   getPage,
   getPrimaryRepo,
+  listAllPages,
   listPages,
   setForgeCredential,
   upsertConnectedRepo,
   type SqliteDb,
 } from "./db.js";
 import { encryptForgeToken, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
+import { ASK_MAX_QUESTION, createOpenCodeRunner, type AskRunner } from "./opencode.js";
 import {
-  ASK_STUB_MESSAGE,
   appPage,
-  askStubFragment,
+  askResultFragment,
   connectPage,
   loginPage,
   themeCss,
@@ -48,6 +49,7 @@ export interface AppOptions {
   limiter?: LoginLimiter;
   now?: () => number;
   fetchImpl?: FetchLike;
+  askRunner?: AskRunner;
 }
 
 type Env = {
@@ -61,6 +63,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const limiter = opts.limiter ?? new LoginLimiter(config.loginLimit, config.loginWindowMs);
   const now = opts.now ?? Date.now;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const ask =
+    opts.askRunner ??
+    createOpenCodeRunner({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
   const app = new Hono<Env>();
   const htmxJs = loadHtmx();
 
@@ -179,11 +184,14 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
 
   app.post("/ask", async (c) => {
+    const body = await c.req.parseBody();
+    const q = typeof body.q === "string" ? body.q.trim() : "";
+    const notice = await askNotice(db, ask, q);
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
-      return c.body(askStubFragment());
+      return c.body(askResultFragment(notice));
     }
-    return html(c, appPage(chromeModel(c, db, undefined, ASK_STUB_MESSAGE)));
+    return html(c, appPage(chromeModel(c, db, undefined, notice)));
   });
 
   return app;
@@ -209,6 +217,21 @@ const CONNECT_ERRORS: Record<VerifyError, string> = {
 
 function connectStatus(error: VerifyError): ContentfulStatusCode {
   return error === "unreachable" ? 502 : 400;
+}
+
+async function askNotice(db: SqliteDb, ask: AskRunner, q: string): Promise<string> {
+  if (!q) return "Ask something first.";
+  if (q.length > ASK_MAX_QUESTION) return `Keep questions under ${ASK_MAX_QUESTION} characters.`;
+  const repo = getPrimaryRepo(db);
+  if (!repo) return "Connect a repo before asking.";
+  const pages = listAllPages(db, repo.id);
+  if (pages.length === 0) return "The map has no pages yet — refresh the map first.";
+  const result = await ask(q, pages, `${repo.owner}/${repo.name}`);
+  if (result.ok) return result.answer || "OpenCode returned an empty answer.";
+  console.log(`ask refused: ${result.error}`);
+  return result.error === "unconfigured"
+    ? "OpenCode is not configured on this host (check ERU_OPENCODE_BIN)."
+    : "OpenCode could not answer — check the service log.";
 }
 
 function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: string): ChromeModel {

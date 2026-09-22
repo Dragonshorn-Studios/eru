@@ -180,6 +180,15 @@ export function listPages(db: SqliteDb, repoId: number): PageTocEntry[] {
     .all(repoId) as PageTocEntry[];
 }
 
+export function listAllPages(db: SqliteDb, repoId: number): MapPage[] {
+  return db
+    .prepare(
+      `SELECT id, slug, title, body, sort_order AS sortOrder, mapped_ref AS mappedRef, updated_at AS updatedAt
+       FROM pages WHERE repo_id = ? ORDER BY sort_order ASC, id ASC`,
+    )
+    .all(repoId) as MapPage[];
+}
+
 export function getPage(db: SqliteDb, repoId: number, slug: string): MapPage | undefined {
   return db
     .prepare(

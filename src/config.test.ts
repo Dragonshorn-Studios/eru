@@ -14,6 +14,23 @@ describe("loadConfig", () => {
     expect(cfg.sqlitePath).toBe("./data/eru.sqlite");
     expect(cfg.uiPassword).toBe("test-ui-password");
     expect(cfg.sessionSecret).toBe("test-session-secret");
+    expect(cfg.openCodeBin).toBe("opencode");
+    expect(cfg.openCodeTimeoutMs).toBe(120_000);
+    expect(cfg.openCodeModel).toBeUndefined();
+  });
+
+  it("loads OpenCode overrides and fails closed on a bad timeout", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_OPENCODE_BIN: "/opt/oc",
+      ERU_OPENCODE_TIMEOUT_MS: "5000",
+      ERU_OPENCODE_MODEL: "anthropic/claude",
+    });
+    expect(cfg.openCodeBin).toBe("/opt/oc");
+    expect(cfg.openCodeTimeoutMs).toBe(5_000);
+    expect(cfg.openCodeModel).toBe("anthropic/claude");
+    expect(() => loadConfig({ ...secrets, ERU_OPENCODE_TIMEOUT_MS: "10" })).toThrow(/ERU_OPENCODE_TIMEOUT_MS/);
+    expect(() => loadConfig({ ...secrets, ERU_OPENCODE_BIN: " " })).toThrow(/ERU_OPENCODE_BIN/);
   });
 
   it("fails closed on empty UI password", () => {
