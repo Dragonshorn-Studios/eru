@@ -29,6 +29,15 @@ describe("forge token crypto", () => {
     expect(() => decryptForgeToken(SECRET, parts.join("."))).toThrow();
     expect(() => decryptForgeToken(SECRET, "not-a-token")).toThrow();
   });
+
+  it("decrypts with any configured key secret, so adopting a dedicated key keeps old rows readable", () => {
+    const legacy = encryptForgeToken("session-secret", "ghp_old");
+    const rotated = encryptForgeToken("forge-key", "ghp_new");
+    expect(decryptForgeToken(["forge-key", "session-secret"], legacy)).toBe("ghp_old");
+    expect(decryptForgeToken(["forge-key", "session-secret"], rotated)).toBe("ghp_new");
+    expect(() => decryptForgeToken(["forge-key"], legacy)).toThrow();
+    expect(() => decryptForgeToken([], legacy)).toThrow();
+  });
 });
 
 describe("verifyGithubRepo", () => {
@@ -44,6 +53,8 @@ describe("verifyGithubRepo", () => {
       ["owner", "has space"],
       ["owner", ""],
       ["-leading", "repo"],
+      ["owner", "."],
+      ["owner", ".."],
     ]) {
       const res = await verifyGithubRepo(owner, name, "", spy);
       expect(res.ok).toBe(false);
