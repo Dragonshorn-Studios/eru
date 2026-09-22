@@ -115,8 +115,8 @@ describe("operator gate", () => {
     expect(body).toContain("Brief");
     expect(body).toContain("Ask");
     expect(body).toContain("connect a repo");
+    expect(body).toContain("not a checkout job, not DeepWiki.com");
     expect(body).not.toContain("Eruka");
-    expect(body).not.toContain("DeepWiki");
     expect(body).not.toContain("WWW-Authenticate");
     const session = verifySession(config.sessionSecret, cookieValue(cookieLine(loggedIn)));
     expect(body).toContain(`name="${CSRF_FIELD}"`);

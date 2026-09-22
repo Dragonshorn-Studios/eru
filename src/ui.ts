@@ -7,6 +7,7 @@ export interface ChromeModel {
   hasRepo: boolean;
   owner: string;
   name: string;
+  path: string;
   lastMappedRef: string | null;
   lastMappedLabel: string;
   csrf: string;
@@ -53,6 +54,27 @@ function topbar(model: ChromeModel): string {
       <span class="grow"></span>
       <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit">Log out</button></form>
     </header>`;
+}
+
+const TABS = [
+  { key: "brief", href: "/", label: "Brief" },
+  { key: "ask", href: "/ask", label: "Ask" },
+] as const;
+
+function isTabActive(key: string, path: string): boolean {
+  if (key === "ask") return path === "/ask";
+  return path === "/" || path.startsWith("/brief");
+}
+
+function masthead(model: ChromeModel): string {
+  const tabs = TABS.map(
+    (tab) =>
+      `<a class="tab" href="${tab.href}"${isTabActive(tab.key, model.path) ? ' aria-current="page"' : ""}>${tab.label}</a>`,
+  ).join("");
+  return `<div class="masthead">
+      <p class="tagline">lasting OpenCode notes — not a checkout job, not DeepWiki.com</p>
+      <nav class="tabs" aria-label="Sections">${tabs}</nav>
+    </div>`;
 }
 
 function foot(model: ChromeModel): string {
@@ -184,6 +206,7 @@ export function appPage(model: ChromeModel): string {
   <a class="skip" href="#main">Skip to content</a>
   <div class="shell">
     ${topbar(model)}
+    ${masthead(model)}
     <main id="main" class="stage">
       <aside class="card" aria-label="Brief">
         <p class="kicker">Brief pages</p>

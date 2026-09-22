@@ -347,6 +347,7 @@ function chromeModel(
     hasRepo: Boolean(repo),
     owner: repo?.owner ?? "",
     name: repo?.name ?? "",
+    path: new URL(c.req.url).pathname,
     lastMappedRef: repo?.lastMappedRef ?? null,
     lastMappedLabel: repo?.lastMappedAt ?? "never",
     csrf: session.csrf,

@@ -7,6 +7,7 @@ describe("chrome copy", () => {
       hasRepo: true,
       owner: "owner",
       name: "repo",
+      path: "/",
       lastMappedRef: "main",
       lastMappedLabel: "never",
       csrf: "csrf-token",
@@ -17,8 +18,10 @@ describe("chrome copy", () => {
     expect(html).toContain("Ask");
     expect(html).toContain("last mapped @main");
     expect(html).toContain("hx-post=\"/ask\"");
+    expect(html).toContain("not a checkout job, not DeepWiki.com");
+    expect(html).toContain('class="tab" href="/" aria-current="page">Brief');
+    expect(html).toContain('class="tab" href="/ask">Ask');
     expect(html).not.toContain("Eruka");
-    expect(html).not.toContain("DeepWiki");
     expect(html).not.toContain("Approve");
     expect(html).not.toContain("Golden");
   });

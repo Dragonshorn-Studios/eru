@@ -103,6 +103,48 @@ body::before {
   font: inherit;
 }
 
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 0 2.4rem;
+  flex-wrap: wrap;
+}
+.tagline {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 0.98rem;
+  margin: 0;
+  color: color-mix(in srgb, var(--ink) 50%, white);
+}
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+}
+.tab {
+  font-size: 0.82rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: color-mix(in srgb, var(--ink) 55%, white);
+  padding: 0.45rem 1.1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.tab[aria-current="page"] {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--moss) 60%, white);
+  background: color-mix(in srgb, var(--mint) 40%, var(--cream));
+}
+.tab:hover { color: var(--ink); }
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--moss) 80%, white);
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+
 .stage {
   display: grid;
   grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.6fr) minmax(240px, 0.95fr);
@@ -342,12 +384,12 @@ export function flowerSeal(size = 42): string {
   const petals = [0, 60, 120, 180, 240, 300]
     .map(
       (deg) =>
-        `<path d="M32 8c3.6 6.2 4.6 12.2 0 18.4C27.4 20.2 28.4 14.2 32 8z" transform="rotate(${deg} 32 32)"/>`,
+        `<path d="M32 8c3.6 6.2 4.6 12.2 0 18.4C27.4 20.2 28.4 14.2 32 8z" transform="rotate(${deg} 32 32)" fill="${TOKENS.mint}"/>`,
     )
     .join("");
   return `<svg class="seal" viewBox="0 0 64 64" width="${size}" height="${size}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-  <g fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="32" cy="32" r="4.2"/>
+  <g stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="32" cy="32" r="4.2" fill="${TOKENS.rose}"/>
     ${petals}
   </g>
 </svg>`;
