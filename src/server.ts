@@ -53,7 +53,9 @@ import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner }
 import {
   appPage,
   askResultFragment,
+  CONNECT_ERRORS,
   connectPage,
+  REFRESH_TARBALL_ERRORS,
   refreshResultFragment,
   loginPage,
   themeCss,
@@ -242,24 +244,11 @@ function requestClientKey(c: Context<Env>): string {
   return clientKey(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"), incoming?.socket?.remoteAddress);
 }
 
-const CONNECT_ERRORS: Record<VerifyError, string> = {
-  invalid: "Owner or repo name is not valid.",
-  notfound: "Could not uniquely resolve that repository. Check owner and name.",
-  auth: "The forge token cannot read that repository, or the request was rate limited. Use a least-privilege token for this repo.",
-  unreachable: "Could not reach the forge. Try again in a moment.",
-};
+
 
 function connectStatus(error: VerifyError): ContentfulStatusCode {
   return error === "unreachable" ? 502 : 400;
 }
-
-const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
-  invalid: "That ref does not look right.",
-  notfound: "The forge could not find that ref or SHA. Check it and try again.",
-  auth: "The forge token cannot read that repository. Reconnect with a least-privilege token.",
-  unreachable: "Could not reach the forge. Try again in a moment.",
-  toobig: "That checkout is too large to map.",
-};
 
 async function refreshNotice(
   db: SqliteDb,
@@ -274,13 +263,15 @@ async function refreshNotice(
   const repo = getPrimaryRepo(db);
   if (!repo) return "Connect a repo before refreshing.";
   const stored = getForgeCredential(db, repo.id);
-  if (!stored) return "Reconnect the repo with a forge token before refreshing.";
-  let token: string;
-  try {
-    token = decryptForgeToken(forgeKeySecrets(config), stored);
-  } catch {
-    console.log("refresh refused: credential unreadable");
-    return "The stored forge credential could not be read — reconnect the repo.";
+  // No stored credential means an anonymous connect — public repos refresh without a token.
+  let token = "";
+  if (stored) {
+    try {
+      token = decryptForgeToken(forgeKeySecrets(config), stored);
+    } catch {
+      console.log("refresh refused: credential unreadable");
+      return "The stored forge credential could not be read — reconnect the repo.";
+    }
   }
 
   const tarball = await fetchRepoTarball(repo.owner, repo.name, ref, token, fetchImpl);
@@ -347,12 +338,15 @@ function chromeModel(
   const pages = repo ? listPages(db, repo.id) : [];
   const page = repo && (slug || pages.length > 0) ? getPage(db, repo.id, slug ?? pages[0].slug) ?? null : null;
   return {
-    hasRepo: Boolean(repo),
-    owner: repo?.owner ?? "",
-    name: repo?.name ?? "",
+    repo: repo
+      ? {
+          owner: repo.owner,
+          name: repo.name,
+          lastMappedRef: repo.lastMappedRef,
+          lastMappedLabel: repo.lastMappedAt ?? "never",
+        }
+      : null,
     path: new URL(c.req.url).pathname,
-    lastMappedRef: repo?.lastMappedRef ?? null,
-    lastMappedLabel: repo?.lastMappedAt ?? "never",
     csrf: session.csrf,
     pages,
     page,

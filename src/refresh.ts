@@ -55,6 +55,7 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       return { ok: true, pages };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
+      console.log("refresh runner failed:", err instanceof Error ? err.message : err);
       return { ok: false, error: "failed" };
     }
   };

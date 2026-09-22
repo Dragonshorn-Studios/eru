@@ -556,9 +556,16 @@ describe("refresh map", () => {
     const bare = app();
     expect(await (await refreshPost(bare, "main")).text()).toContain("Connect a repo");
 
-    const noCred = app();
+    // Anonymous connects refresh without a token: the forge is still called
+    // (no Authorization header) and maps the public-repo outcome honestly.
+    let sawAuth = "unset";
+    const noCred = app({}, async (url, init) => {
+      sawAuth = (init.headers as Record<string, string> | undefined)?.Authorization ?? "none";
+      return new Response("nope", { status: 404 });
+    });
     await seed(noCred, []);
-    expect(await (await refreshPost(noCred, "main")).text()).toContain("forge token");
+    expect(await (await refreshPost(noCred, "main")).text()).toContain("could not find that ref");
+    expect(sawAuth).toBe("none");
   });
 
   it("maps forge and OpenCode failures to honest notices", async () => {

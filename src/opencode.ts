@@ -41,8 +41,13 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       );
       const mapDir = join(workdir, "map");
       await mkdir(mapDir);
+      const used = new Set<string>();
       for (const page of pages) {
-        await writeFile(join(mapDir, `${pageFile(page.slug)}.md`), `# ${page.title}\n\n${page.body}\n`);
+        const base = pageFile(page.slug);
+        let file = base;
+        for (let n = 2; used.has(file); n++) file = `${base}-${n}`;
+        used.add(file);
+        await writeFile(join(mapDir, `${file}.md`), `# ${page.title}\n\n${page.body}\n`);
       }
       const args = ["run", "--format", "default"];
       if (opts.model) args.push("-m", opts.model);
@@ -55,6 +60,7 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       return { ok: true, answer: stdout.trim() };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
+      console.log("ask runner failed:", err instanceof Error ? err.message : err);
       return { ok: false, error: "failed" };
     } finally {
       await rm(workdir, { recursive: true, force: true }).catch(() => {});

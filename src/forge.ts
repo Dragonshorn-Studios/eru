@@ -10,13 +10,13 @@ const TOKEN_FORMAT_VERSION = "v1";
 const KEY_SALT = "eru-forge-token";
 const KEY_INFO = "forge-token-v1";
 
-export function forgeTokenKey(sessionSecret: string): Buffer {
-  return Buffer.from(hkdfSync("sha256", sessionSecret, KEY_SALT, KEY_INFO, 32));
+export function forgeTokenKey(keySecret: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", keySecret, KEY_SALT, KEY_INFO, 32));
 }
 
-export function encryptForgeToken(sessionSecret: string, token: string): string {
+export function encryptForgeToken(keySecret: string, token: string): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", forgeTokenKey(sessionSecret), iv);
+  const cipher = createCipheriv("aes-256-gcm", forgeTokenKey(keySecret), iv);
   const ciphertext = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
   return [TOKEN_FORMAT_VERSION, iv, cipher.getAuthTag(), ciphertext]
     .map((part) => (typeof part === "string" ? part : part.toString("base64url")))
@@ -154,6 +154,10 @@ export async function fetchRepoTarball(
     });
     const location = res.headers.get("location");
     if (res.status >= 300 && res.status < 400 && location) {
+      const host = new URL(location).hostname;
+      if (host !== "github.com" && !host.endsWith(".github.com")) {
+        return { ok: false, error: "unreachable" };
+      }
       res = await fetchImpl(location, { signal: AbortSignal.timeout(TARBALL_FETCH_TIMEOUT_MS) });
     }
   } catch {

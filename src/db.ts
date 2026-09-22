@@ -122,7 +122,7 @@ export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
   return db
     .prepare(
       `SELECT id, forge, owner, name, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
-       FROM repos ORDER BY connected_at DESC, id ASC LIMIT 1`,
+       FROM repos ORDER BY connected_at DESC, id DESC LIMIT 1`,
     )
     .get() as MappedRepo | undefined;
 }

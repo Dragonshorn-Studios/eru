@@ -1,15 +1,18 @@
 import { CSRF_FIELD } from "./auth.js";
 import type { MapPage, PageTocEntry } from "./db.js";
+import type { TarballError, VerifyError } from "./forge.js";
+import { ASK_MAX_QUESTION } from "./opencode.js";
 import { flowerSeal, THEME_CSS } from "./theme.js";
 import { escapeHtml } from "./util.js";
 
 export interface ChromeModel {
-  hasRepo: boolean;
-  owner: string;
-  name: string;
+  repo: {
+    owner: string;
+    name: string;
+    lastMappedRef: string | null;
+    lastMappedLabel: string;
+  } | null;
   path: string;
-  lastMappedRef: string | null;
-  lastMappedLabel: string;
   csrf: string;
   pages: PageTocEntry[];
   page: MapPage | null;
@@ -36,12 +39,12 @@ ${body}
 }
 
 function topbar(model: ChromeModel): string {
-  const repoPill = model.hasRepo
-    ? `<span class="pill">${escapeHtml(model.owner)} / ${escapeHtml(model.name)}</span>`
+  const repoPill = model.repo
+    ? `<span class="pill">${escapeHtml(model.repo.owner)} / ${escapeHtml(model.repo.name)}</span>`
     : `<a class="pill pill-link" href="/connect">connect a repo</a>`;
-  const mapped = model.hasRepo
-    ? model.lastMappedRef
-      ? `<span class="mapped">last mapped @${escapeHtml(model.lastMappedRef)}</span>`
+  const mapped = model.repo
+    ? model.repo.lastMappedRef
+      ? `<span class="mapped">last mapped @${escapeHtml(model.repo.lastMappedRef)}</span>`
       : `<span class="mapped">not mapped yet</span>`
     : "";
   return `<header class="topbar">
@@ -79,7 +82,7 @@ function masthead(model: ChromeModel): string {
 
 function foot(model: ChromeModel): string {
   return `<footer class="foot">
-      <span>Last mapped: ${escapeHtml(model.lastMappedLabel)}</span>
+      <span>Last mapped: ${escapeHtml(model.repo?.lastMappedLabel ?? "never")}</span>
       <span class="sep">|</span>
       <a href="/">Explore</a>
       <span class="sep">|</span>
@@ -121,6 +124,21 @@ export function loginPage(error = ""): string {
 </body>`,
   );
 }
+
+export const CONNECT_ERRORS: Record<VerifyError, string> = {
+  invalid: "Owner or repo name is not valid.",
+  notfound: "Could not uniquely resolve that repository. Check owner and name.",
+  auth: "The forge token cannot read that repository, or the request was rate limited. Use a least-privilege token for this repo.",
+  unreachable: "Could not reach the forge. Try again in a moment.",
+};
+
+export const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
+  invalid: "That ref does not look right.",
+  notfound: "The forge could not find that ref or SHA. Check it and try again.",
+  auth: "The forge token cannot read that repository. Reconnect with a least-privilege token.",
+  unreachable: "Could not reach the forge. Try again in a moment.",
+  toobig: "That checkout is too large to map.",
+};
 
 export function connectPage(model: ChromeModel, error = "", values: { owner?: string; name?: string } = {}): string {
   const flash = error ? `<p class="flash" role="alert">${escapeHtml(error)}</p>` : "";
@@ -173,7 +191,7 @@ function briefToc(model: ChromeModel): string {
 }
 
 function pageArticle(model: ChromeModel): string {
-  if (!model.hasRepo) {
+  if (!model.repo) {
     return `<h2 class="page-title">No repo connected</h2>
         <p class="page-lead">The Brief is a durable map of one repository. <a href="/connect">Connect a repo</a> to start growing it.</p>`;
   }
@@ -216,8 +234,8 @@ export function appPage(model: ChromeModel): string {
         <form class="refresh-form" method="post" action="/refresh" hx-post="/refresh" hx-target="#refresh-result" hx-swap="outerHTML">
           ${csrfInput(model.csrf)}
           <label class="sr-only" for="ref">Ref or SHA to map</label>
-          <input id="ref" type="text" name="ref" placeholder="ref or SHA" autocomplete="off" maxlength="200"${model.hasRepo ? "" : " disabled"}/>
-          <button class="refresh-run" type="submit"${model.hasRepo ? "" : " disabled"}>Refresh map</button>
+          <input id="ref" type="text" name="ref" placeholder="ref or SHA" autocomplete="off" maxlength="200"${model.repo ? "" : " disabled"}/>
+          <button class="refresh-run" type="submit"${model.repo ? "" : " disabled"}>Refresh map</button>
         </form>
         ${refreshNotice}
       </aside>
@@ -229,7 +247,7 @@ export function appPage(model: ChromeModel): string {
         <form class="ask-form" method="post" action="/ask" hx-post="/ask" hx-target="#ask-result" hx-swap="outerHTML">
           ${csrfInput(model.csrf)}
           <label class="sr-only" for="q">What do you want to know?</label>
-          <input id="q" type="text" name="q" placeholder="What do you want to know?" autocomplete="off" maxlength="2000"/>
+          <input id="q" type="text" name="q" placeholder="What do you want to know?" autocomplete="off" maxlength="${ASK_MAX_QUESTION}"/>
           <button class="ask-eru" type="submit">Ask Eru</button>
         </form>
         ${askNotice}
