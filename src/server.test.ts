@@ -10,8 +10,9 @@ import {
   setForgeCredential,
   upsertConnectedRepo,
   upsertPage,
+  type SqliteDb,
 } from "./db.js";
-import { decryptForgeToken, encryptForgeToken } from "./forge.js";
+import { decryptForgeToken, encryptForgeToken, forgeKeySecrets } from "./forge.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
 import type { AskRunner } from "./opencode.js";
@@ -253,6 +254,27 @@ describe("forge connect", () => {
     const body = await home.text();
     expect(body).toContain("Dragonshorn-Studios / eru");
     expect(body).toContain("not mapped yet");
+  });
+
+  it("encrypts the stored token under the dedicated forge key when configured", async () => {
+    const { app: instance, config, db } = app(
+      { forgeKeySecret: "forge-key-material-16+" },
+      githubFetch(200, { owner: { login: "o" }, name: "r" }),
+    );
+    const { cookie, csrf } = await authed(instance, config);
+    const res = await instance.request("/connect", {
+      method: "POST",
+      body: new URLSearchParams({ owner: "o", name: "r", token: "ghp_dedicated", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+
+    const stored = getForgeCredential(db, getPrimaryRepo(db)!.id)!;
+    expect(decryptForgeToken(forgeKeySecrets(config), stored)).toBe("ghp_dedicated");
+    // Encryption used the dedicated key, not the session secret.
+    expect(() => decryptForgeToken(config.sessionSecret, stored)).toThrow();
+    expect(decryptForgeToken(config.forgeKeySecret!, stored)).toBe("ghp_dedicated");
   });
 
   it("rejects invalid owner/repo and unreachable or unresolvable targets without storing anything", async () => {
