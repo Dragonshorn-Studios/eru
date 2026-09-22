@@ -1,0 +1,13 @@
+.git
+.gitignore
+*.md
+!README.md
+node_modules
+dist
+data
+.env
+.env.local
+*.sqlite
+*.db
+coverage
+**/*.test.ts

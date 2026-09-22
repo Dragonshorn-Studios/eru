@@ -1,0 +1,38 @@
+services:
+  eru:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eru:local
+    user: "1000:1000"
+    ports:
+      - "3000:3000"
+    environment:
+      ERU_HOST: 0.0.0.0
+      ERU_PORT: "3000"
+      ERU_SQLITE_PATH: ${ERU_SQLITE_PATH:-/data/eru.sqlite}
+      ERU_UI_PASSWORD: ${ERU_UI_PASSWORD:?set ERU_UI_PASSWORD in .env}
+      ERU_UI_SESSION_SECRET: ${ERU_UI_SESSION_SECRET:?set ERU_UI_SESSION_SECRET in .env}
+    volumes:
+      - eru-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 8
+      start_period: 10s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  eru-data:
