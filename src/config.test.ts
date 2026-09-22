@@ -35,4 +35,15 @@ describe("loadConfig", () => {
   it("fails closed on empty SQLite path", () => {
     expect(() => loadConfig({ ...secrets, ERU_SQLITE_PATH: "   " })).toThrow(/ERU_SQLITE_PATH/);
   });
+
+  it("loads a dedicated forge token key when configured", () => {
+    const cfg = loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: " forge-key-material-16+ " });
+    expect(cfg.forgeKeySecret).toBe("forge-key-material-16+");
+    expect(loadConfig({ ...secrets }).forgeKeySecret).toBeUndefined();
+  });
+
+  it("fails closed on an empty or short forge token key", () => {
+    expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "   " })).toThrow(/ERU_FORGE_TOKEN_KEY/);
+    expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "short" })).toThrow(/too short/);
+  });
 });
