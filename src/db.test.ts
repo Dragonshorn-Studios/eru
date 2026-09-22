@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
   getPage,
   getPrimaryRepo,
   listPages,
+  migrate,
   openDb,
   setForgeCredential,
   upsertConnectedRepo,
@@ -39,6 +41,57 @@ describe("sqlite stub schema", () => {
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
     expect(migrations.n).toBe(2);
     again.close();
+  });
+
+  it("upgrades a legacy 0001-only database with migration 0002", () => {
+    const legacy = new Database(":memory:");
+    legacy.exec(`
+      CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE repos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        forge TEXT NOT NULL DEFAULT 'github',
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        last_mapped_ref TEXT,
+        last_mapped_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (forge, owner, name)
+      );
+      CREATE TABLE pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        mapped_ref TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE (repo_id, slug)
+      );
+      INSERT INTO schema_migrations (name, applied_at) VALUES ('0001_init.sql', '2020-01-01T00:00:00Z');
+      INSERT INTO repos (forge, owner, name, last_mapped_ref, created_at)
+        VALUES ('github', 'legacy', 'repo', 'main', '2020-01-01T00:00:00Z');
+    `);
+
+    migrate(legacy);
+
+    const columns = legacy.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+    expect(columns.some((col) => col.name === "connected_at")).toBe(true);
+    const tables = legacy.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[];
+    expect(tables.map((t) => t.name)).toContain("forge_credentials");
+    expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
+    const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
+    expect(migrations.n).toBe(2);
+
+    // The legacy row is primary while it is the only row; a new connect
+    // displaces it (NULL connected_at sorts last under DESC).
+    upsertConnectedRepo(legacy, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    expect(getPrimaryRepo(legacy)!.name).toBe("box");
+
+    migrate(legacy);
+    const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
+    expect(after.n).toBe(2);
+    legacy.close();
   });
 });
 

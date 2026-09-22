@@ -62,7 +62,7 @@ On start Eru migrates:
 - `repos` — connected forge identity (`owner` / `name` / `forge`) and `last_mapped_ref` (filled by issues #2 and #5)
 - `pages` — durable map pages (`slug`, `title`, `body`, `sort_order`) scoped to a repo (filled by issues #3 and #5)
 
-Re-running migrate is a no-op once those files are recorded. Connect a GitHub repo at `/connect`; the token is stored encrypted and used only for forge reads.
+Re-running migrate is a no-op once those files are recorded. Connect a GitHub repo at `/connect`; the token is stored encrypted (AES-256-GCM; set `ERU_FORGE_TOKEN_KEY` to keep it decryptable across session-secret rotation) and used only for forge reads.
 
 Ask shells out to OpenCode (`ERU_OPENCODE_BIN`, default `opencode`). Each question runs in a throwaway directory holding only the materialized `map/*.md` files, with an `opencode.json` that denies every tool except read/glob/grep (never bash, edit, write, or webfetch). A missing or failing binary fails closed with an operator notice.
 
