@@ -164,12 +164,14 @@ export function createApp(opts: AppOptions): Hono<Env> {
       return html(c, connectPage(chromeModel(c, db), CONNECT_ERRORS[result.error], { owner, name }), connectStatus(result.error));
     }
     const at = new Date(now()).toISOString();
-    const repoId = upsertConnectedRepo(db, result.repo, at);
-    if (token) {
-      setForgeCredential(db, repoId, encryptForgeToken(config.sessionSecret, token), at);
-    } else {
-      deleteForgeCredential(db, repoId);
-    }
+    db.transaction(() => {
+      const repoId = upsertConnectedRepo(db, result.repo, at);
+      if (token) {
+        setForgeCredential(db, repoId, encryptForgeToken(config.forgeKeySecret ?? config.sessionSecret, token), at);
+      } else {
+        deleteForgeCredential(db, repoId);
+      }
+    })();
     console.log(`connected ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
     return c.redirect("/");
   });

@@ -96,8 +96,10 @@ export function migrate(db: SqliteDb): void {
       n: number;
     };
     if (applied.n === 0) {
-      migration.apply(db);
-      recordMigration(db, migration.name);
+      db.transaction(() => {
+        migration.apply(db);
+        recordMigration(db, migration.name);
+      })();
     }
   }
 }
