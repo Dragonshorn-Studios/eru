@@ -22,13 +22,21 @@ import {
   type UiSession,
 } from "./auth.js";
 import type { Config } from "./config.js";
-import { getPrimaryRepo, type SqliteDb } from "./db.js";
+import {
+  deleteForgeCredential,
+  getPrimaryRepo,
+  setForgeCredential,
+  upsertConnectedRepo,
+  type SqliteDb,
+} from "./db.js";
+import { encryptForgeToken, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
 import {
   ASK_STUB_MESSAGE,
   DEFAULT_CHROME,
   PLACEHOLDER_PAGES,
   appPage,
   askStubFragment,
+  connectPage,
   loginPage,
   themeCss,
   type ChromeModel,
@@ -39,6 +47,7 @@ export interface AppOptions {
   db: SqliteDb;
   limiter?: LoginLimiter;
   now?: () => number;
+  fetchImpl?: FetchLike;
 }
 
 type Env = {
@@ -51,6 +60,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const { config, db } = opts;
   const limiter = opts.limiter ?? new LoginLimiter(config.loginLimit, config.loginWindowMs);
   const now = opts.now ?? Date.now;
+  const fetchImpl = opts.fetchImpl ?? fetch;
   const app = new Hono<Env>();
   const htmxJs = loadHtmx();
 
@@ -141,6 +151,29 @@ export function createApp(opts: AppOptions): Hono<Env> {
   app.get("/brief/:slug", (c) => html(c, appPage(chromeModel(c, db, c.req.param("slug")))));
   app.get("/ask", (c) => html(c, appPage(chromeModel(c, db))));
 
+  app.get("/connect", (c) => html(c, connectPage(chromeModel(c, db))));
+
+  app.post("/connect", async (c) => {
+    const body = await c.req.parseBody();
+    const owner = typeof body.owner === "string" ? body.owner.trim() : "";
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    const result = await verifyGithubRepo(owner, name, token, fetchImpl);
+    if (!result.ok) {
+      console.log(`connect refused: ${result.error}`);
+      return html(c, connectPage(chromeModel(c, db), CONNECT_ERRORS[result.error], { owner, name }), connectStatus(result.error));
+    }
+    const at = new Date(now()).toISOString();
+    const repoId = upsertConnectedRepo(db, result.repo, at);
+    if (token) {
+      setForgeCredential(db, repoId, encryptForgeToken(config.sessionSecret, token), at);
+    } else {
+      deleteForgeCredential(db, repoId);
+    }
+    console.log(`connected ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
+    return c.redirect("/");
+  });
+
   app.post("/ask", async (c) => {
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
@@ -163,16 +196,28 @@ function requestClientKey(c: Context<Env>): string {
   return clientKey(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"), incoming?.socket?.remoteAddress);
 }
 
+const CONNECT_ERRORS: Record<VerifyError, string> = {
+  invalid: "Owner or repo name is not valid.",
+  notfound: "Could not uniquely resolve that repository. Check owner and name.",
+  auth: "The forge token cannot read that repository. Use a least-privilege token for this repo.",
+  unreachable: "Could not reach the forge. Try again in a moment.",
+};
+
+function connectStatus(error: VerifyError): ContentfulStatusCode {
+  return error === "unreachable" ? 502 : 400;
+}
+
 function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: string): ChromeModel {
   const session = c.get("session");
   if (!session) throw new Error("eru: missing session");
   const selected = PLACEHOLDER_PAGES.some((page) => page.slug === slug) ? slug! : PLACEHOLDER_PAGES[0].slug;
   const repo = getPrimaryRepo(db);
   return {
-    owner: repo?.owner || DEFAULT_CHROME.owner,
-    name: repo?.name || DEFAULT_CHROME.name,
-    lastMappedRef: repo?.lastMappedRef || DEFAULT_CHROME.lastMappedRef,
-    lastMappedLabel: repo?.lastMappedAt || DEFAULT_CHROME.lastMappedLabel,
+    hasRepo: Boolean(repo),
+    owner: repo?.owner ?? "",
+    name: repo?.name ?? "",
+    lastMappedRef: repo?.lastMappedRef ?? null,
+    lastMappedLabel: repo?.lastMappedAt ?? DEFAULT_CHROME.lastMappedLabel,
     csrf: session.csrf,
     selectedSlug: selected,
     askNotice,

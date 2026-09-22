@@ -5,12 +5,11 @@ import { dirname } from "node:path";
 export type SqliteDb = Database.Database;
 
 /**
- * Stub schema for later tickets.
- *
- * `repos` — forge identity and last mapped ref (issues #2 / #5).
+ * `repos` — forge identity, last mapped ref, and connection time (issues #2 / #5).
+ * `forge_credentials` — forge tokens encrypted at rest (issue #2).
  * `pages` — durable Brief pages (issues #3 / #5). Ask (#4) reads these rows.
  *
- * This migrate does not seed map content, store forge tokens, or run OpenCode.
+ * This migrate does not seed map content or run OpenCode.
  */
 const INIT_SQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -25,8 +24,15 @@ CREATE TABLE IF NOT EXISTS repos (
   name TEXT NOT NULL,
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
+  connected_at TEXT,
   created_at TEXT NOT NULL,
   UNIQUE (forge, owner, name)
+);
+
+CREATE TABLE IF NOT EXISTS forge_credentials (
+  repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+  token_enc TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pages (
@@ -41,6 +47,32 @@ CREATE TABLE IF NOT EXISTS pages (
   UNIQUE (repo_id, slug)
 );
 `;
+
+interface Migration {
+  name: string;
+  apply: (db: SqliteDb) => void;
+}
+
+// For databases created before forge connect landed: add repos.connected_at
+// and the forge_credentials table. Fresh databases already have both via INIT_SQL.
+const MIGRATIONS: Migration[] = [
+  {
+    name: "0002_forge_connect.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (!columns.some((col) => col.name === "connected_at")) {
+        db.exec(`ALTER TABLE repos ADD COLUMN connected_at TEXT`);
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS forge_credentials (
+          repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+          token_enc TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `);
+    },
+  },
+];
 
 export function openDb(path: string): SqliteDb {
   if (path !== ":memory:") {
@@ -58,29 +90,71 @@ export function openDb(path: string): SqliteDb {
 
 export function migrate(db: SqliteDb): void {
   db.exec(INIT_SQL);
-  const applied = db.prepare(`SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?`).get("0001_init.sql") as {
-    n: number;
-  };
+  recordMigration(db, "0001_init.sql");
+  for (const migration of MIGRATIONS) {
+    const applied = db.prepare(`SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?`).get(migration.name) as {
+      n: number;
+    };
+    if (applied.n === 0) {
+      migration.apply(db);
+      recordMigration(db, migration.name);
+    }
+  }
+}
+
+function recordMigration(db: SqliteDb, name: string): void {
+  const applied = db.prepare(`SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?`).get(name) as { n: number };
   if (applied.n === 0) {
-    db.prepare(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(
-      "0001_init.sql",
-      new Date().toISOString(),
-    );
+    db.prepare(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(name, new Date().toISOString());
   }
 }
 
 export interface MappedRepo {
+  id: number;
+  forge: string;
   owner: string;
   name: string;
   lastMappedRef: string | null;
   lastMappedAt: string | null;
 }
 
+/** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
   return db
     .prepare(
-      `SELECT owner, name, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
-       FROM repos ORDER BY id ASC LIMIT 1`,
+      `SELECT id, forge, owner, name, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
+       FROM repos ORDER BY connected_at DESC, id ASC LIMIT 1`,
     )
     .get() as MappedRepo | undefined;
+}
+
+export function upsertConnectedRepo(db: SqliteDb, repo: { forge: string; owner: string; name: string }, at: string): number {
+  const row = db
+    .prepare(
+      `INSERT INTO repos (forge, owner, name, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (forge, owner, name) DO UPDATE SET connected_at = excluded.connected_at
+       RETURNING id`,
+    )
+    .get(repo.forge, repo.owner, repo.name, at, at) as { id: number };
+  return row.id;
+}
+
+export function setForgeCredential(db: SqliteDb, repoId: number, tokenEnc: string, at: string): void {
+  db.prepare(
+    `INSERT INTO forge_credentials (repo_id, token_enc, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT (repo_id) DO UPDATE SET token_enc = excluded.token_enc, updated_at = excluded.updated_at`,
+  ).run(repoId, tokenEnc, at);
+}
+
+export function getForgeCredential(db: SqliteDb, repoId: number): string | undefined {
+  const row = db.prepare(`SELECT token_enc FROM forge_credentials WHERE repo_id = ?`).get(repoId) as
+    | { token_enc: string }
+    | undefined;
+  return row?.token_enc;
+}
+
+export function deleteForgeCredential(db: SqliteDb, repoId: number): void {
+  db.prepare(`DELETE FROM forge_credentials WHERE repo_id = ?`).run(repoId);
 }

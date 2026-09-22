@@ -3,9 +3,10 @@ import { flowerSeal, THEME_CSS } from "./theme.js";
 import { escapeHtml } from "./util.js";
 
 export interface ChromeModel {
+  hasRepo: boolean;
   owner: string;
   name: string;
-  lastMappedRef: string;
+  lastMappedRef: string | null;
   lastMappedLabel: string;
   csrf: string;
   selectedSlug: string;
@@ -45,6 +46,43 @@ ${body}
 </html>`;
 }
 
+function topbar(model: ChromeModel): string {
+  const repoPill = model.hasRepo
+    ? `<span class="pill">${escapeHtml(model.owner)} / ${escapeHtml(model.name)}</span>`
+    : `<a class="pill pill-link" href="/connect">connect a repo</a>`;
+  const mapped = model.hasRepo
+    ? model.lastMappedRef
+      ? `<span class="mapped">last mapped @${escapeHtml(model.lastMappedRef)}</span>`
+      : `<span class="mapped">not mapped yet</span>`
+    : "";
+  return `<header class="topbar">
+      <a class="brand" href="/">
+        ${flowerSeal(42)}
+        <h1>Eru</h1>
+      </a>
+      ${repoPill}
+      ${mapped}
+      <span class="grow"></span>
+      <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit">Log out</button></form>
+    </header>`;
+}
+
+function foot(model: ChromeModel): string {
+  return `<footer class="foot">
+      <span>Last mapped: ${escapeHtml(model.lastMappedLabel)}</span>
+      <span class="sep">|</span>
+      <a href="/">Explore</a>
+      <span class="sep">|</span>
+      <a href="/connect">Connect</a>
+      <span class="sep">|</span>
+      <span>Archive</span>
+      <span class="sep">|</span>
+      <span>Inspire</span>
+      <span class="sep">|</span>
+      <span>About</span>
+    </footer>`;
+}
+
 export function loginPage(error = ""): string {
   const flash = error ? `<p class="flash" role="alert">${escapeHtml(error)}</p>` : "";
   return layout(
@@ -68,6 +106,43 @@ export function loginPage(error = ""): string {
   );
 }
 
+export function connectPage(model: ChromeModel, error = "", values: { owner?: string; name?: string } = {}): string {
+  const flash = error ? `<p class="flash" role="alert">${escapeHtml(error)}</p>` : "";
+  return layout(
+    "Eru — connect a repo",
+    `<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    ${topbar(model)}
+    <main id="main" class="connect">
+      <section class="card connect-card">
+        <h2>Connect a repo</h2>
+        <p class="page-lead">Point Eru at one GitHub repository. A least-privilege token is stored encrypted; it never reaches logs.</p>
+        ${flash}
+        <form class="connect-form" method="post" action="/connect" autocomplete="off">
+          ${csrfInput(model.csrf)}
+          <label class="field">
+            <span>Owner</span>
+            <input type="text" name="owner" required maxlength="39" value="${escapeHtml(values.owner ?? "")}" placeholder="dragonshorn-studios"/>
+          </label>
+          <label class="field">
+            <span>Repo</span>
+            <input type="text" name="name" required maxlength="100" value="${escapeHtml(values.name ?? "")}" placeholder="eru"/>
+          </label>
+          <label class="field">
+            <span>Token <span class="field-hint">optional for public repos</span></span>
+            <input type="password" name="token" autocomplete="off" placeholder="github_pat_..."/>
+          </label>
+          <button class="enter" type="submit">Connect</button>
+        </form>
+      </section>
+    </main>
+    ${foot(model)}
+  </div>
+</body>`,
+  );
+}
+
 export function appPage(model: ChromeModel): string {
   const selected = PLACEHOLDER_PAGES.find((page) => page.slug === model.selectedSlug) ?? PLACEHOLDER_PAGES[0];
   const toc = PLACEHOLDER_PAGES.map((page) => {
@@ -83,16 +158,7 @@ export function appPage(model: ChromeModel): string {
     `<body>
   <a class="skip" href="#main">Skip to content</a>
   <div class="shell">
-    <header class="topbar">
-      <a class="brand" href="/">
-        ${flowerSeal(42)}
-        <h1>Eru</h1>
-      </a>
-      <span class="pill">${escapeHtml(model.owner)} / ${escapeHtml(model.name)}</span>
-      <span class="mapped">last mapped @${escapeHtml(model.lastMappedRef)}</span>
-      <span class="grow"></span>
-      <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit">Log out</button></form>
-    </header>
+    ${topbar(model)}
     <main id="main" class="stage">
       <aside class="card" aria-label="Brief">
         <p class="kicker">Brief pages</p>
@@ -117,17 +183,7 @@ export function appPage(model: ChromeModel): string {
         ${askNotice}
       </section>
     </main>
-    <footer class="foot">
-      <span>Last mapped: ${escapeHtml(model.lastMappedLabel)}</span>
-      <span class="sep">|</span>
-      <a href="/">Explore</a>
-      <span class="sep">|</span>
-      <span>Archive</span>
-      <span class="sep">|</span>
-      <span>Inspire</span>
-      <span class="sep">|</span>
-      <span>About</span>
-    </footer>
+    ${foot(model)}
   </div>
 </body>`,
   );

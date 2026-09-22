@@ -258,6 +258,26 @@ body::before {
   padding: 0.8rem 1.2rem;
   border-radius: 999px;
 }
+.pill-link { text-decoration: none; }
+.connect {
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  flex: 1;
+}
+.connect-card { width: min(480px, 100%); }
+.connect-form { display: flex; flex-direction: column; gap: 1rem; margin-top: 0.6rem; }
+.field { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: color-mix(in srgb, var(--ink) 65%, white); }
+.field-hint { color: color-mix(in srgb, var(--ink) 40%, white); font-size: 0.78rem; }
+.field input {
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, white 75%, var(--cream));
+  border-radius: 0.8rem;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  color: var(--ink);
+}
+.field input::placeholder { color: color-mix(in srgb, var(--ink) 35%, white); }
 .sr-only {
   position: absolute;
   width: 1px;

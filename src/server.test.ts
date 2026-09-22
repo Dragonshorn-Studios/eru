@@ -2,10 +2,11 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
-import { openDb } from "./db.js";
+import { getForgeCredential, getPrimaryRepo, openDb, type SqliteDb } from "./db.js";
+import { decryptForgeToken } from "./forge.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
-import { ASK_STUB_MESSAGE, DEFAULT_CHROME } from "./ui.js";
+import { ASK_STUB_MESSAGE } from "./ui.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -20,9 +21,10 @@ function gatedConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-function app(overrides: Partial<Config> = {}) {
+function app(overrides: Partial<Config> = {}, fetchImpl?: (url: string, init: RequestInit) => Promise<Response>) {
   const config = gatedConfig(overrides);
-  return { app: createApp({ config, db: openDb(":memory:") }), config };
+  const db = openDb(":memory:");
+  return { app: createApp({ config, db, fetchImpl }), config, db };
 }
 
 async function login(instance: ReturnType<typeof app>["app"], password = "test-ui-password") {
@@ -96,8 +98,7 @@ describe("operator gate", () => {
     const body = await res.text();
     expect(body).toContain("Brief");
     expect(body).toContain("Ask");
-    expect(body).toContain(`last mapped @${DEFAULT_CHROME.lastMappedRef}`);
-    expect(body).toContain(`${DEFAULT_CHROME.owner} / ${DEFAULT_CHROME.name}`);
+    expect(body).toContain("connect a repo");
     expect(body).not.toContain("Eruka");
     expect(body).not.toContain("DeepWiki");
     expect(body).not.toContain("WWW-Authenticate");
@@ -169,6 +170,121 @@ describe("operator gate", () => {
     expect((await attempt({ "X-Real-IP": "198.51.100.5" })).status).toBe(401);
     expect((await attempt({ "X-Real-IP": "198.51.100.5" })).status).toBe(401);
     expect((await attempt({ "X-Real-IP": "198.51.100.5" })).status).toBe(429);
+  });
+});
+
+describe("forge connect", () => {
+  function githubFetch(status: number, body: unknown = {}) {
+    return async (_url: string, _init: RequestInit) =>
+      new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  }
+
+  async function authed(instance: ReturnType<typeof app>["app"], config: Config) {
+    const loggedIn = await login(instance);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  it("requires a session for GET /connect and CSRF for POST /connect", async () => {
+    const { app: instance, config } = app();
+    const unauth = await instance.request("/connect", { redirect: "manual" });
+    expect(unauth.status).toBe(302);
+    expect(unauth.headers.get("location")).toBe("/login?next=%2Fconnect");
+
+    const { cookie, csrf } = await authed(instance, config);
+    const noCsrf = await instance.request("/connect", {
+      method: "POST",
+      body: new URLSearchParams({ owner: "a", name: "b" }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(noCsrf.status).toBe(403);
+
+    const page = await instance.request("/connect", { headers: { Cookie: cookie } });
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    expect(body).toContain('name="owner"');
+    expect(body).toContain('name="name"');
+    expect(body).toContain('name="token"');
+    expect(body).toContain(`value="${csrf}"`);
+  });
+
+  it("connects a repo, stores the token encrypted, and shows owner/repo in the topbar", async () => {
+    const { app: instance, config, db } = app(
+      {},
+      githubFetch(200, { owner: { login: "Dragonshorn-Studios" }, name: "eru", full_name: "Dragonshorn-Studios/eru" }),
+    );
+    const { cookie, csrf } = await authed(instance, config);
+    const res = await instance.request("/connect", {
+      method: "POST",
+      body: new URLSearchParams({ owner: "dragonshorn-studios", name: "eru", token: "ghp_secret-token", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+
+    const repo = getPrimaryRepo(db)!;
+    expect(repo.owner).toBe("Dragonshorn-Studios");
+    expect(repo.name).toBe("eru");
+    const stored = getForgeCredential(db, repo.id)!;
+    expect(stored).toBeTruthy();
+    expect(stored).not.toContain("ghp_secret-token");
+    expect(decryptForgeToken(config.sessionSecret, stored)).toBe("ghp_secret-token");
+
+    const home = await instance.request("/", { headers: { Cookie: cookie } });
+    const body = await home.text();
+    expect(body).toContain("Dragonshorn-Studios / eru");
+    expect(body).toContain("not mapped yet");
+  });
+
+  it("rejects invalid owner/repo and unreachable or unresolvable targets without storing anything", async () => {
+    const notFound = app({}, githubFetch(404));
+    const { cookie, csrf } = await authed(notFound.app, notFound.config);
+    for (const [owner, name] of [
+      ["bad owner!", "repo"],
+      ["owner", "x".repeat(101)],
+      ["owner", "missing-repo"],
+    ]) {
+      const res = await notFound.app.request("/connect", {
+        method: "POST",
+        body: new URLSearchParams({ owner, name, [CSRF_FIELD]: csrf }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      });
+      expect(res.status).toBe(400);
+      expect(getPrimaryRepo(notFound.db)).toBeUndefined();
+    }
+
+    const down = app({}, async () => {
+      throw new Error("network down");
+    });
+    const { cookie: cookie2, csrf: csrf2 } = await authed(down.app, down.config);
+    const res = await down.app.request("/connect", {
+      method: "POST",
+      body: new URLSearchParams({ owner: "o", name: "r", [CSRF_FIELD]: csrf2 }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie2 },
+    });
+    expect(res.status).toBe(502);
+    expect(getPrimaryRepo(down.db)).toBeUndefined();
+  });
+
+  it("reconnecting without a token clears the stored credential", async () => {
+    const { app: instance, config, db } = app(
+      {},
+      githubFetch(200, { owner: { login: "o" }, name: "r" }),
+    );
+    const { cookie, csrf } = await authed(instance, config);
+    const post = (token: string) =>
+      instance.request("/connect", {
+        method: "POST",
+        body: new URLSearchParams({ owner: "o", name: "r", token, [CSRF_FIELD]: csrf }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+        redirect: "manual",
+      });
+    expect((await post("ghp_one")).status).toBe(302);
+    const repo = getPrimaryRepo(db)!;
+    expect(getForgeCredential(db, repo.id)).toBeTruthy();
+    expect((await post("")).status).toBe(302);
+    expect(getForgeCredential(db, repo.id)).toBeUndefined();
   });
 });
 
