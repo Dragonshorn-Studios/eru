@@ -21,7 +21,7 @@ Chrome labels: **Brief** · **Ask** · `last mapped @ref`.
 
 ## Stack
 
-Node.js >= 22, TypeScript, Hono, better-sqlite3, HTMX + Tailwind + CSS variables, OpenCode (deny bash/edit/write/webfetch), MIT, Docker Compose. CI on `ubuntu-latest`.
+Node.js >= 22, TypeScript, Hono, better-sqlite3, HTMX + Tailwind + CSS variables, OpenCode (deny bash/edit/write/webfetch), MIT, Docker Compose. CI on a self-hosted runner.
 
 No React SPA for chrome. No Redis. No Postgres. No Kubernetes. No GraphQL.
 

@@ -35,7 +35,7 @@ Never call it Eruka. Never merge into Maomao. Never DeepWiki.com SaaS.
 
 - Extend `src/`. Chrome HTML lives in `src/ui.ts`. Auth lives in `src/auth.ts`. SQLite lives in `src/db.ts`.
 - One PR, one ticketed slice. Do not invent a second auth scheme or a second datastore.
-- Run `npm test` and `npm run typecheck`. CI is GitHub-hosted `ubuntu-latest`; see [CONTRIBUTING.md](CONTRIBUTING.md#ci).
+- Run `npm test` and `npm run typecheck`. CI is GitHub Actions on a self-hosted runner; see [CONTRIBUTING.md](CONTRIBUTING.md#ci).
 - Read **eru-shape** when changing architecture, stack, chrome, or opening a new slice. Read **eru-security** when touching auth, sessions, secrets, CSRF, OpenCode permissions, or forge tokens.
 - If blocked, stop and report.
 

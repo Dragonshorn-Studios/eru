@@ -35,4 +35,4 @@ The process exits. Compose does not report healthy.
 
 ## CI
 
-CI is GitHub Actions on `ubuntu-latest`. The job uses `contents: read` only. It must not mount Compose volumes or production `.env`, and it does not need UI passwords or session secrets.
+CI is GitHub Actions on a self-hosted runner. The job uses `contents: read` only. It must not mount Compose volumes or production `.env`, and it does not need UI passwords or session secrets.

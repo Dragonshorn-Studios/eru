@@ -35,7 +35,7 @@ docker compose up --build
 
 ## CI
 
-GitHub Actions on `ubuntu-latest` (`.github/workflows/ci.yml`): `npm ci`, `npm run typecheck`, `npm test`.
+GitHub Actions on a self-hosted runner (`.github/workflows/ci.yml`): `npm ci`, `npm run typecheck`, `npm test`.
 
 The job uses `permissions: contents: read`. It does not mount Compose volumes or production `.env`, and it does not need UI passwords or session secrets.
 
