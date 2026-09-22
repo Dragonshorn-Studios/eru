@@ -22,22 +22,38 @@ import {
   type UiSession,
 } from "./auth.js";
 import type { Config } from "./config.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import {
   deleteForgeCredential,
+  getForgeCredential,
   getPage,
   getPrimaryRepo,
   listAllPages,
   listPages,
   setForgeCredential,
+  setLastMapped,
   upsertConnectedRepo,
+  upsertPage,
   type SqliteDb,
 } from "./db.js";
-import { encryptForgeToken, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
+import {
+  decryptForgeToken,
+  encryptForgeToken,
+  fetchRepoTarball,
+  verifyGithubRepo,
+  type FetchLike,
+  type TarballError,
+  type VerifyError,
+} from "./forge.js";
 import { ASK_MAX_QUESTION, createOpenCodeRunner, type AskRunner } from "./opencode.js";
+import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
   appPage,
   askResultFragment,
   connectPage,
+  refreshResultFragment,
   loginPage,
   themeCss,
   type ChromeModel,
@@ -50,6 +66,7 @@ export interface AppOptions {
   now?: () => number;
   fetchImpl?: FetchLike;
   askRunner?: AskRunner;
+  refreshRunner?: RefreshRunner;
 }
 
 type Env = {
@@ -66,6 +83,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const ask =
     opts.askRunner ??
     createOpenCodeRunner({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
+  const refresh =
+    opts.refreshRunner ??
+    createMapRefresher({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
   const app = new Hono<Env>();
   const htmxJs = loadHtmx();
 
@@ -194,6 +214,17 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return html(c, appPage(chromeModel(c, db, undefined, notice)));
   });
 
+  app.post("/refresh", async (c) => {
+    const body = await c.req.parseBody();
+    const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+    const notice = await refreshNotice(db, config, fetchImpl, refresh, ref, now);
+    if (c.req.header("HX-Request") === "true") {
+      c.header("Content-Type", "text/html; charset=utf-8");
+      return c.body(refreshResultFragment(notice));
+    }
+    return html(c, appPage(chromeModel(c, db, undefined, undefined, notice)));
+  });
+
   return app;
 }
 
@@ -219,6 +250,72 @@ function connectStatus(error: VerifyError): ContentfulStatusCode {
   return error === "unreachable" ? 502 : 400;
 }
 
+const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
+  invalid: "That ref does not look right.",
+  notfound: "The forge could not find that ref or SHA. Check it and try again.",
+  auth: "The forge token cannot read that repository. Reconnect with a least-privilege token.",
+  unreachable: "Could not reach the forge. Try again in a moment.",
+  toobig: "That checkout is too large to map.",
+};
+
+async function refreshNotice(
+  db: SqliteDb,
+  config: Config,
+  fetchImpl: FetchLike,
+  refresh: RefreshRunner,
+  ref: string,
+  now: () => number,
+): Promise<string> {
+  if (!ref) return "Pick a ref or SHA first.";
+  if (!isValidMapRef(ref)) return "That ref does not look right.";
+  const repo = getPrimaryRepo(db);
+  if (!repo) return "Connect a repo before refreshing.";
+  const stored = getForgeCredential(db, repo.id);
+  if (!stored) return "Reconnect the repo with a forge token before refreshing.";
+  let token: string;
+  try {
+    token = decryptForgeToken(config.sessionSecret, stored);
+  } catch {
+    console.log("refresh refused: credential unreadable");
+    return "The stored forge credential could not be read — reconnect the repo.";
+  }
+
+  const tarball = await fetchRepoTarball(repo.owner, repo.name, ref, token, fetchImpl);
+  if (!tarball.ok) {
+    console.log(`refresh refused: ${tarball.error}`);
+    return REFRESH_TARBALL_ERRORS[tarball.error];
+  }
+
+  const workdir = await mkdtemp(joinPath(tmpdir(), "eru-map-"));
+  try {
+    await extractTarball(tarball.data, workdir);
+  } catch {
+    console.log("refresh failed: could not unpack the checkout");
+    return "Could not unpack the checkout — refresh failed.";
+  }
+
+  try {
+    const result = await refresh(joinPath(workdir, "checkout"), `${repo.owner}/${repo.name}`, ref);
+    if (!result.ok) {
+      console.log(`refresh failed: ${result.error}`);
+      if (result.error === "unconfigured") return "OpenCode is not configured on this host (check ERU_OPENCODE_BIN).";
+      if (result.error === "nomap") return "OpenCode did not return map pages — nothing was stored.";
+      return "OpenCode could not map the checkout — check the service log.";
+    }
+    const at = new Date(now()).toISOString();
+    db.transaction(() => {
+      for (const page of result.pages) {
+        upsertPage(db, repo.id, { ...page, mappedRef: ref }, at);
+      }
+      setLastMapped(db, repo.id, ref, at);
+    })();
+    console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages`);
+    return `Mapped @${ref} — ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.`;
+  } finally {
+    await rm(workdir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function askNotice(db: SqliteDb, ask: AskRunner, q: string): Promise<string> {
   if (!q) return "Ask something first.";
   if (q.length > ASK_MAX_QUESTION) return `Keep questions under ${ASK_MAX_QUESTION} characters.`;
@@ -234,7 +331,13 @@ async function askNotice(db: SqliteDb, ask: AskRunner, q: string): Promise<strin
     : "OpenCode could not answer — check the service log.";
 }
 
-function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: string): ChromeModel {
+function chromeModel(
+  c: Context<Env>,
+  db: SqliteDb,
+  slug?: string,
+  askNotice?: string,
+  refreshNotice?: string,
+): ChromeModel {
   const session = c.get("session");
   if (!session) throw new Error("eru: missing session");
   const repo = getPrimaryRepo(db);
@@ -250,6 +353,7 @@ function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: s
     pages,
     page,
     askNotice,
+    refreshNotice,
   };
 }
 

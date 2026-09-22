@@ -13,6 +13,7 @@ export interface ChromeModel {
   pages: PageTocEntry[];
   page: MapPage | null;
   askNotice?: string;
+  refreshNotice?: string;
 }
 
 function csrfInput(token: string): string {
@@ -170,6 +171,9 @@ function pageArticle(model: ChromeModel): string {
 }
 
 export function appPage(model: ChromeModel): string {
+  const refreshNotice = model.refreshNotice
+    ? `<p class="refresh-result" id="refresh-result">${escapeHtml(model.refreshNotice)}</p>`
+    : `<p class="refresh-result" id="refresh-result" hidden></p>`;
   const askNotice = model.askNotice
     ? `<p class="ask-answer" id="ask-result">${escapeHtml(model.askNotice)}</p>`
     : `<p class="ask-answer" id="ask-result" hidden></p>`;
@@ -185,6 +189,14 @@ export function appPage(model: ChromeModel): string {
         <p class="kicker">Brief pages</p>
         <hr class="rule"/>
         ${briefToc(model)}
+        <hr class="rule"/>
+        <form class="refresh-form" method="post" action="/refresh" hx-post="/refresh" hx-target="#refresh-result" hx-swap="outerHTML">
+          ${csrfInput(model.csrf)}
+          <label class="sr-only" for="ref">Ref or SHA to map</label>
+          <input id="ref" type="text" name="ref" placeholder="ref or SHA" autocomplete="off" maxlength="200"${model.hasRepo ? "" : " disabled"}/>
+          <button class="refresh-run" type="submit"${model.hasRepo ? "" : " disabled"}>Refresh map</button>
+        </form>
+        ${refreshNotice}
       </aside>
       <article class="card" aria-label="Page">
         ${pageArticle(model)}
@@ -212,4 +224,8 @@ export function themeCss(): string {
 
 export function askResultFragment(notice: string): string {
   return `<p class="ask-answer" id="ask-result">${escapeHtml(notice)}</p>`;
+}
+
+export function refreshResultFragment(notice: string): string {
+  return `<p class="refresh-result" id="refresh-result">${escapeHtml(notice)}</p>`;
 }

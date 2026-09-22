@@ -3,6 +3,8 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 export const FORGE_GITHUB = "github";
 export const GITHUB_API_BASE = "https://api.github.com";
 export const FORGE_FETCH_TIMEOUT_MS = 10_000;
+export const TARBALL_FETCH_TIMEOUT_MS = 60_000;
+export const TARBALL_MAX_BYTES = 64 * 1024 * 1024;
 
 const TOKEN_FORMAT_VERSION = "v1";
 const KEY_SALT = "eru-forge-token";
@@ -93,4 +95,62 @@ export async function verifyGithubRepo(
     return { ok: false, error: "notfound" };
   }
   return { ok: true, repo: { forge: FORGE_GITHUB, owner: canonicalOwner, name: canonicalName } };
+}
+
+export type TarballError = "invalid" | "notfound" | "auth" | "unreachable" | "toobig";
+export type TarballResult = { ok: true; data: Buffer } | { ok: false; error: TarballError };
+
+function forgeHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "eru",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+// GitHub 302s tarball downloads to codeload with a signed URL. Handle the
+// redirect manually so the bearer token is only ever sent to api.github.com.
+export async function fetchRepoTarball(
+  owner: string,
+  name: string,
+  ref: string,
+  token: string,
+  fetchImpl: FetchLike = fetch,
+  apiBase: string = GITHUB_API_BASE,
+): Promise<TarballResult> {
+  const url = `${apiBase.replace(/\/+$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(
+    name,
+  )}/tarball/${encodeURIComponent(ref)}`;
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      headers: forgeHeaders(token),
+      signal: AbortSignal.timeout(TARBALL_FETCH_TIMEOUT_MS),
+      redirect: "manual",
+    });
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      res = await fetchImpl(location, { signal: AbortSignal.timeout(TARBALL_FETCH_TIMEOUT_MS) });
+    }
+  } catch {
+    return { ok: false, error: "unreachable" };
+  }
+
+  if (res.status === 404) return { ok: false, error: "notfound" };
+  if (res.status === 401 || res.status === 403) return { ok: false, error: "auth" };
+  if (!res.ok) return { ok: false, error: "unreachable" };
+
+  const length = Number(res.headers.get("content-length") ?? "0");
+  if (length > TARBALL_MAX_BYTES) return { ok: false, error: "toobig" };
+  let data: ArrayBuffer;
+  try {
+    data = await res.arrayBuffer();
+  } catch {
+    return { ok: false, error: "unreachable" };
+  }
+  if (data.byteLength > TARBALL_MAX_BYTES) return { ok: false, error: "toobig" };
+  return { ok: true, data: Buffer.from(data) };
 }

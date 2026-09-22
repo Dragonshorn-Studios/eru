@@ -159,6 +159,10 @@ export function deleteForgeCredential(db: SqliteDb, repoId: number): void {
   db.prepare(`DELETE FROM forge_credentials WHERE repo_id = ?`).run(repoId);
 }
 
+export function setLastMapped(db: SqliteDb, repoId: number, ref: string, at: string): void {
+  db.prepare(`UPDATE repos SET last_mapped_ref = ?, last_mapped_at = ? WHERE id = ?`).run(ref, at, repoId);
+}
+
 export interface PageTocEntry {
   slug: string;
   title: string;

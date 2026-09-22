@@ -2,11 +2,20 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
-import { getForgeCredential, getPrimaryRepo, openDb, upsertConnectedRepo, upsertPage } from "./db.js";
-import { decryptForgeToken } from "./forge.js";
+import {
+  getForgeCredential,
+  getPrimaryRepo,
+  listPages,
+  openDb,
+  setForgeCredential,
+  upsertConnectedRepo,
+  upsertPage,
+} from "./db.js";
+import { decryptForgeToken, encryptForgeToken } from "./forge.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
 import type { AskRunner } from "./opencode.js";
+import type { RefreshRunner } from "./refresh.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -27,10 +36,11 @@ function app(
   overrides: Partial<Config> = {},
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>,
   askRunner?: AskRunner,
+  refreshRunner?: RefreshRunner,
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
-  return { app: createApp({ config, db, fetchImpl, askRunner }), config, db };
+  return { app: createApp({ config, db, fetchImpl, askRunner, refreshRunner }), config, db };
 }
 
 async function login(instance: ReturnType<typeof app>["app"], password = "test-ui-password") {
@@ -299,12 +309,21 @@ describe("forge connect", () => {
 async function seed(
   instance: ReturnType<typeof app>,
   pages: { slug: string; title: string; body: string; sortOrder: number }[],
+  forgeToken?: string,
 ) {
   const repoId = upsertConnectedRepo(
     instance.db,
     { forge: "github", owner: "acme", name: "box" },
     "2026-01-01T00:00:00Z",
   );
+  if (forgeToken) {
+    setForgeCredential(
+      instance.db,
+      repoId,
+      encryptForgeToken(instance.config.sessionSecret, forgeToken),
+      "2026-01-01T00:00:00Z",
+    );
+  }
   for (const page of pages) {
     upsertPage(instance.db, repoId, { ...page, mappedRef: "main" }, "2026-01-01T00:00:00Z");
   }
@@ -437,6 +456,108 @@ describe("ask OpenCode", () => {
     const failed = app({}, undefined, async () => ({ ok: false, error: "failed" as const }));
     await seed(failed, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
     expect(await (await ask(failed, "q")).text()).toContain("could not answer");
+  });
+});
+
+describe("refresh map", () => {
+  async function refreshPost(instance: ReturnType<typeof app>, ref: string, htmx = true) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ ref, [CSRF_FIELD]: session.csrf }),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: `${SESSION_COOKIE}=${token}`,
+        ...(htmx ? { "HX-Request": "true" } : {}),
+      },
+    });
+  }
+
+  async function fakeTarball() {
+    const { execFile } = await import("node:child_process");
+    const { mkdtemp, mkdir, writeFile, readFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { promisify } = await import("node:util");
+    const dir = await mkdtemp(join(tmpdir(), "eru-tar-"));
+    await mkdir(join(dir, "repo-sha"));
+    await writeFile(join(dir, "repo-sha", "index.ts"), "export {};\n");
+    await promisify(execFile)("tar", ["-czf", join(dir, "a.tgz"), "-C", dir, "repo-sha"]);
+    return readFile(join(dir, "a.tgz"));
+  }
+
+  it("upserts pages and last_mapped_ref from OpenCode output", async () => {
+    const tar = await fakeTarball();
+    let sentAuth: string | undefined;
+    let sawCheckout = false;
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      sentAuth = (init.headers as Record<string, string>)?.Authorization;
+      expect(url).toContain("/repos/acme/box/tarball/v2.0");
+      return new Response(new Uint8Array(tar));
+    };
+    const runner = async (workdir: string) => {
+      const { existsSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      sawCheckout = existsSync(join(workdir, "index.ts"));
+      return { ok: true as const, pages: [{ slug: "arch", title: "Arch", body: "mapped", sortOrder: 0 }] };
+    };
+    const instance = app({}, fetchImpl, undefined, runner);
+    await seed(instance, [], "tok");
+    const res = await refreshPost(instance, "v2.0");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Mapped @v2.0 — 1 page.");
+    expect(sentAuth).toBe("Bearer tok");
+    expect(sawCheckout).toBe(true);
+    const repo = getPrimaryRepo(instance.db)!;
+    expect(repo.lastMappedRef).toBe("v2.0");
+    expect(listPages(instance.db, repo.id).map((p) => p.slug)).toEqual(["arch"]);
+
+    const cookie = await seed(instance, []);
+    const home = await instance.app.request("/", { headers: { Cookie: cookie } });
+    expect(await home.text()).toContain("last mapped @v2.0");
+  });
+
+  it("refuses bad refs and missing setup without touching the forge", async () => {
+    let fetched = false;
+    const fetchImpl = async () => {
+      fetched = true;
+      throw new Error("should not fetch");
+    };
+    const instance = app({}, fetchImpl);
+    await seed(instance, [], "tok");
+    expect(await (await refreshPost(instance, "")).text()).toContain("Pick a ref");
+    expect(await (await refreshPost(instance, "../x")).text()).toContain("does not look right");
+    expect(fetched).toBe(false);
+
+    const bare = app();
+    expect(await (await refreshPost(bare, "main")).text()).toContain("Connect a repo");
+
+    const noCred = app();
+    await seed(noCred, []);
+    expect(await (await refreshPost(noCred, "main")).text()).toContain("forge token");
+  });
+
+  it("maps forge and OpenCode failures to honest notices", async () => {
+    const notFound = app({}, async () => new Response("nope", { status: 404 }));
+    await seed(notFound, [], "tok");
+    expect(await (await refreshPost(notFound, "nope")).text()).toContain("could not find that ref");
+
+    const tar = await fakeTarball();
+    const okFetch = async () => new Response(new Uint8Array(tar));
+    const unconfigured = app(
+      {},
+      okFetch,
+      undefined,
+      async () => ({ ok: false as const, error: "unconfigured" as const }),
+    );
+    await seed(unconfigured, [], "tok");
+    expect(await (await refreshPost(unconfigured, "main")).text()).toContain("not configured");
+
+    const nomap = app({}, okFetch, undefined, async () => ({ ok: false as const, error: "nomap" as const }));
+    await seed(nomap, [], "tok");
+    expect(await (await refreshPost(nomap, "main")).text()).toContain("did not return map pages");
   });
 });
 

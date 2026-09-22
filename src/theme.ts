@@ -217,6 +217,42 @@ body::before {
   font-size: 0.92rem;
 }
 .ask-answer { white-space: pre-wrap; }
+
+.refresh-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.refresh-form input[type="text"] {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
+  border-radius: 999px;
+  background: white;
+  color: var(--ink);
+}
+.refresh-form input:disabled { opacity: 0.5; }
+.refresh-run {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--moss) 55%, white);
+  color: color-mix(in srgb, var(--ink) 75%, white);
+  cursor: pointer;
+  align-self: flex-start;
+}
+.refresh-run:disabled { opacity: 0.5; cursor: default; }
+.refresh-result {
+  font-size: 0.85rem;
+  color: color-mix(in srgb, var(--ink) 70%, white);
+  white-space: pre-wrap;
+}
 .flash { color: #7a3b44; }
 
 .foot {
