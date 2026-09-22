@@ -21,14 +21,26 @@ export function encryptForgeToken(sessionSecret: string, token: string): string 
     .join(".");
 }
 
-export function decryptForgeToken(sessionSecret: string, stored: string): string {
+// Accepts one or more candidate key secrets so a credential written under the
+// session secret stays readable after a dedicated ERU_FORGE_TOKEN_KEY is
+// introduced (and vice versa). Encrypt always uses the first configured key.
+export function decryptForgeToken(secrets: string | string[], stored: string): string {
   const [version, ivRaw, tagRaw, ctRaw, ...rest] = stored.split(".");
   if (version !== TOKEN_FORMAT_VERSION || !ivRaw || !tagRaw || !ctRaw || rest.length > 0) {
     throw new Error("eru: forge credential is malformed");
   }
-  const decipher = createDecipheriv("aes-256-gcm", forgeTokenKey(sessionSecret), Buffer.from(ivRaw, "base64url"));
-  decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(ctRaw, "base64url")), decipher.final()]).toString("utf8");
+  const candidates = Array.isArray(secrets) ? secrets : [secrets];
+  let lastError: unknown;
+  for (const secret of candidates) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", forgeTokenKey(secret), Buffer.from(ivRaw, "base64url"));
+      decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
+      return Buffer.concat([decipher.update(Buffer.from(ctRaw, "base64url")), decipher.final()]).toString("utf8");
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("eru: forge credential is unreadable");
 }
 
 export interface ConnectedRepo {
@@ -43,8 +55,9 @@ export type VerifyResult = { ok: true; repo: ConnectedRepo } | { ok: false; erro
 
 // GitHub login names: 1-39 chars, alnum or single hyphens, no leading/trailing hyphen.
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-// Repo names: alnum, dash, underscore, dot.
+// Repo names: alnum, dash, underscore, dot — but never the path segments "." or "..".
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const NAME_REJECT = new Set([".", ".."]);
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -55,7 +68,7 @@ export async function verifyGithubRepo(
   fetchImpl: FetchLike = fetch,
   apiBase: string = GITHUB_API_BASE,
 ): Promise<VerifyResult> {
-  if (!OWNER_RE.test(owner) || !NAME_RE.test(name)) {
+  if (!OWNER_RE.test(owner) || !NAME_RE.test(name) || NAME_REJECT.has(name)) {
     return { ok: false, error: "invalid" };
   }
   const url = `${apiBase.replace(/\/+$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;

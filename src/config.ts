@@ -13,6 +13,7 @@ export interface Config {
   sqlitePath: string;
   uiPassword: string;
   sessionSecret: string;
+  forgeKeySecret?: string;
   loginLimit: number;
   loginWindowMs: number;
 }
@@ -44,6 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sqlitePath,
     uiPassword,
     sessionSecret,
+    forgeKeySecret: env.ERU_FORGE_TOKEN_KEY?.trim() || undefined,
     loginLimit: DEFAULT_LOGIN_LIMIT,
     loginWindowMs: DEFAULT_LOGIN_WINDOW_MS,
   };

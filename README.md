@@ -62,7 +62,7 @@ On start Eru migrates:
 - `repos` — connected forge identity (`owner` / `name` / `forge`) and `last_mapped_ref` (filled by issues #2 and #5)
 - `pages` — durable map pages (`slug`, `title`, `body`, `sort_order`) scoped to a repo (filled by issues #3 and #5)
 
-Re-running migrate is a no-op once those files are recorded. This shell does not seed map content or run OpenCode. Connect a GitHub repo at `/connect`; the token is stored encrypted and used only for forge reads.
+Re-running migrate is a no-op once those files are recorded. This shell does not seed map content or run OpenCode. Connect a GitHub repo at `/connect`; the token is stored encrypted (AES-256-GCM; set `ERU_FORGE_TOKEN_KEY` to keep it decryptable across session-secret rotation) and used only for forge reads.
 
 ## License
 
