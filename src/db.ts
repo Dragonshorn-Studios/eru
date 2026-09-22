@@ -11,6 +11,14 @@ export type SqliteDb = Database.Database;
  *
  * This migrate does not seed map content or run OpenCode.
  */
+const FORGE_CREDENTIALS_SQL = `
+CREATE TABLE IF NOT EXISTS forge_credentials (
+  repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+  token_enc TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 const INIT_SQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
@@ -29,12 +37,7 @@ CREATE TABLE IF NOT EXISTS repos (
   UNIQUE (forge, owner, name)
 );
 
-CREATE TABLE IF NOT EXISTS forge_credentials (
-  repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
-  token_enc TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
+${FORGE_CREDENTIALS_SQL}
 CREATE TABLE IF NOT EXISTS pages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
@@ -63,13 +66,7 @@ const MIGRATIONS: Migration[] = [
       if (!columns.some((col) => col.name === "connected_at")) {
         db.exec(`ALTER TABLE repos ADD COLUMN connected_at TEXT`);
       }
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS forge_credentials (
-          repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
-          token_enc TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-      `);
+      db.exec(FORGE_CREDENTIALS_SQL);
     },
   },
 ];
