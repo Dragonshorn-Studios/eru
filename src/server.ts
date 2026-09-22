@@ -276,7 +276,7 @@ async function refreshNotice(
   if (!stored) return "Reconnect the repo with a forge token before refreshing.";
   let token: string;
   try {
-    token = decryptForgeToken(config.sessionSecret, stored);
+    token = decryptForgeToken([config.forgeKeySecret, config.sessionSecret].filter((s): s is string => Boolean(s)), stored);
   } catch {
     console.log("refresh refused: credential unreadable");
     return "The stored forge credential could not be read — reconnect the repo.";
