@@ -39,13 +39,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_UI_SESSION_SECRET is too short");
   }
 
+  let forgeKeySecret: string | undefined;
+  if (env.ERU_FORGE_TOKEN_KEY !== undefined) {
+    const trimmed = env.ERU_FORGE_TOKEN_KEY.trim();
+    if (!trimmed) {
+      throw new Error("eru: ERU_FORGE_TOKEN_KEY is empty");
+    }
+    if (trimmed.length < MIN_SESSION_SECRET) {
+      throw new Error("eru: ERU_FORGE_TOKEN_KEY is too short");
+    }
+    forgeKeySecret = trimmed;
+  }
+
   return {
     host,
     port,
     sqlitePath,
     uiPassword,
     sessionSecret,
-    forgeKeySecret: env.ERU_FORGE_TOKEN_KEY?.trim() || undefined,
+    forgeKeySecret,
     loginLimit: DEFAULT_LOGIN_LIMIT,
     loginWindowMs: DEFAULT_LOGIN_WINDOW_MS,
   };

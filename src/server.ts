@@ -31,7 +31,7 @@ import {
   upsertConnectedRepo,
   type SqliteDb,
 } from "./db.js";
-import { encryptForgeToken, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
+import { encryptForgeToken, forgeKeySecrets, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
 import {
   ASK_STUB_MESSAGE,
   appPage,
@@ -171,7 +171,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     db.transaction(() => {
       const repoId = upsertConnectedRepo(db, result.repo, at);
       if (token) {
-        setForgeCredential(db, repoId, encryptForgeToken(config.forgeKeySecret ?? config.sessionSecret, token), at);
+        setForgeCredential(db, repoId, encryptForgeToken(forgeKeySecrets(config)[0], token), at);
       } else {
         deleteForgeCredential(db, repoId);
       }
@@ -205,7 +205,7 @@ function requestClientKey(c: Context<Env>): string {
 const CONNECT_ERRORS: Record<VerifyError, string> = {
   invalid: "Owner or repo name is not valid.",
   notfound: "Could not uniquely resolve that repository. Check owner and name.",
-  auth: "The forge token cannot read that repository. Use a least-privilege token for this repo.",
+  auth: "The forge token cannot read that repository, or the request was rate limited. Use a least-privilege token for this repo.",
   unreachable: "Could not reach the forge. Try again in a moment.",
 };
 
