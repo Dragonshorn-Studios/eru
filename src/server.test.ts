@@ -2,7 +2,7 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
-import { getForgeCredential, getPrimaryRepo, openDb, type SqliteDb } from "./db.js";
+import { getForgeCredential, getPrimaryRepo, openDb, upsertConnectedRepo, upsertPage } from "./db.js";
 import { decryptForgeToken } from "./forge.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
@@ -285,6 +285,74 @@ describe("forge connect", () => {
     expect(getForgeCredential(db, repo.id)).toBeTruthy();
     expect((await post("")).status).toBe(302);
     expect(getForgeCredential(db, repo.id)).toBeUndefined();
+  });
+});
+
+describe("durable Brief pages", () => {
+  async function seed(instance: ReturnType<typeof app>, pages: { slug: string; title: string; body: string; sortOrder: number }[]) {
+    const repoId = upsertConnectedRepo(
+      instance.db,
+      { forge: "github", owner: "acme", name: "box" },
+      "2026-01-01T00:00:00Z",
+    );
+    for (const page of pages) {
+      upsertPage(instance.db, repoId, { ...page, mappedRef: "main" }, "2026-01-01T00:00:00Z");
+    }
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    return `${SESSION_COOKIE}=${token}`;
+  }
+
+  const PAGES = [
+    { slug: "arch", title: "Architecture", body: "arch body line\nmore arch", sortOrder: 0 },
+    { slug: "auth", title: "Auth", body: "auth body", sortOrder: 1 },
+  ];
+
+  it("lists stored pages in the Brief TOC and shows the first page body", async () => {
+    const instance = app();
+    const cookie = await seed(instance, PAGES);
+    const res = await instance.app.request("/brief", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("/brief/arch");
+    expect(body).toContain("/brief/auth");
+    expect(body).toContain("arch body line");
+    expect(body).toContain("aria-current=\"page\"");
+  });
+
+  it("renders the requested page and escapes its body", async () => {
+    const instance = app();
+    const cookie = await seed(instance, [
+      { slug: "x", title: "XSS", body: "<script>alert(1)</script>", sortOrder: 0 },
+    ]);
+    const res = await instance.app.request("/brief/x", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).not.toContain("<script>alert(1)");
+  });
+
+  it("404s an unknown slug when pages exist", async () => {
+    const instance = app();
+    const cookie = await seed(instance, PAGES);
+    const res = await instance.app.request("/brief/nope", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(404);
+  });
+
+  it("shows a clear empty state before the first refresh and a connect prompt without a repo", async () => {
+    const instance = app();
+    const withRepo = await seed(instance, []);
+    const res = await instance.app.request("/brief", { headers: { Cookie: withRepo } });
+    const body = await res.text();
+    expect(body).toContain("No map pages yet");
+
+    const fresh = app();
+    const loggedIn = await login(fresh.app);
+    const cookie = `${SESSION_COOKIE}=${cookieValue(cookieLine(loggedIn))}`;
+    const res2 = await fresh.app.request("/brief", { headers: { Cookie: cookie } });
+    const body2 = await res2.text();
+    expect(body2).toContain("No repo connected");
+    expect(body2).toContain("/connect");
   });
 });
 

@@ -158,3 +158,55 @@ export function getForgeCredential(db: SqliteDb, repoId: number): string | undef
 export function deleteForgeCredential(db: SqliteDb, repoId: number): void {
   db.prepare(`DELETE FROM forge_credentials WHERE repo_id = ?`).run(repoId);
 }
+
+export interface PageTocEntry {
+  slug: string;
+  title: string;
+}
+
+export interface MapPage {
+  id: number;
+  slug: string;
+  title: string;
+  body: string;
+  sortOrder: number;
+  mappedRef: string | null;
+  updatedAt: string;
+}
+
+export function listPages(db: SqliteDb, repoId: number): PageTocEntry[] {
+  return db
+    .prepare(`SELECT slug, title FROM pages WHERE repo_id = ? ORDER BY sort_order ASC, id ASC`)
+    .all(repoId) as PageTocEntry[];
+}
+
+export function getPage(db: SqliteDb, repoId: number, slug: string): MapPage | undefined {
+  return db
+    .prepare(
+      `SELECT id, slug, title, body, sort_order AS sortOrder, mapped_ref AS mappedRef, updated_at AS updatedAt
+       FROM pages WHERE repo_id = ? AND slug = ?`,
+    )
+    .get(repoId, slug) as MapPage | undefined;
+}
+
+export function upsertPage(
+  db: SqliteDb,
+  repoId: number,
+  page: { slug: string; title: string; body: string; sortOrder: number; mappedRef?: string | null },
+  at: string,
+): number {
+  const row = db
+    .prepare(
+      `INSERT INTO pages (repo_id, slug, title, body, sort_order, mapped_ref, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo_id, slug) DO UPDATE SET
+         title = excluded.title,
+         body = excluded.body,
+         sort_order = excluded.sort_order,
+         mapped_ref = excluded.mapped_ref,
+         updated_at = excluded.updated_at
+       RETURNING id`,
+    )
+    .get(repoId, page.slug, page.title, page.body, page.sortOrder, page.mappedRef ?? null, at) as { id: number };
+  return row.id;
+}

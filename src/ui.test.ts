@@ -10,7 +10,8 @@ describe("chrome copy", () => {
       lastMappedRef: "main",
       lastMappedLabel: "never",
       csrf: "csrf-token",
-      selectedSlug: "architecture",
+      pages: [{ slug: "architecture", title: "Architecture" }],
+      page: { id: 1, slug: "architecture", title: "Architecture", body: "body", sortOrder: 0, mappedRef: "main", updatedAt: "" },
     });
     expect(html).toContain("Brief");
     expect(html).toContain("Ask");

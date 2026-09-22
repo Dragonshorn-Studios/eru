@@ -55,7 +55,7 @@ Compose publishes `:3000` for a **private host or tunnel**. Do not put this stac
 
 SQLite lives on the `eru-data` volume at `/data/eru.sqlite`.
 
-## Schema (stub)
+## Schema
 
 On start Eru migrates:
 

@@ -24,7 +24,9 @@ import {
 import type { Config } from "./config.js";
 import {
   deleteForgeCredential,
+  getPage,
   getPrimaryRepo,
+  listPages,
   setForgeCredential,
   upsertConnectedRepo,
   type SqliteDb,
@@ -32,8 +34,6 @@ import {
 import { encryptForgeToken, verifyGithubRepo, type FetchLike, type VerifyError } from "./forge.js";
 import {
   ASK_STUB_MESSAGE,
-  DEFAULT_CHROME,
-  PLACEHOLDER_PAGES,
   appPage,
   askStubFragment,
   connectPage,
@@ -148,7 +148,11 @@ export function createApp(opts: AppOptions): Hono<Env> {
 
   app.get("/", (c) => html(c, appPage(chromeModel(c, db))));
   app.get("/brief", (c) => html(c, appPage(chromeModel(c, db))));
-  app.get("/brief/:slug", (c) => html(c, appPage(chromeModel(c, db, c.req.param("slug")))));
+  app.get("/brief/:slug", (c) => {
+    const model = chromeModel(c, db, c.req.param("slug"));
+    if (!model.page && model.pages.length > 0) return c.text("page not found", 404);
+    return html(c, appPage(model));
+  });
   app.get("/ask", (c) => html(c, appPage(chromeModel(c, db))));
 
   app.get("/connect", (c) => html(c, connectPage(chromeModel(c, db))));
@@ -210,16 +214,18 @@ function connectStatus(error: VerifyError): ContentfulStatusCode {
 function chromeModel(c: Context<Env>, db: SqliteDb, slug?: string, askNotice?: string): ChromeModel {
   const session = c.get("session");
   if (!session) throw new Error("eru: missing session");
-  const selected = PLACEHOLDER_PAGES.some((page) => page.slug === slug) ? slug! : PLACEHOLDER_PAGES[0].slug;
   const repo = getPrimaryRepo(db);
+  const pages = repo ? listPages(db, repo.id) : [];
+  const page = repo && (slug || pages.length > 0) ? getPage(db, repo.id, slug ?? pages[0].slug) ?? null : null;
   return {
     hasRepo: Boolean(repo),
     owner: repo?.owner ?? "",
     name: repo?.name ?? "",
     lastMappedRef: repo?.lastMappedRef ?? null,
-    lastMappedLabel: repo?.lastMappedAt ?? DEFAULT_CHROME.lastMappedLabel,
+    lastMappedLabel: repo?.lastMappedAt ?? "never",
     csrf: session.csrf,
-    selectedSlug: selected,
+    pages,
+    page,
     askNotice,
   };
 }

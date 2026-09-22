@@ -170,6 +170,17 @@ body::before {
   font-family: var(--font-sans);
   font-size: 0.95rem;
 }
+.page-body {
+  white-space: pre-wrap;
+  line-height: 1.65;
+  font-size: 0.95rem;
+  color: color-mix(in srgb, var(--ink) 85%, white);
+}
+.empty-hint {
+  text-align: center;
+  font-size: 0.85rem;
+  color: color-mix(in srgb, var(--ink) 45%, white);
+}
 .cmd code {
   font-family: var(--font-mono);
   background: color-mix(in srgb, var(--mint) 35%, var(--cream));

@@ -1,4 +1,5 @@
 import { CSRF_FIELD } from "./auth.js";
+import type { MapPage, PageTocEntry } from "./db.js";
 import { flowerSeal, THEME_CSS } from "./theme.js";
 import { escapeHtml } from "./util.js";
 
@@ -9,24 +10,10 @@ export interface ChromeModel {
   lastMappedRef: string | null;
   lastMappedLabel: string;
   csrf: string;
-  selectedSlug: string;
+  pages: PageTocEntry[];
+  page: MapPage | null;
   askNotice?: string;
 }
-
-export const PLACEHOLDER_PAGES = [
-  { slug: "architecture", numeral: "I", title: "Architecture" },
-  { slug: "auth", numeral: "II", title: "Auth" },
-  { slug: "data", numeral: "III", title: "Data" },
-  { slug: "jobs", numeral: "IV", title: "Jobs" },
-  { slug: "deploy", numeral: "V", title: "Deploy" },
-] as const;
-
-export const DEFAULT_CHROME = {
-  owner: "owner",
-  name: "repo",
-  lastMappedRef: "main",
-  lastMappedLabel: "never",
-} as const;
 
 function csrfInput(token: string): string {
   return `<input type="hidden" name="${CSRF_FIELD}" value="${escapeHtml(token)}"/>`;
@@ -81,6 +68,12 @@ function foot(model: ChromeModel): string {
       <span class="sep">|</span>
       <span>About</span>
     </footer>`;
+}
+
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"] as const;
+
+function numeral(index: number): string {
+  return ROMAN[index] ?? String(index + 1);
 }
 
 export function loginPage(error = ""): string {
@@ -143,12 +136,40 @@ export function connectPage(model: ChromeModel, error = "", values: { owner?: st
   );
 }
 
+function briefToc(model: ChromeModel): string {
+  if (model.pages.length === 0) {
+    return `<p class="empty-hint">Nothing to leaf through yet.</p>`;
+  }
+  const items = model.pages
+    .map((page, i) => {
+      const current = model.page?.slug === page.slug ? ` aria-current="page"` : "";
+      return `<li><a href="/brief/${escapeHtml(page.slug)}"${current}><span class="spark" aria-hidden="true">✦</span> ${numeral(i)} ${escapeHtml(page.title)}</a></li>`;
+    })
+    .join("");
+  return `<nav><ul class="toc">${items}</ul></nav>`;
+}
+
+function pageArticle(model: ChromeModel): string {
+  if (!model.hasRepo) {
+    return `<h2 class="page-title">No repo connected</h2>
+        <p class="page-lead">The Brief is a durable map of one repository. <a href="/connect">Connect a repo</a> to start growing it.</p>`;
+  }
+  if (model.pages.length === 0) {
+    return `<h2 class="page-title">No map pages yet</h2>
+        <p class="page-lead">This repo has not been mapped. Refresh lands here once the map grows its first pages.</p>`;
+  }
+  if (!model.page) {
+    return `<h2 class="page-title">Page not found</h2>
+        <p class="page-lead">That page is not in the map. Pick one from the Brief list.</p>`;
+  }
+  const page = model.page;
+  const mapped = page.mappedRef ? `<p class="path">mapped @${escapeHtml(page.mappedRef)}</p>` : "";
+  return `<h2 class="page-title">${escapeHtml(page.title)}</h2>
+        ${mapped}
+        <div class="page-body">${escapeHtml(page.body)}</div>`;
+}
+
 export function appPage(model: ChromeModel): string {
-  const selected = PLACEHOLDER_PAGES.find((page) => page.slug === model.selectedSlug) ?? PLACEHOLDER_PAGES[0];
-  const toc = PLACEHOLDER_PAGES.map((page) => {
-    const current = page.slug === selected.slug ? ` aria-current="page"` : "";
-    return `<li><a href="/brief/${escapeHtml(page.slug)}"${current}><span class="spark" aria-hidden="true">✦</span> ${escapeHtml(page.numeral)} ${escapeHtml(page.title)}</a></li>`;
-  }).join("");
   const askNotice = model.askNotice
     ? `<p class="ask-stub" id="ask-result">${escapeHtml(model.askNotice)}</p>`
     : `<p class="ask-stub" id="ask-result" hidden></p>`;
@@ -163,14 +184,10 @@ export function appPage(model: ChromeModel): string {
       <aside class="card" aria-label="Brief">
         <p class="kicker">Brief pages</p>
         <hr class="rule"/>
-        <nav><ul class="toc">${toc}</ul></nav>
+        ${briefToc(model)}
       </aside>
       <article class="card" aria-label="Page">
-        <h2 class="page-title">Self-Hosted Repo Map</h2>
-        <p class="page-lead">A comprehensive overview of the system architecture, detailing the core components and their interactions.</p>
-        <p class="path">src / architecture / core / mapping.go</p>
-        <p class="cmd">Execute the setup using the command: <code>selfhost --init</code></p>
-        <p class="ask-stub">Map pages persist in SQLite. Refresh and real Brief bodies land in later tickets.</p>
+        ${pageArticle(model)}
       </article>
       <section class="card" aria-label="Ask">
         <h2>Ask</h2>
