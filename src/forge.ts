@@ -23,6 +23,14 @@ export function encryptForgeToken(sessionSecret: string, token: string): string 
     .join(".");
 }
 
+// One home for the forge key orderings: encrypt uses secrets[0] (the dedicated
+// key when configured, else the session secret); decrypt tries every configured
+// secret so rows survive key adoption. Callers must use this for both sides.
+export function forgeKeySecrets(config: { forgeKeySecret?: string; sessionSecret: string }): string[] {
+  const list = [config.forgeKeySecret, config.sessionSecret].filter((s): s is string => Boolean(s));
+  return [...new Set(list)];
+}
+
 // Accepts one or more candidate key secrets so a credential written under the
 // session secret stays readable after a dedicated ERU_FORGE_TOKEN_KEY is
 // introduced (and vice versa). Encrypt always uses the first configured key.
