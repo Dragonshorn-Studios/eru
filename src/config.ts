@@ -52,15 +52,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   let forgeKeySecret: string | undefined;
-  if (env.ERU_FORGE_TOKEN_KEY !== undefined) {
-    const trimmed = env.ERU_FORGE_TOKEN_KEY.trim();
-    if (!trimmed) {
-      throw new Error("eru: ERU_FORGE_TOKEN_KEY is empty");
-    }
-    if (trimmed.length < MIN_SESSION_SECRET) {
+  const forgeKeyEnv = env.ERU_FORGE_TOKEN_KEY?.trim();
+  if (forgeKeyEnv) {
+    if (forgeKeyEnv.length < MIN_SESSION_SECRET) {
       throw new Error("eru: ERU_FORGE_TOKEN_KEY is too short");
     }
-    forgeKeySecret = trimmed;
+    forgeKeySecret = forgeKeyEnv;
   }
 
   const openCodeBin = requiredOrDefault(env, "ERU_OPENCODE_BIN", DEFAULT_OPENCODE_BIN);

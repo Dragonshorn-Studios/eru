@@ -69,8 +69,8 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...secrets }).forgeKeySecret).toBeUndefined();
   });
 
-  it("fails closed on an empty or short forge token key", () => {
-    expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "   " })).toThrow(/ERU_FORGE_TOKEN_KEY/);
+  it("ignores a blank forge token key and rejects a short one", () => {
+    expect(loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "   " }).forgeKeySecret).toBeUndefined();
     expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "short" })).toThrow(/too short/);
   });
 });

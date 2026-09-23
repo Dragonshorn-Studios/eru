@@ -43,6 +43,14 @@ npm run build
 npm start
 ```
 
+## Install (one line)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Dragonshorn-Studios/eru/main/scripts/install.sh | bash
+```
+
+The installer clones (or reuses) a checkout at `~/.eru`, writes a `.env` (mode 600) with generated `ERU_UI_PASSWORD`, `ERU_UI_SESSION_SECRET`, and `ERU_FORGE_TOKEN_KEY`, optionally bind-mounts a GitHub App PEM, downloads the OpenCode CLI onto the `eru-opencode` volume, and starts Compose. Flags: `--non-interactive` (env-driven), `--skip-start`, `--upgrade-opencode`, `--force`. Provider API keys are saved write-only on `/config`, not in `.env`.
+
 ## Compose
 
 ```sh
@@ -51,9 +59,11 @@ cp .env.example .env
 docker compose up --build
 ```
 
+Bare `docker compose up` does not seed the OpenCode CLI — with an empty `eru-opencode` volume the default `ERU_OPENCODE_BIN=/opt/opencode/.opencode/bin/opencode` is missing and Ask/Refresh fail closed with an operator notice. Run `./scripts/install.sh` (or `./scripts/install.sh --upgrade-opencode` later) to seed it, or point `ERU_OPENCODE_BIN` at a binary you provide.
+
 Compose publishes `:3000` for a **private host or tunnel**. Do not put this stack on the public internet with only `/health`. The operator UI is a shared-password gate at `/login` (not Basic Auth). The process is non-root.
 
-SQLite lives on the `eru-data` volume at `/data/eru.sqlite`.
+SQLite lives on the `eru-data` volume at `/data/eru.sqlite`, next to OpenCode's `auth.json` under `/data/xdg`.
 
 ## Schema
 
