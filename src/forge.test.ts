@@ -71,11 +71,11 @@ describe("verifyGithubRepo", () => {
       "dragonshorn-studios",
       "ERU",
       "",
-      fakeFetch(200, { owner: { login: "Dragonshorn-Studios" }, name: "eru" }),
+      fakeFetch(200, { owner: { login: "Dragonshorn-Studios" }, name: "eru", default_branch: "trunk" }),
     );
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.repo).toEqual({ forge: "github", owner: "Dragonshorn-Studios", name: "eru" });
+      expect(res.repo).toEqual({ forge: "github", owner: "Dragonshorn-Studios", name: "eru", defaultBranch: "trunk" });
     }
   });
 

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS repos (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   auth_source TEXT NOT NULL DEFAULT 'manual',
+  default_branch TEXT,
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
   connected_at TEXT,
@@ -95,6 +96,15 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    name: "0005_default_branch.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (!columns.some((col) => col.name === "default_branch")) {
+        db.exec(`ALTER TABLE repos ADD COLUMN default_branch TEXT`);
+      }
+    },
+  },
 ];
 
 export function openDb(path: string): SqliteDb {
@@ -140,13 +150,14 @@ export interface MappedRepo {
   owner: string;
   name: string;
   authSource: string;
+  defaultBranch: string | null;
   lastMappedRef: string | null;
   lastMappedAt: string | null;
 }
 
 export type RepoAuthSource = "manual" | "app";
 
-const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
+const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
 
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
@@ -167,20 +178,21 @@ export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
 
 export function upsertConnectedRepo(
   db: SqliteDb,
-  repo: { forge: string; owner: string; name: string },
+  repo: { forge: string; owner: string; name: string; defaultBranch?: string },
   at: string,
   authSource: RepoAuthSource = "manual",
 ): number {
   const row = db
     .prepare(
-      `INSERT INTO repos (forge, owner, name, auth_source, connected_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO repos (forge, owner, name, auth_source, default_branch, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (forge, owner, name) DO UPDATE SET
          connected_at = excluded.connected_at,
-         auth_source = excluded.auth_source
+         auth_source = excluded.auth_source,
+         default_branch = COALESCE(excluded.default_branch, repos.default_branch)
        RETURNING id`,
     )
-    .get(repo.forge, repo.owner, repo.name, authSource, at, at) as { id: number };
+    .get(repo.forge, repo.owner, repo.name, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
   return row.id;
 }
 

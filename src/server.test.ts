@@ -538,13 +538,13 @@ describe("ask OpenCode", () => {
 });
 
 describe("refresh map", () => {
-  async function refreshPost(instance: ReturnType<typeof app>, ref: string, htmx = true) {
+  async function refreshPost(instance: ReturnType<typeof app>, htmx = true) {
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(instance.config.sessionSecret, token)!;
     return instance.app.request("/refresh", {
       method: "POST",
-      body: new URLSearchParams({ ref, [CSRF_FIELD]: session.csrf }),
+      body: new URLSearchParams({ [CSRF_FIELD]: session.csrf }),
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Cookie: `${SESSION_COOKIE}=${token}`,
@@ -559,7 +559,7 @@ describe("refresh map", () => {
     let sawCheckout = false;
     const fetchImpl = async (url: string, init: RequestInit) => {
       sentAuth = (init.headers as Record<string, string>)?.Authorization;
-      expect(url).toContain("/repos/acme/box/tarball/v2.0");
+      expect(url).toContain("/repos/acme/box/tarball/main");
       return new Response(new Uint8Array(tar));
     };
     const runner = async (workdir: string) => {
@@ -570,34 +570,29 @@ describe("refresh map", () => {
     };
     const instance = app({}, fetchImpl, undefined, runner);
     await seed(instance, [], "tok");
-    const res = await refreshPost(instance, "v2.0");
+    const res = await refreshPost(instance);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Mapped @v2.0 — 1 page.");
+    expect(await res.text()).toContain("Mapped @main — 1 page.");
     expect(sentAuth).toBe("Bearer tok");
     expect(sawCheckout).toBe(true);
     const repo = getPrimaryRepo(instance.db)!;
-    expect(repo.lastMappedRef).toBe("v2.0");
+    expect(repo.lastMappedRef).toBe("main");
     expect(listPages(instance.db, repo.id).map((p) => p.slug)).toEqual(["arch"]);
 
     const cookie = await seed(instance, []);
     const home = await instance.app.request("/", { headers: { Cookie: cookie } });
-    expect(await home.text()).toContain("last mapped @v2.0");
+    expect(await home.text()).toContain("last mapped @main");
   });
 
-  it("refuses bad refs and missing setup without touching the forge", async () => {
+  it("refuses missing setup without touching the forge", async () => {
     let fetched = false;
     const fetchImpl = async () => {
       fetched = true;
       throw new Error("should not fetch");
     };
-    const instance = app({}, fetchImpl);
-    await seed(instance, [], "tok");
-    expect(await (await refreshPost(instance, "")).text()).toContain("Pick a ref");
-    expect(await (await refreshPost(instance, "../x")).text()).toContain("does not look right");
+    const bare = app({}, fetchImpl);
+    expect(await (await refreshPost(bare)).text()).toContain("Connect a repo");
     expect(fetched).toBe(false);
-
-    const bare = app();
-    expect(await (await refreshPost(bare, "main")).text()).toContain("Connect a repo");
 
     // Anonymous connects refresh without a token: the forge is still called
     // (no Authorization header) and maps the public-repo outcome honestly.
@@ -607,14 +602,47 @@ describe("refresh map", () => {
       return new Response("nope", { status: 404 });
     });
     await seed(noCred, []);
-    expect(await (await refreshPost(noCred, "main")).text()).toContain("could not find that ref");
+    expect(await (await refreshPost(noCred)).text()).toContain("could not find that ref");
     expect(sawAuth).toBe("none");
+  });
+
+  it("maps the stored default branch and falls back to master when main 404s", async () => {
+    const tar = await fakeTarball();
+    const seen: string[] = [];
+    const fetchImpl = async (url: string) => {
+      seen.push(url);
+      if (url.endsWith("/tarball/master")) return new Response(new Uint8Array(tar));
+      return new Response("nope", { status: 404 });
+    };
+    const runner = async () => ({ ok: true as const, pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }] });
+    const instance = app({}, fetchImpl, undefined, runner);
+    await seed(instance, [], "tok");
+    const res = await refreshPost(instance);
+    expect(await res.text()).toContain("Mapped @master — 1 page.");
+    expect(seen.some((u) => u.endsWith("/tarball/main"))).toBe(true);
+    expect(seen.some((u) => u.endsWith("/tarball/master"))).toBe(true);
+
+    const seenTrunk: string[] = [];
+    const trunkFetch = async (url: string) => {
+      seenTrunk.push(url);
+      return new Response(new Uint8Array(tar));
+    };
+    const trunk = app({}, trunkFetch, undefined, runner);
+    const repoId = upsertConnectedRepo(
+      trunk.db,
+      { forge: "github", owner: "acme", name: "box", defaultBranch: "trunk" },
+      "2026-01-01T00:00:00Z",
+    );
+    setForgeCredential(trunk.db, repoId, encryptForgeToken(trunk.config.sessionSecret, "tok"), "2026-01-01T00:00:00Z");
+    const res2 = await refreshPost(trunk);
+    expect(await res2.text()).toContain("Mapped @trunk — 1 page.");
+    expect(seenTrunk.every((u) => u.endsWith("/tarball/trunk"))).toBe(true);
   });
 
   it("maps forge and OpenCode failures to honest notices", async () => {
     const notFound = app({}, async () => new Response("nope", { status: 404 }));
     await seed(notFound, [], "tok");
-    expect(await (await refreshPost(notFound, "nope")).text()).toContain("could not find that ref");
+    expect(await (await refreshPost(notFound)).text()).toContain("could not find that ref");
 
     const tar = await fakeTarball();
     const okFetch = async () => new Response(new Uint8Array(tar));
@@ -625,11 +653,11 @@ describe("refresh map", () => {
       async () => ({ ok: false as const, error: "unconfigured" as const }),
     );
     await seed(unconfigured, [], "tok");
-    expect(await (await refreshPost(unconfigured, "main")).text()).toContain("not configured");
+    expect(await (await refreshPost(unconfigured)).text()).toContain("not configured");
 
     const nomap = app({}, okFetch, undefined, async () => ({ ok: false as const, error: "nomap" as const }));
     await seed(nomap, [], "tok");
-    expect(await (await refreshPost(nomap, "main")).text()).toContain("did not return map pages");
+    expect(await (await refreshPost(nomap)).text()).toContain("did not return map pages");
   });
 });
 

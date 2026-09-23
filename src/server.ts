@@ -56,6 +56,7 @@ import {
   type GithubAppClient,
   type GithubAppCredentials,
   type TarballError,
+  type TarballResult,
   type VerifyError,
 } from "./forge.js";
 import {
@@ -310,9 +311,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
 
   app.post("/refresh", async (c) => {
-    const body = await c.req.parseBody();
-    const ref = typeof body.ref === "string" ? body.ref.trim() : "";
-    const notice = await refreshNotice(db, config, fetchImpl, refresh, ref, now, githubApp);
+    const notice = await refreshNotice(db, config, fetchImpl, refresh, now, githubApp);
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(refreshResultFragment(notice));
@@ -614,22 +613,35 @@ async function refreshNotice(
   config: Config,
   fetchImpl: FetchLike,
   refresh: RefreshRunner,
-  ref: string,
   now: () => number,
   githubAppFactory: () => GithubAppClient | null,
 ): Promise<string> {
-  if (!ref) return "Pick a ref or SHA first.";
-  if (!isValidMapRef(ref)) return "That ref does not look right.";
   const repo = selectedRepo(db);
   if (!repo) return "Connect a repo before refreshing.";
   const resolved = await repoToken(db, config, fetchImpl, githubAppFactory, repo);
   if (!resolved.ok) return resolved.notice;
   const token = resolved.token;
 
-  const tarball = await fetchRepoTarball(repo.owner, repo.name, ref, token, fetchImpl);
-  if (!tarball.ok) {
-    console.log(`refresh refused: ${tarball.error}`);
-    return REFRESH_TARBALL_ERRORS[tarball.error];
+  // Always re-map the default branch: the one recorded at connect, else
+  // main (master) for repos connected before it was stored.
+  const candidates = repo.defaultBranch ? [repo.defaultBranch] : ["main", "master"];
+  let ref = "";
+  let tarball: TarballResult | undefined;
+  for (const candidate of candidates) {
+    if (!isValidMapRef(candidate)) return "The stored default branch does not look like a ref.";
+    tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
+    if (tarball.ok) {
+      ref = candidate;
+      break;
+    }
+    if (tarball.error !== "notfound") {
+      console.log(`refresh refused: ${tarball.error}`);
+      return REFRESH_TARBALL_ERRORS[tarball.error];
+    }
+  }
+  if (!tarball || !tarball.ok) {
+    console.log("refresh refused: notfound");
+    return REFRESH_TARBALL_ERRORS.notfound;
   }
 
   const workdir = await mkdtemp(joinPath(tmpdir(), "eru-map-"));
@@ -706,6 +718,7 @@ function chromeModel(
           id: repo.id,
           owner: repo.owner,
           name: repo.name,
+          defaultBranch: repo.defaultBranch,
           lastMappedRef: repo.lastMappedRef,
           lastMappedLabel: repo.lastMappedAt ?? "never",
         }

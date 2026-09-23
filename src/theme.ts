@@ -321,22 +321,58 @@ body::before {
 }
 .ask-answer { white-space: pre-wrap; }
 
-.refresh-form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  margin-top: 1rem;
-}
-.refresh-form input[type="text"] {
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  padding: 0.6rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
+.brief-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.brief-head .kicker { margin-bottom: 0; }
+.refresh-form { margin: 0; }
+.refresh-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
   border-radius: 999px;
-  background: white;
-  color: var(--ink);
+  background: color-mix(in srgb, white 60%, var(--mint));
+  color: color-mix(in srgb, var(--ink) 60%, white);
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
 }
-.refresh-form input:disabled { opacity: 0.5; }
+.refresh-icon:hover:not(:disabled) {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--mint) 55%, white);
+}
+.refresh-icon:disabled { opacity: 0.45; cursor: default; }
+.stage.mapping { grid-template-columns: 1fr; }
+.stage.mapping > aside,
+.stage.mapping > article,
+.stage.mapping > section[aria-label="Ask"] { display: none; }
+.mapping-card {
+  max-width: 560px;
+  margin: 2rem auto;
+  align-self: start;
+  text-align: center;
+  padding: 2.4rem 2.2rem;
+}
+.mapping-seal { display: flex; justify-content: center; margin-bottom: 1rem; color: var(--moss); }
+.mapping-card h2 { font-family: var(--font-serif); font-weight: 500; font-size: 1.5rem; margin: 0 0 0.5rem; }
+.mapping-sub { font-family: var(--font-mono); font-size: 0.82rem; color: color-mix(in srgb, var(--ink) 50%, white); margin: 0 0 1.4rem; }
+.mapping-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lavender) 45%, var(--cream));
+  overflow: hidden;
+}
+.mapping-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mint) 75%, var(--moss));
+  animation: mapping-progress 90s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+@keyframes mapping-progress {
+  0% { width: 4%; }
+  100% { width: 92%; }
+}
+.mapping-note { margin-top: 1.1rem; }
 .refresh-run {
   font-family: var(--font-sans);
   font-size: 0.8rem;

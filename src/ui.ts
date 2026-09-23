@@ -17,6 +17,7 @@ export interface ChromeModel {
     id: number;
     owner: string;
     name: string;
+    defaultBranch: string | null;
     lastMappedRef: string | null;
     lastMappedLabel: string;
   } | null;
@@ -524,16 +525,17 @@ export function appPage(model: ChromeModel): string {
     ${masthead(model)}
     <main id="main" class="stage">
       <aside class="card" aria-label="Brief">
-        <p class="kicker">Brief pages</p>
+        <div class="brief-head">
+          <p class="kicker">Brief pages</p>
+          <form class="refresh-form" method="post" action="/refresh" hx-post="/refresh" hx-target="#refresh-result" hx-swap="outerHTML">
+            ${csrfInput(model.csrf)}
+            <button class="refresh-icon" type="submit" title="Refresh map @${escapeHtml(model.repo?.defaultBranch ?? "main")}" aria-label="Refresh map"${model.repo ? "" : " disabled"}>
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            </button>
+          </form>
+        </div>
         <hr class="rule"/>
         ${briefToc(model)}
-        <hr class="rule"/>
-        <form class="refresh-form" method="post" action="/refresh" hx-post="/refresh" hx-target="#refresh-result" hx-swap="outerHTML">
-          ${csrfInput(model.csrf)}
-          <label class="sr-only" for="ref">Ref or SHA to map</label>
-          <input id="ref" type="text" name="ref" placeholder="ref or SHA" autocomplete="off" maxlength="200"${model.repo ? "" : " disabled"}/>
-          <button class="refresh-run" type="submit"${model.repo ? "" : " disabled"}>Refresh map</button>
-        </form>
         ${refreshNotice}
       </aside>
       <article class="card" aria-label="Page">
@@ -549,7 +551,47 @@ export function appPage(model: ChromeModel): string {
         </form>
         ${askNotice}
       </section>
+      <section class="card mapping-card" hidden aria-live="polite" aria-label="Refresh in progress">
+        <div class="mapping-seal" aria-hidden="true">✽</div>
+        <h2 id="mapping-line">Getting curious about this repo…</h2>
+        <p class="mapping-sub">${model.repo ? `mapping ${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)} @${escapeHtml(model.repo.defaultBranch ?? "main")}` : "mapping the repository"}</p>
+        <div class="mapping-bar"><div class="mapping-fill"></div></div>
+        <p class="field-hint mapping-note">OpenCode is reading the checkout — this can take a few minutes.</p>
+      </section>
     </main>
+    <script>
+    (() => {
+      const stage = document.getElementById("main");
+      const form = stage?.querySelector(".refresh-form");
+      const line = document.getElementById("mapping-line");
+      const card = stage?.querySelector(".mapping-card");
+      if (!stage || !form || !line || !card) return;
+      const LINES = [
+        "Getting curious about this repo…",
+        "Reading the map…",
+        "One more page — the good stuff is in the footnotes…",
+        "Curiosity needs a moment to steep…",
+        "Almost there — filing the pages…",
+      ];
+      let timer = 0;
+      let i = 0;
+      form.addEventListener("htmx:beforeRequest", () => {
+        stage.classList.add("mapping");
+        card.hidden = false;
+        i = 0;
+        line.textContent = LINES[0];
+        timer = window.setInterval(() => {
+          i = (i + 1) % LINES.length;
+          line.textContent = LINES[i];
+        }, 4200);
+      });
+      form.addEventListener("htmx:afterRequest", () => {
+        window.clearInterval(timer);
+        stage.classList.remove("mapping");
+        card.hidden = true;
+      });
+    })();
+    </script>
     ${foot(model)}
   </div>
 </body>`,

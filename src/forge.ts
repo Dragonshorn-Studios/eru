@@ -57,6 +57,7 @@ export interface ConnectedRepo {
   forge: string;
   owner: string;
   name: string;
+  defaultBranch?: string;
 }
 
 export type VerifyError = "invalid" | "notfound" | "auth" | "unreachable";
@@ -115,7 +116,16 @@ export async function verifyGithubRepo(
   if (canonicalOwner.toLowerCase() !== owner.toLowerCase() || canonicalName.toLowerCase() !== name.toLowerCase()) {
     return { ok: false, error: "notfound" };
   }
-  return { ok: true, repo: { forge: FORGE_GITHUB, owner: canonicalOwner, name: canonicalName } };
+    const defaultBranch = (body as { default_branch?: unknown }).default_branch;
+  return {
+    ok: true,
+    repo: {
+      forge: FORGE_GITHUB,
+      owner: canonicalOwner,
+      name: canonicalName,
+      defaultBranch: typeof defaultBranch === "string" && defaultBranch ? defaultBranch : undefined,
+    },
+  };
 }
 
 export type TarballError = "invalid" | "notfound" | "auth" | "unreachable" | "toobig";
@@ -198,6 +208,7 @@ export interface AppRepo {
   owner: string;
   name: string;
   privateRepo: boolean;
+  defaultBranch?: string;
 }
 
 const APP_JWT_TTL_SECONDS = 600;
@@ -336,7 +347,13 @@ export function createGithubAppClient(
         const owner = (row as { owner?: { login?: unknown } })?.owner?.login;
         const name = (row as { name?: unknown })?.name;
         if (typeof owner === "string" && typeof name === "string") {
-          repos.push({ owner, name, privateRepo: (row as { private?: unknown })?.private === true });
+                    const defaultBranch = (row as { default_branch?: unknown }).default_branch;
+          repos.push({
+            owner,
+            name,
+            privateRepo: (row as { private?: unknown })?.private === true,
+            defaultBranch: typeof defaultBranch === "string" && defaultBranch ? defaultBranch : undefined,
+          });
         }
       }
       if (rows.length < 100) return { ok: true, value: repos };
