@@ -44,7 +44,7 @@ Open `http://127.0.0.1:3000/login`. Ask and Refresh need an `opencode` binary �
 
 **Ask/Refresh say OpenCode is missing under Compose.** A bare `docker compose up` never seeds the `eru-opencode` volume — the default `ERU_OPENCODE_BIN` (`/opt/opencode/.opencode/bin/opencode`) points at nothing. Fix with `./scripts/install.sh --upgrade-opencode`, or point `ERU_OPENCODE_BIN` at a binary you provide.
 
-**`EACCES` on `/run/secrets/github-app.pem`.** The bind mount keeps host ownership; the container runs as uid 1000. Fix on the host: `chown 1000:1000 github-app.pem && chmod 400 github-app.pem`, then `docker compose up -d --force-recreate`.
+**`ERU_GITHUB_APP_PRIVATE_KEY_FILE is unreadable` at boot.** The bind mount preserves host ownership and mode; the container reads the PEM as uid 1000. A `400`/`600` file owned by a different host uid is denied. Fix on the host: `sudo chown 1000:1000 github-app.pem && chmod 400 github-app.pem` (or `setfacl -m u:1000:r github-app.pem`), then `docker compose up -d --force-recreate`. The installer applies this automatically — re-running it repairs permissions — and its pre-flight check verifies the PEM is readable inside the container before `up`. If the file exists but was created *after* the first `up`, recreate so Docker stops mounting a stale directory.
 
 **Container won't start / exits immediately.** Eru fails closed on missing or invalid config — check `docker compose logs eru` for the exact `eru: ERU_*` error. Common causes: `ERU_UI_PASSWORD` or `ERU_UI_SESSION_SECRET` unset, a session secret under 16 bytes, or a GitHub App ID without a private key.
 
