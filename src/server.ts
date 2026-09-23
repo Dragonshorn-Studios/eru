@@ -132,6 +132,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
   }
   const app = new Hono<Env>();
   const htmxJs = loadHtmx();
+  const faviconIco = loadPublicAsset("favicon.ico");
+  const faviconPng = loadPublicAsset("favicon-32.png");
+  const appleTouchIcon = loadPublicAsset("apple-touch-icon.png");
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -185,6 +188,24 @@ export function createApp(opts: AppOptions): Hono<Env> {
     c.header("Content-Type", "text/javascript; charset=utf-8");
     c.header("Cache-Control", "public, max-age=86400");
     return c.body(htmxJs);
+  });
+
+  app.get("/favicon.ico", (c) => {
+    c.header("Content-Type", "image/x-icon");
+    c.header("Cache-Control", "public, max-age=604800, immutable");
+    return c.body(faviconIco);
+  });
+
+  app.get("/assets/favicon-32.png", (c) => {
+    c.header("Content-Type", "image/png");
+    c.header("Cache-Control", "public, max-age=604800, immutable");
+    return c.body(faviconPng);
+  });
+
+  app.get("/assets/apple-touch-icon.png", (c) => {
+    c.header("Content-Type", "image/png");
+    c.header("Cache-Control", "public, max-age=604800, immutable");
+    return c.body(appleTouchIcon);
   });
 
   app.get("/login", (c) => {
@@ -745,4 +766,18 @@ function loadHtmx(): string {
     if (existsSync(path)) return readFileSync(path, "utf8");
   }
   throw new Error("eru: htmx.min.js is missing");
+}
+
+function loadPublicAsset(name: string): ArrayBuffer {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "assets", name),
+    join(process.cwd(), "dist", "assets", name),
+    join(process.cwd(), "assets", name),
+    join(here, "..", "assets", name),
+  ];
+  for (const path of candidates) {
+    if (existsSync(path)) return Uint8Array.from(readFileSync(path)).buffer;
+  }
+  throw new Error(`eru: ${name} is missing`);
 }

@@ -37,6 +37,9 @@ describe("session helpers", () => {
   it("keeps health, login, and an exact asset allowlist public", () => {
     expect(isPublicPath("/health")).toBe(true);
     expect(isPublicPath("/login")).toBe(true);
+    expect(isPublicPath("/favicon.ico")).toBe(true);
+    expect(isPublicPath("/assets/favicon-32.png")).toBe(true);
+    expect(isPublicPath("/assets/apple-touch-icon.png")).toBe(true);
     expect(isPublicPath("/assets/eru.css")).toBe(true);
     expect(isPublicPath("/assets/htmx.min.js")).toBe(true);
     expect(isPublicPath("/assets/")).toBe(false);

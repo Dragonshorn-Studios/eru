@@ -41,7 +41,11 @@ function layout(title: string, body: string): string {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="theme-color" content="#F7F5F0"/>
   <title>${escapeHtml(title)}</title>
+  <link rel="icon" href="/favicon.ico" sizes="any"/>
+  <link rel="icon" type="image/png" href="/assets/favicon-32.png" sizes="32x32"/>
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"/>
   <link rel="stylesheet" href="/assets/eru.css"/>
   <script src="/assets/htmx.min.js" defer></script>
 </head>

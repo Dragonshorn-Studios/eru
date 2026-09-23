@@ -87,7 +87,15 @@ export function cookieSecure(url: string, forwardedProto?: string | null): boole
   }
 }
 
-const PUBLIC_PATHS = new Set(["/health", "/login", "/assets/eru.css", "/assets/htmx.min.js"]);
+const PUBLIC_PATHS = new Set([
+  "/health",
+  "/login",
+  "/favicon.ico",
+  "/assets/favicon-32.png",
+  "/assets/apple-touch-icon.png",
+  "/assets/eru.css",
+  "/assets/htmx.min.js",
+]);
 
 export function isPublicPath(path: string): boolean {
   return PUBLIC_PATHS.has(path);

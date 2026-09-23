@@ -680,6 +680,21 @@ describe("locked tokens", () => {
     expect(unknown.status).toBe(302);
     expect(unknown.headers.get("location")).toBe("/login?next=%2Fassets%2Fsecret.css");
   });
+
+  it("serves browser icons publicly with long-lived cache headers", async () => {
+    const { app: instance } = app();
+    for (const [path, contentType] of [
+      ["/favicon.ico", "image/x-icon"],
+      ["/assets/favicon-32.png", "image/png"],
+      ["/assets/apple-touch-icon.png", "image/png"],
+    ] as const) {
+      const res = await instance.request(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain(contentType);
+      expect(res.headers.get("cache-control")).toContain("immutable");
+      expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(100);
+    }
+  });
 });
 
 describe("docs lock", () => {

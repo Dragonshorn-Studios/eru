@@ -27,6 +27,8 @@ describe("chrome copy", () => {
   it("renders the operator gate without Basic Auth", () => {
     const html = loginPage("Refused.");
     expect(html).toContain("I'm curious about this repo.");
+    expect(html).toContain('rel="icon" href="/favicon.ico"');
+    expect(html).toContain('rel="apple-touch-icon" href="/assets/apple-touch-icon.png"');
     expect(html).toContain('name="password"');
     expect(html).not.toContain("WWW-Authenticate");
     expect(html).toContain("Refused.");
