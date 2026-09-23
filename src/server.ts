@@ -66,6 +66,7 @@ import {
   type AskRunner,
   type ModelDiscovery,
 } from "./opencode.js";
+import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
   APP_ERRORS,
@@ -91,6 +92,7 @@ export interface AppOptions {
   askRunner?: AskRunner;
   refreshRunner?: RefreshRunner;
   modelDiscovery?: ModelDiscovery;
+  providerStore?: ProviderCredentialStore;
 }
 
 type Env = {
@@ -113,6 +115,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const modelDiscovery =
     opts.modelDiscovery ?? createModelDiscovery({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs });
   void modelDiscovery.refresh();
+  const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
 
   // Reused across requests so the minted installation token survives between
   // calls; rebuilt whenever the resolved app credentials change.
@@ -317,7 +320,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return html(c, appPage(chromeModel(c, db, config, undefined, undefined, notice)));
   });
 
-  app.get("/config", (c) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery))));
+  app.get("/config", (c) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers))));
 
   app.post("/config/models", async (c) => {
     const body = await c.req.parseBody();
@@ -326,7 +329,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     if ((askModel && !isValidModelName(askModel)) || (mapModel && !isValidModelName(mapModel))) {
       return html(
         c,
-        configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), "That is not a model name."),
+        configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), "That is not a model name."),
         400,
       );
     }
@@ -350,7 +353,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const appId = typeof body.app_id === "string" ? body.app_id.trim() : "";
     const installationId = typeof body.app_installation_id === "string" ? body.app_installation_id.trim() : "";
     const privateKey = typeof body.app_private_key === "string" ? body.app_private_key.trim() : "";
-    const reject = (notice: string) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), notice), 400);
+    const reject = (notice: string) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), 400);
     if (!appId || !/^\d+$/.test(appId)) return reject("App ID is a number — find it on the app's GitHub settings page.");
     if (installationId && !/^\d+$/.test(installationId)) return reject("Installation ID is a number, or leave it empty to auto-detect.");
     if (privateKey && !privateKey.includes("PRIVATE KEY")) return reject("That does not look like a PEM private key.");
@@ -373,11 +376,28 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.redirect("/config");
   });
 
+  const renderConfig = (c: Context<Env>, notice = "", status: ContentfulStatusCode = 200) =>
+    html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), status);
+
+  app.post("/config/providers/:id", async (c) => {
+    const body = await c.req.parseBody();
+    const key = typeof body.key === "string" ? body.key : "";
+    const result = providers.set(c.req.param("id"), key);
+    if (!result.ok) return renderConfig(c, result.error, 400);
+    return c.redirect("/config#providers");
+  });
+
+  app.post("/config/providers/:id/delete", (c) => {
+    const result = providers.delete(c.req.param("id"));
+    if (!result.ok) return renderConfig(c, result.error, 400);
+    return c.redirect("/config#providers");
+  });
+
   app.post("/config/user", async (c) => {
     const body = await c.req.parseBody();
     const user = typeof body.ui_user === "string" ? body.ui_user.trim() : "";
     if (user && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(user)) {
-      return html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), "That is not a GitHub login."), 400);
+      return html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), "That is not a GitHub login."), 400);
     }
     if (user) setSetting(db, SETTING_UI_USER, user, new Date(now()).toISOString());
     else deleteSetting(db, SETTING_UI_USER);
@@ -520,7 +540,7 @@ function modelRow(
   return { label, field, envKey, effective: resolved.value ?? "", source: resolved.source, stored };
 }
 
-function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery): ConfigView {
+function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, providers: ProviderCredentialStore): ConfigView {
   const app = resolveGithubApp(config, db);
   const storedAppId = getSetting(db, SETTING_APP_ID) ?? "";
   const storedInstall = getSetting(db, SETTING_APP_INSTALL) ?? "";
@@ -563,6 +583,8 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery): Co
       getSetting(db, SETTING_MAP_MODEL) ?? "",
     ),
     discovered: discovery.snapshot(),
+    providers: providers.list(),
+    authPath: providers.path,
   };
 }
 

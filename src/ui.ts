@@ -3,6 +3,7 @@ import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { flowerSeal, THEME_CSS } from "./theme.js";
+import type { ProviderCredentialStatus } from "./providers.js";
 import { escapeHtml } from "./util.js";
 
 export interface ChromeRepo {
@@ -190,6 +191,8 @@ export interface ConfigView {
   ask: ConfigModelRow;
   map: ConfigModelRow;
   discovered: { models: string[]; error?: string; updatedAt?: string };
+  providers: ProviderCredentialStatus[];
+  authPath: string;
 }
 
 export const APP_ERRORS: Record<AppError, string> = {
@@ -214,6 +217,51 @@ function configModelField(row: ConfigModelRow): string {
   </label>`;
 }
 
+function providerBadge(provider: ProviderCredentialStatus): string {
+  if (provider.source === "environment") {
+    return `<span class="badge badge-env">key from env <code>${escapeHtml(provider.envVar ?? "")}</code></span>`;
+  }
+  if (provider.source === "stored") {
+    return `<span class="badge badge-stored">stored in auth.json ···${escapeHtml(provider.fingerprint ?? "")}</span>`;
+  }
+  return `<span class="badge badge-none">no key</span>`;
+}
+
+function providerCard(provider: ProviderCredentialStatus, csrf: string): string {
+  const actionId = escapeHtml(encodeURIComponent(provider.id));
+  const stored = provider.source === "stored";
+  const help = provider.helpUrl
+    ? `<p class="field-hint">${escapeHtml(provider.helpLabel ?? "Get a key")}: <a href="${escapeHtml(provider.helpUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(provider.helpUrl.replace(/^https?:\/\//, ""))}</a></p>`
+    : "";
+  const envNote =
+    provider.source === "environment"
+      ? `<p class="field-hint">the env var wins over a stored key — unset it to use the stored one</p>`
+      : "";
+  return `<li class="provider-card" data-provider="${escapeHtml(`${provider.id} ${provider.label}`.toLowerCase())}">
+      <div class="provider-head">
+        <div><span class="provider-id">${escapeHtml(provider.id)}</span><h4>${escapeHtml(provider.label)}</h4></div>
+        ${providerBadge(provider)}
+      </div>
+      ${help}
+      ${envNote}
+      <form class="provider-key-form" method="post" action="/config/providers/${actionId}">
+        ${csrfInput(csrf)}
+        <input type="password" name="key" required autocomplete="off" minlength="4"
+          placeholder="${stored ? "Replace stored key" : "Paste API key"}"
+          aria-label="API key for ${escapeHtml(provider.label)}"/>
+        <button class="enter provider-save" type="submit">${stored ? "Replace" : "Save"}</button>
+        ${stored ? `<button class="link-button" type="submit" formaction="/config/providers/${actionId}/delete" formnovalidate>Remove</button>` : ""}
+      </form>
+    </li>`;
+}
+
+const CONFIG_SECTIONS = [
+  { id: "models", label: "OpenCode models" },
+  { id: "providers", label: "Provider keys" },
+  { id: "github-app", label: "GitHub App" },
+  { id: "operator", label: "Operator" },
+] as const;
+
 export function configPage(model: ChromeModel, view: ConfigView, notice = ""): string {
   const flash = notice ? `<p class="flash" role="alert">${escapeHtml(notice)}</p>` : "";
   const options = view.discovered.models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("");
@@ -222,18 +270,24 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
     : view.discovered.models.length > 0
       ? `${view.discovered.models.length} models discovered${view.discovered.updatedAt ? ` · ${escapeHtml(view.discovered.updatedAt)}` : ""}`
       : "no models discovered yet — press Refresh model list once OpenCode is configured";
+  const nav = CONFIG_SECTIONS.map((s) => `<li><a href="#${s.id}">${s.label}</a></li>`).join("");
+  const providerRows = view.providers.map((p) => providerCard(p, model.csrf)).join("");
   return layout(
     "Eru — config",
     `<body>
   <a class="skip" href="#main">Skip to content</a>
   <div class="shell">
     ${topbar(model)}
-    <main id="main" class="connect">
-      <section class="card connect-card">
+    <main id="main" class="stage config-stage">
+      <aside class="card config-nav" aria-label="Config sections">
+        <p class="kicker">Config</p>
+        <nav><ul class="toc">${nav}</ul></nav>
+      </aside>
+      <section class="card config-card">
         <h2>Config</h2>
-        <p class="page-lead">OpenCode settings. Environment variables win over anything saved here — change <code>.env</code> and restart for those.</p>
+        <p class="page-lead">Environment variables win over anything saved here — change <code>.env</code> and restart for those.</p>
         ${flash}
-        <h3>OpenCode</h3>
+        <h3 id="models">OpenCode models</h3>
         <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> · timeout <code>${view.timeoutMs} ms</code> — change <code>ERU_OPENCODE_BIN</code> / <code>ERU_OPENCODE_TIMEOUT_MS</code></p>
         <form class="connect-form" method="post" action="/config/models" autocomplete="off">
           ${csrfInput(model.csrf)}
@@ -247,7 +301,29 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <button class="refresh-run" type="submit">Refresh model list</button>
           <span class="field-hint">${discoveredLine}</span>
         </form>
-        <h3>GitHub App</h3>
+        <h3 id="providers">Provider API keys</h3>
+        <p class="mapped">written to OpenCode's credential file <code>${escapeHtml(view.authPath)}</code> — never the eru database. Keys are write-only; an env var wins over a stored key. OAuth providers still enroll with <code>opencode auth login</code>.</p>
+        <p class="provider-filter"><input type="search" id="provider-filter" placeholder="filter providers…" aria-label="Filter providers"/><span class="field-hint" id="provider-filter-empty" hidden>No providers match.</span></p>
+        <ul class="provider-list" id="provider-list">${providerRows}</ul>
+        <script>
+        (() => {
+          const input = document.getElementById("provider-filter");
+          const empty = document.getElementById("provider-filter-empty");
+          const cards = document.querySelectorAll("#provider-list [data-provider]");
+          if (!input || !empty) return;
+          input.addEventListener("input", () => {
+            const q = input.value.trim().toLowerCase();
+            let visible = 0;
+            for (const card of cards) {
+              const show = !q || card.getAttribute("data-provider").includes(q);
+              card.style.display = show ? "" : "none";
+              if (show) visible += 1;
+            }
+            empty.hidden = visible !== 0;
+          });
+        })();
+        </script>
+        <h3 id="github-app">GitHub App</h3>
         <p class="mapped">lists installable repos on Connect and mints tokens for refresh — <code>ERU_GITHUB_APP_ID</code> · <code>ERU_GITHUB_APP_PRIVATE_KEY</code>/<code>_FILE</code> · <code>ERU_GITHUB_APP_INSTALLATION_ID</code></p>
         <form class="connect-form" method="post" action="/config/github-app" autocomplete="off">
           ${csrfInput(model.csrf)}
@@ -269,9 +345,7 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <button class="enter" type="submit">Save GitHub App</button>
         </form>
         ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
-      </section>
-      <section class="card">
-        <h2>Operator</h2>
+        <h3 id="operator">Operator</h3>
         <p class="mapped">the name (and GitHub avatar) shown in the top bar — <code>ERU_UI_USER</code></p>
         <form class="connect-form" method="post" action="/config/user" autocomplete="off">
           ${csrfInput(model.csrf)}

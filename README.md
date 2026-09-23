@@ -68,6 +68,8 @@ A GitHub App can replace the manual token: set `ERU_GITHUB_APP_ID` + `ERU_GITHUB
 
 Ask shells out to OpenCode (`ERU_OPENCODE_BIN`, default `opencode`). Each question runs in a throwaway directory holding only the materialized `map/*.md` files, with an `opencode.json` that denies every tool except read/glob/grep (never bash, edit, write, or webfetch). A missing or failing binary fails closed with an operator notice.
 
+Provider API keys are managed on `/config` → Provider keys: they are written to OpenCode's own `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`), never to the eru database or `.env`. Keys are write-only (the page shows source and a last-4 fingerprint), an env var of the same provider wins over a stored key, and OAuth providers still enroll with `opencode auth login`. In Compose the container is read-only, so `XDG_DATA_HOME` defaults to `/data/xdg` on the `eru-data` volume.
+
 ## License
 
 MIT

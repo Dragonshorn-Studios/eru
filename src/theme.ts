@@ -411,6 +411,63 @@ body::before {
   border-radius: 999px;
 }
 .pill-link { text-decoration: none; }
+.config-stage {
+  grid-template-columns: minmax(200px, 0.55fr) minmax(0, 2.4fr);
+  align-items: start;
+}
+.config-nav { position: sticky; top: 1rem; }
+.config-card { min-width: 0; }
+.config-card h3 { margin-top: 1.6rem; padding-top: 1.2rem; border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent); }
+.config-card h3:first-of-type { margin-top: 1rem; padding-top: 0; border-top: 0; }
+.badge {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  white-space: nowrap;
+}
+.badge-env { background: color-mix(in srgb, var(--mint) 55%, var(--cream)); }
+.badge-stored { background: color-mix(in srgb, var(--lavender) 60%, var(--cream)); }
+.badge-none { color: color-mix(in srgb, var(--ink) 45%, white); }
+.provider-filter { margin: 0.6rem 0; display: flex; gap: 0.6rem; align-items: center; }
+.provider-filter input {
+  flex: 1;
+  max-width: 22rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, white 75%, var(--cream));
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  color: var(--ink);
+}
+.provider-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; }
+.provider-card {
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.provider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.8rem; }
+.provider-head h4 { margin: 0; font-family: var(--font-sans); font-weight: 600; font-size: 0.95rem; }
+.provider-id { font-size: 0.72rem; color: color-mix(in srgb, var(--ink) 45%, white); font-family: var(--font-mono); }
+.provider-key-form { display: flex; gap: 0.5rem; align-items: center; }
+.provider-key-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, white 75%, var(--cream));
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  color: var(--ink);
+}
+.provider-save { padding: 0.45rem 1.1rem; width: auto; }
+.config-refresh .refresh-run { width: auto; }
+@media (max-width: 960px) {
+  .config-stage { grid-template-columns: 1fr; }
+  .config-nav { position: static; }
+}
 .connect {
   display: grid;
   place-items: center;

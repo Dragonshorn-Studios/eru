@@ -11,6 +11,10 @@ services:
       ERU_HOST: 0.0.0.0
       ERU_PORT: "3000"
       ERU_SQLITE_PATH: ${ERU_SQLITE_PATH:-/data/eru.sqlite}
+      # OpenCode reads $XDG_DATA_HOME/opencode/auth.json — put it on the
+      # eru-data volume so provider keys saved on /config survive restarts
+      # inside the read-only container.
+      XDG_DATA_HOME: ${XDG_DATA_HOME:-/data/xdg}
       ERU_UI_PASSWORD: ${ERU_UI_PASSWORD:?set ERU_UI_PASSWORD in .env}
       ERU_UI_SESSION_SECRET: ${ERU_UI_SESSION_SECRET:?set ERU_UI_SESSION_SECRET in .env}
     volumes:

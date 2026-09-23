@@ -1,5 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
@@ -17,6 +19,7 @@ import {
   type SqliteDb,
 } from "./db.js";
 import { decryptForgeToken, encryptForgeToken, forgeKeySecrets } from "./forge.js";
+import { ProviderCredentialStore } from "./providers.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
 import type { AskRunner } from "./opencode.js";
@@ -42,10 +45,11 @@ function app(
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>,
   askRunner?: AskRunner,
   refreshRunner?: RefreshRunner,
+  providerStore?: ProviderCredentialStore,
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
-  return { app: createApp({ config, db, fetchImpl, askRunner, refreshRunner }), config, db };
+  return { app: createApp({ config, db, fetchImpl, askRunner, refreshRunner, providerStore }), config, db };
 }
 
 async function login(instance: ReturnType<typeof app>["app"], password = "test-ui-password") {
@@ -1148,5 +1152,69 @@ describe("operator pill", () => {
     const html = await home.text();
     expect(html).toContain("github.com/env-wins.png");
     expect(html).not.toContain("stored-user.png");
+  });
+});
+
+describe("provider keys on /config", () => {
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  it("renders the section nav and provider statuses without key material", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "eru-auth-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ anthropic: { type: "api", key: "sk-ant-secret9" } }));
+    const instance = app({}, undefined, undefined, undefined, new ProviderCredentialStore(authPath, { OPENAI_API_KEY: "env" }));
+    const { cookie } = await authed(instance);
+    const res = await instance.app.request("/config", { headers: { Cookie: cookie } });
+    const html = await res.text();
+    expect(html).toContain('href="#providers"');
+    expect(html).toContain('href="#github-app"');
+    expect(html).toContain("config-stage");
+    expect(html).toContain("key from env <code>OPENAI_API_KEY</code>");
+    expect(html).toContain("stored in auth.json ···ret9");
+    expect(html).not.toContain("sk-ant-secret9");
+    expect(html).toContain(authPath);
+  });
+
+  it("saves and removes keys through POST /config/providers/:id", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "eru-auth-"));
+    const authPath = join(dir, "auth.json");
+    const instance = app({}, undefined, undefined, undefined, new ProviderCredentialStore(authPath, {}));
+    const { cookie, csrf } = await authed(instance);
+
+    const save = await instance.app.request("/config/providers/groq", {
+      method: "POST",
+      body: new URLSearchParams({ key: "gsk_test_key_1", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(save.status).toBe(302);
+    expect(JSON.parse(readFileSync(authPath, "utf8")).groq.key).toBe("gsk_test_key_1");
+    expect(statSync(authPath).mode & 0o777).toBe(0o600);
+
+    const bad = await instance.app.request("/config/providers/groq", {
+      method: "POST",
+      body: new URLSearchParams({ key: "has space", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(bad.status).toBe(400);
+
+    const badId = await instance.app.request("/config/providers/bad%20id", {
+      method: "POST",
+      body: new URLSearchParams({ key: "gsk_test", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(badId.status).toBe(400);
+
+    const remove = await instance.app.request("/config/providers/groq/delete", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(remove.status).toBe(302);
+    expect(JSON.parse(readFileSync(authPath, "utf8")).groq).toBeUndefined();
   });
 });
