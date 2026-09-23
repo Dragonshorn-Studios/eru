@@ -22,7 +22,7 @@ import { decryptForgeToken, encryptForgeToken, forgeKeySecrets } from "./forge.j
 import { ProviderCredentialStore } from "./providers.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
-import type { AskRunner } from "./opencode.js";
+import type { AskRunner, ModelDiscovery } from "./opencode.js";
 import type { RefreshRunner } from "./refresh.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
@@ -46,10 +46,15 @@ function app(
   askRunner?: AskRunner,
   refreshRunner?: RefreshRunner,
   providerStore?: ProviderCredentialStore,
+  modelDiscovery?: ModelDiscovery,
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
-  return { app: createApp({ config, db, fetchImpl, askRunner, refreshRunner, providerStore }), config, db };
+  return {
+    app: createApp({ config, db, fetchImpl, askRunner, refreshRunner, providerStore, modelDiscovery }),
+    config,
+    db,
+  };
 }
 
 async function login(instance: ReturnType<typeof app>["app"], password = "test-ui-password") {
@@ -72,6 +77,21 @@ function cookieLine(res: Response): string {
 
 function cookieValue(line: string): string {
   return line.split(";")[0].slice(SESSION_COOKIE.length + 1);
+}
+
+// POST /refresh returns immediately — the job settles in the background and
+// /refresh/status reports the outcome. Poll it until the notice lands.
+async function waitRefreshNotice(
+  instance: ReturnType<typeof app>,
+  cookie: string,
+): Promise<{ status: string; notice: string | null }> {
+  for (let i = 0; i < 200; i++) {
+    const res = await instance.app.request("/refresh/status", { headers: { Cookie: cookie } });
+    const state = (await res.json()) as { status: string; notice: string | null };
+    if (state.status !== "running") return state;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("refresh job did not settle");
 }
 
 async function fakeTarball() {
@@ -542,7 +562,7 @@ describe("refresh map", () => {
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(instance.config.sessionSecret, token)!;
-    return instance.app.request("/refresh", {
+    const res = await instance.app.request("/refresh", {
       method: "POST",
       body: new URLSearchParams({ [CSRF_FIELD]: session.csrf }),
       headers: {
@@ -551,6 +571,11 @@ describe("refresh map", () => {
         ...(htmx ? { "HX-Request": "true" } : {}),
       },
     });
+    // The job runs in the background — wait on /refresh/status for the notice.
+    // No repo means no job at all: the POST itself carries the notice.
+    const postText = await res.text();
+    const state = await waitRefreshNotice(instance, `${SESSION_COOKIE}=${token}`);
+    return new Response(state.notice ?? postText, { status: res.status });
   }
 
   it("upserts pages and last_mapped_ref from OpenCode output", async () => {
@@ -757,8 +782,18 @@ describe("config page", () => {
     });
   }
 
-  it("renders model fields with env hints and the discovery datalist", async () => {
-    const instance = app({ openCodeModel: "anthropic/claude-sonnet-4" });
+  it("renders model pickers fed by the discovered model list", async () => {
+    const instance = app(
+      { openCodeModel: "anthropic/claude-sonnet-4" },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        snapshot: () => ({ models: ["anthropic/claude-sonnet-4", "openai/gpt-5"], updatedAt: "t" }),
+        refresh: async () => {},
+      },
+    );
     const { cookie } = await authed(instance);
     const res = await instance.app.request("/config", { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
@@ -767,8 +802,13 @@ describe("config page", () => {
     expect(body).toContain("Map model");
     expect(body).toContain("ERU_OPENCODE_ASK_MODEL");
     expect(body).toContain("ERU_OPENCODE_MAP_MODEL");
-    expect(body).toContain('list="opencode-models"');
-    expect(body).toContain("anthropic/claude-sonnet-4");
+    expect(body).toContain('<select name="ask_model">');
+    expect(body).toContain('<option value="anthropic/claude-sonnet-4">anthropic/claude-sonnet-4</option>');
+    expect(body).not.toContain('list="opencode-models"');
+    // A saved value outside the discovered list still shows as the saved choice.
+    await post(instance, "/config/models", { ask_model: "custom/thing", map_model: "" });
+    const saved = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(saved).toContain('value="custom/thing" selected>custom/thing · saved');
   });
 
   it("saves models to settings and passes them to the runners", async () => {
@@ -806,6 +846,7 @@ describe("config page", () => {
       body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: session.csrf }),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
     });
+    await waitRefreshNotice(instance, `${SESSION_COOKIE}=${token}`);
     expect(mapModel).toBe("openai/gpt-5");
 
     // Clearing the field removes the stored override.
@@ -999,12 +1040,13 @@ describe("github app", () => {
     expect(repoId).toBeGreaterThan(0);
 
     const { cookie, csrf } = await authed(instance);
-    const res = await instance.app.request("/refresh", {
+    await instance.app.request("/refresh", {
       method: "POST",
       body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
     });
-    expect(await res.text()).toContain("Mapped @main");
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.notice).toContain("Mapped @main");
     const tarballCall = seen.find((s) => s.path.includes("/tarball/main"));
     expect(tarballCall?.auth).toBe("Bearer ghs_inst_tok");
   });
@@ -1013,12 +1055,14 @@ describe("github app", () => {
     const instance = app();
     upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "t", "app");
     const { cookie, csrf } = await authed(instance);
-    const res = await instance.app.request("/refresh", {
+    await instance.app.request("/refresh", {
       method: "POST",
       body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
     });
-    expect(await res.text()).toContain("GitHub App is not configured");
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.status).toBe("failed");
+    expect(state.notice).toContain("GitHub App is not configured");
   });
 
   it("shows a stored app id as in-effect and marks the env var as overridden", async () => {
@@ -1113,12 +1157,13 @@ describe("repo selection", () => {
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
       redirect: "manual",
     });
-    const res = await instance.app.request("/refresh", {
+    await instance.app.request("/refresh", {
       method: "POST",
       body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
     });
-    expect(await res.text()).toContain("Mapped @main");
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.notice).toContain("Mapped @main");
     expect(tarballUrl).toContain("/repos/acme/box/tarball/main");
   });
 });

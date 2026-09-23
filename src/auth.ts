@@ -93,6 +93,7 @@ const PUBLIC_PATHS = new Set([
   "/favicon.ico",
   "/assets/favicon-32.png",
   "/assets/apple-touch-icon.png",
+  "/assets/eru-icon.png",
   "/assets/eru.css",
   "/assets/htmx.min.js",
 ]);

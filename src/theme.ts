@@ -52,6 +52,13 @@ body::before {
   opacity: 0.7;
 }
 
+a {
+  color: color-mix(in srgb, var(--ink) 65%, white);
+  text-decoration-color: color-mix(in srgb, var(--moss) 70%, transparent);
+  text-underline-offset: 2px;
+}
+a:hover { color: var(--ink); }
+
 .skip {
   position: absolute;
   left: -999px;
@@ -74,7 +81,7 @@ body::before {
   color: inherit;
   text-decoration: none;
 }
-.brand .seal { color: var(--moss); width: 42px; height: 42px; }
+.brand .seal { width: 42px; height: 42px; }
 .brand h1 {
   font-family: var(--font-serif);
   font-weight: 500;
@@ -345,15 +352,26 @@ body::before {
 .stage.mapping > aside,
 .stage.mapping > article,
 .stage.mapping > section[aria-label="Ask"] { display: none; }
-.mapping-card {
-  max-width: 560px;
-  margin: 2rem auto;
+/* Progress lives on the pane background, not in a card — the layout width
+   never shifts and the rotating lines sit on the cream canvas. */
+.mapping-pane {
+  grid-column: 1 / -1;
+  width: min(680px, 100%);
+  margin: 3rem auto;
   align-self: start;
   text-align: center;
-  padding: 2.4rem 2.2rem;
 }
-.mapping-seal { display: flex; justify-content: center; margin-bottom: 1rem; color: var(--moss); }
-.mapping-card h2 { font-family: var(--font-serif); font-weight: 500; font-size: 1.5rem; margin: 0 0 0.5rem; }
+.mapping-icon { display: block; margin: 0 auto 1.2rem; }
+.mapping-pane h2 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 1.5rem;
+  margin: 0 0 0.5rem;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .mapping-pane h2 { white-space: normal; }
+}
 .mapping-sub { font-family: var(--font-mono); font-size: 0.82rem; color: color-mix(in srgb, var(--ink) 50%, white); margin: 0 0 1.4rem; }
 .mapping-bar {
   height: 10px;
@@ -419,7 +437,7 @@ body::before {
   width: min(420px, 100%);
   text-align: center;
 }
-.gate-card .seal { color: var(--moss); width: 56px; height: 56px; }
+.gate-card .seal { width: 56px; height: 56px; }
 .gate-card h1 {
   font-family: var(--font-serif);
   font-size: 2.4rem;
@@ -447,6 +465,12 @@ body::before {
   border-radius: 999px;
 }
 .pill-link { text-decoration: none; }
+.pill-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.28rem 0.6rem;
+}
 .config-stage {
   grid-template-columns: minmax(200px, 0.55fr) minmax(0, 2.4fr);
   align-items: start;
@@ -531,7 +555,7 @@ body::before {
 .connect-form { display: flex; flex-direction: column; gap: 1rem; margin-top: 0.6rem; }
 .field { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: color-mix(in srgb, var(--ink) 65%, white); }
 .field-hint { color: color-mix(in srgb, var(--ink) 40%, white); font-size: 0.78rem; }
-.field input {
+.field input, .field select {
   border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
   background: color-mix(in srgb, white 75%, var(--cream));
   border-radius: 0.8rem;
@@ -540,6 +564,15 @@ body::before {
   color: var(--ink);
 }
 .field input::placeholder { color: color-mix(in srgb, var(--ink) 35%, white); }
+.field select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, color-mix(in srgb, var(--ink) 55%, white) 50%), linear-gradient(135deg, color-mix(in srgb, var(--ink) 55%, white) 50%, transparent 50%);
+  background-position: calc(100% - 1.15rem) 50%, calc(100% - 0.8rem) 50%;
+  background-size: 0.35rem 0.35rem;
+  background-repeat: no-repeat;
+  padding-right: 2.2rem;
+  cursor: pointer;
+}
 .field textarea {
   border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
   background: color-mix(in srgb, white 75%, var(--cream));

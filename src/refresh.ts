@@ -22,7 +22,7 @@ export interface MappedPageDraft {
 }
 
 export type RefreshError = "unconfigured" | "failed" | "nomap";
-export type RefreshResult = { ok: true; pages: MappedPageDraft[] } | { ok: false; error: RefreshError };
+export type RefreshResult = { ok: true; pages: MappedPageDraft[] } | { ok: false; error: RefreshError; detail?: string };
 
 export type RefreshRunner = (workdir: string, repoLabel: string, ref: string, model?: string) => Promise<RefreshResult>;
 
@@ -56,10 +56,20 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       return { ok: true, pages };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
-      console.log("refresh runner failed:", err instanceof Error ? err.message : err);
-      return { ok: false, error: "failed" };
+      const detail = childErrorDetail(err);
+      console.log("refresh runner failed:", detail || (err instanceof Error ? err.message : err));
+      return { ok: false, error: "failed", detail };
     }
   };
+}
+
+// execFile failures carry the child's stdout/stderr — the tail of those is the
+// real reason OpenCode died (bad model, missing provider key), while err.message
+// is only the command line. Compact it for logs and the operator notice.
+function childErrorDetail(err: unknown): string {
+  const e = err as { stderr?: unknown; stdout?: unknown };
+  const text = [e.stderr, e.stdout].find((s): s is string => typeof s === "string" && s.trim().length > 0) ?? "";
+  return text.trim().replace(/\s+/g, " ").slice(-400);
 }
 
 export async function extractTarball(data: Buffer, destDir: string): Promise<void> {

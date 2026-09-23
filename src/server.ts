@@ -68,6 +68,7 @@ import {
   type ModelDiscovery,
 } from "./opencode.js";
 import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
+import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
   APP_ERRORS,
@@ -94,6 +95,7 @@ export interface AppOptions {
   refreshRunner?: RefreshRunner;
   modelDiscovery?: ModelDiscovery;
   providerStore?: ProviderCredentialStore;
+  mappingTracker?: MappingTracker;
 }
 
 type Env = {
@@ -117,6 +119,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     opts.modelDiscovery ?? createModelDiscovery({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs });
   void modelDiscovery.refresh();
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
+  const mapping = opts.mappingTracker ?? createMappingTracker();
 
   // Reused across requests so the minted installation token survives between
   // calls; rebuilt whenever the resolved app credentials change.
@@ -135,6 +138,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const faviconIco = loadPublicAsset("favicon.ico");
   const faviconPng = loadPublicAsset("favicon-32.png");
   const appleTouchIcon = loadPublicAsset("apple-touch-icon.png");
+  const appIcon = loadPublicAsset("eru-icon.png");
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -208,6 +212,12 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.body(appleTouchIcon);
   });
 
+  app.get("/assets/eru-icon.png", (c) => {
+    c.header("Content-Type", "image/png");
+    c.header("Cache-Control", "public, max-age=604800, immutable");
+    return c.body(appIcon);
+  });
+
   app.get("/login", (c) => {
     if (c.get("session")) return c.redirect("/");
     return html(c, loginPage());
@@ -236,14 +246,31 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.redirect("/login");
   });
 
-  app.get("/", (c) => html(c, appPage(chromeModel(c, db, config))));
-  app.get("/brief", (c) => html(c, appPage(chromeModel(c, db, config))));
+  // Brief/Ask pages also surface the mapping job for the selected repo: a
+  // running job turns the pane into the progress view, and a finished job's
+  // notice is consumed exactly once here.
+  function appModel(c: Context<Env>, slug?: string, askNotice?: string, refreshNotice?: string): ChromeModel {
+    const model = chromeModel(c, db, config, slug, askNotice, refreshNotice);
+    if (model.repo) {
+      const job = mapping.get(model.repo.id);
+      if (job?.status === "running") {
+        model.mapping = true;
+      } else {
+        const done = mapping.consume(model.repo.id);
+        if (done && !model.refreshNotice) model.refreshNotice = done.notice;
+      }
+    }
+    return model;
+  }
+
+  app.get("/", (c) => html(c, appPage(appModel(c))));
+  app.get("/brief", (c) => html(c, appPage(appModel(c))));
   app.get("/brief/:slug", (c) => {
-    const model = chromeModel(c, db, config, c.req.param("slug"));
+    const model = appModel(c, c.req.param("slug"));
     if (!model.page && model.pages.length > 0) return c.text("page not found", 404);
     return html(c, appPage(model));
   });
-  app.get("/ask", (c) => html(c, appPage(chromeModel(c, db, config))));
+  app.get("/ask", (c) => html(c, appPage(appModel(c))));
 
   app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db, config), "", {}, await appRepoList())));
 
@@ -328,16 +355,40 @@ export function createApp(opts: AppOptions): Hono<Env> {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(askResultFragment(notice));
     }
-    return html(c, appPage(chromeModel(c, db, config, undefined, notice)));
+    return html(c, appPage(appModel(c, undefined, notice)));
   });
 
+  // Refresh runs in the background so the job survives page navigation: POST
+  // starts it, the pane polls /refresh/status, and the next full render
+  // consumes the finished notice. A second POST while running is a no-op.
   app.post("/refresh", async (c) => {
-    const notice = await refreshNotice(db, config, fetchImpl, refresh, now, githubApp);
+    const repo = selectedRepo(db);
+    if (c.req.header("HX-Request") !== "true" && !repo) {
+      return html(c, appPage(appModel(c, undefined, undefined, "Connect a repo before refreshing.")));
+    }
+    if (!repo) {
+      c.header("Content-Type", "text/html; charset=utf-8");
+      return c.body(refreshResultFragment("Connect a repo before refreshing."));
+    }
+    if (mapping.start(repo.id, now())) {
+      void refreshNotice(db, config, fetchImpl, refresh, now, githubApp, repo)
+        .then((result) => mapping.finish(repo.id, result.ok ? "done" : "failed", result.notice, now()))
+        .catch((err) => {
+          console.log("refresh crashed:", err instanceof Error ? err.message : err);
+          mapping.finish(repo.id, "failed", "Refresh crashed — check the service log.", now());
+        });
+    }
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
-      return c.body(refreshResultFragment(notice));
+      return c.body(refreshResultFragment("Mapping — the pane will reload when it finishes."));
     }
-    return html(c, appPage(chromeModel(c, db, config, undefined, undefined, notice)));
+    return c.redirect("/");
+  });
+
+  app.get("/refresh/status", (c) => {
+    const repo = selectedRepo(db);
+    const job = repo ? mapping.get(repo.id) : undefined;
+    return c.json({ status: job?.status ?? "none", notice: job?.notice ?? null });
   });
 
   app.get("/config", (c) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers))));
@@ -636,11 +687,10 @@ async function refreshNotice(
   refresh: RefreshRunner,
   now: () => number,
   githubAppFactory: () => GithubAppClient | null,
-): Promise<string> {
-  const repo = selectedRepo(db);
-  if (!repo) return "Connect a repo before refreshing.";
+  repo: MappedRepo,
+): Promise<{ ok: boolean; notice: string }> {
   const resolved = await repoToken(db, config, fetchImpl, githubAppFactory, repo);
-  if (!resolved.ok) return resolved.notice;
+  if (!resolved.ok) return { ok: false, notice: resolved.notice };
   const token = resolved.token;
 
   // Always re-map the default branch: the one recorded at connect, else
@@ -649,7 +699,7 @@ async function refreshNotice(
   let ref = "";
   let tarball: TarballResult | undefined;
   for (const candidate of candidates) {
-    if (!isValidMapRef(candidate)) return "The stored default branch does not look like a ref.";
+    if (!isValidMapRef(candidate)) return { ok: false, notice: "The stored default branch does not look like a ref." };
     tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
     if (tarball.ok) {
       ref = candidate;
@@ -657,12 +707,12 @@ async function refreshNotice(
     }
     if (tarball.error !== "notfound") {
       console.log(`refresh refused: ${tarball.error}`);
-      return REFRESH_TARBALL_ERRORS[tarball.error];
+      return { ok: false, notice: REFRESH_TARBALL_ERRORS[tarball.error] };
     }
   }
   if (!tarball || !tarball.ok) {
     console.log("refresh refused: notfound");
-    return REFRESH_TARBALL_ERRORS.notfound;
+    return { ok: false, notice: REFRESH_TARBALL_ERRORS.notfound };
   }
 
   const workdir = await mkdtemp(joinPath(tmpdir(), "eru-map-"));
@@ -670,7 +720,7 @@ async function refreshNotice(
     await extractTarball(tarball.data, workdir);
   } catch {
     console.log("refresh failed: could not unpack the checkout");
-    return "Could not unpack the checkout — refresh failed.";
+    return { ok: false, notice: "Could not unpack the checkout — refresh failed." };
   }
 
   try {
@@ -682,9 +732,14 @@ async function refreshNotice(
     );
     if (!result.ok) {
       console.log(`refresh failed: ${result.error}`);
-      if (result.error === "unconfigured") return "OpenCode is not configured on this host (check ERU_OPENCODE_BIN).";
-      if (result.error === "nomap") return "OpenCode did not return map pages — nothing was stored.";
-      return "OpenCode could not map the checkout — check the service log.";
+      if (result.error === "unconfigured") {
+        return { ok: false, notice: "OpenCode is not configured on this host (check ERU_OPENCODE_BIN)." };
+      }
+      if (result.error === "nomap") {
+        return { ok: false, notice: "OpenCode did not return map pages — nothing was stored." };
+      }
+      const detail = result.detail ? ` — ${result.detail.slice(-160)}` : " — check the service log.";
+      return { ok: false, notice: `OpenCode could not map the checkout${detail}` };
     }
     const at = new Date(now()).toISOString();
     db.transaction(() => {
@@ -694,7 +749,7 @@ async function refreshNotice(
       setLastMapped(db, repo.id, ref, at);
     })();
     console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages`);
-    return `Mapped @${ref} — ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.`;
+    return { ok: true, notice: `Mapped @${ref} — ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.` };
   } finally {
     await rm(workdir, { recursive: true, force: true }).catch(() => {});
   }
@@ -710,9 +765,9 @@ async function askNotice(db: SqliteDb, config: Config, ask: AskRunner, q: string
   const result = await ask(q, pages, `${repo.owner}/${repo.name}`, resolveModel(config, db, "ask").value);
   if (result.ok) return result.answer || "OpenCode returned an empty answer.";
   console.log(`ask refused: ${result.error}`);
-  return result.error === "unconfigured"
-    ? "OpenCode is not configured on this host (check ERU_OPENCODE_BIN)."
-    : "OpenCode could not answer — check the service log.";
+  if (result.error === "unconfigured") return "OpenCode is not configured on this host (check ERU_OPENCODE_BIN).";
+  const detail = result.detail ? ` — ${result.detail.slice(-160)}` : " — check the service log.";
+  return `OpenCode could not answer${detail}`;
 }
 
 function chromeModel(

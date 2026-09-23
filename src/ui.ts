@@ -2,7 +2,7 @@ import { CSRF_FIELD } from "./auth.js";
 import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
-import { flowerSeal, THEME_CSS } from "./theme.js";
+import { THEME_CSS } from "./theme.js";
 import type { ProviderCredentialStatus } from "./providers.js";
 import { escapeHtml } from "./util.js";
 
@@ -27,6 +27,8 @@ export interface ChromeModel {
   csrf: string;
   pages: PageTocEntry[];
   page: MapPage | null;
+  /** A map refresh is in flight for the selected repo (survives navigation). */
+  mapping?: boolean;
   askNotice?: string;
   refreshNotice?: string;
 }
@@ -66,13 +68,16 @@ function topbar(model: ChromeModel): string {
         ${csrfInput(model.csrf)}
         <label class="sr-only" for="repo_id">Repository</label>
         <select id="repo_id" name="repo_id" onchange="this.form.requestSubmit()">${options}</select>
-        <button class="link-button" type="submit">switch</button>
+        <noscript><button class="link-button" type="submit">switch</button></noscript>
       </form>`;
   } else if (model.repo) {
     repoPill = `<span class="pill">${escapeHtml(model.repo.owner)} / ${escapeHtml(model.repo.name)}</span>`;
   } else {
     repoPill = `<a class="pill pill-link" href="/connect">connect a repo</a>`;
   }
+  const addPill = model.repo
+    ? `<a class="pill pill-link pill-add" href="/connect" title="Connect another repo" aria-label="Connect another repo"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></a>`
+    : "";
   const mapped = model.repo
     ? model.repo.lastMappedRef
       ? `<span class="mapped">last mapped @${escapeHtml(model.repo.lastMappedRef)}</span>`
@@ -80,10 +85,11 @@ function topbar(model: ChromeModel): string {
     : "";
   return `<header class="topbar">
       <a class="brand" href="/">
-        ${flowerSeal(42)}
+        <img class="seal" src="/assets/eru-icon.png" width="42" height="42" alt=""/>
         <h1>Eru</h1>
       </a>
       ${repoPill}
+      ${addPill}
       ${mapped}
       <span class="grow"></span>
       <a class="pill pill-link" href="/config">Config</a>
@@ -146,7 +152,7 @@ export function loginPage(error = ""): string {
   <a class="skip" href="#main">Skip to content</a>
   <main id="main" class="gate">
     <section class="card gate-card">
-      ${flowerSeal(56)}
+      <img class="seal" src="/assets/eru-icon.png" width="56" height="56" alt=""/>
       <h1>Eru</h1>
       <p class="lede">I'm curious about this repo.</p>
       ${flash}
@@ -221,10 +227,20 @@ function modelSourceHint(row: ConfigModelRow): string {
   return "OpenCode default";
 }
 
-function configModelField(row: ConfigModelRow): string {
+// A picker, not a textbox: discovered models plus the saved one if it is not
+// in the discovered list. Free-form ids still work via the env var.
+function configModelField(row: ConfigModelRow, discovered: string[], keyedProviders: ReadonlySet<string>): string {
+  const options = [`<option value=""${row.stored === "" ? " selected" : ""}>OpenCode default</option>`];
+  for (const m of discovered) {
+    const keyed = keyedProviders.has(m.split("/")[0] ?? "") ? " · key set" : "";
+    options.push(`<option value="${escapeHtml(m)}"${row.stored === m ? " selected" : ""}>${escapeHtml(m)}${keyed}</option>`);
+  }
+  if (row.stored && !discovered.includes(row.stored)) {
+    options.push(`<option value="${escapeHtml(row.stored)}" selected>${escapeHtml(row.stored)} · saved</option>`);
+  }
   return `<label class="field">
     <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective || "opencode default")} · ${modelSourceHint(row)}</span></span>
-    <input type="text" name="${row.field}" list="opencode-models" autocomplete="off" value="${escapeHtml(row.stored)}" placeholder="${escapeHtml(row.effective || "provider/model")}"/>
+    <select name="${row.field}">${options.join("")}</select>
     <span class="field-hint"><code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
   </label>`;
 }
@@ -277,7 +293,9 @@ const CONFIG_SECTIONS = [
 
 export function configPage(model: ChromeModel, view: ConfigView, notice = ""): string {
   const flash = notice ? `<p class="flash" role="alert">${escapeHtml(notice)}</p>` : "";
-  const options = view.discovered.models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("");
+  const keyedProviders = new Set(
+    view.providers.filter((p) => p.source === "stored" || p.source === "environment").map((p) => p.id),
+  );
   const discoveredLine = view.discovered.error
     ? `model list unavailable — ${escapeHtml(view.discovered.error)}`
     : view.discovered.models.length > 0
@@ -304,9 +322,8 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
         <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> · timeout <code>${view.timeoutMs} ms</code> — change <code>ERU_OPENCODE_BIN</code> / <code>ERU_OPENCODE_TIMEOUT_MS</code></p>
         <form class="connect-form" method="post" action="/config/models" autocomplete="off">
           ${csrfInput(model.csrf)}
-          <datalist id="opencode-models">${options}</datalist>
-          ${configModelField(view.ask)}
-          ${configModelField(view.map)}
+          ${configModelField(view.ask, view.discovered.models, keyedProviders)}
+          ${configModelField(view.map, view.discovered.models, keyedProviders)}
           <button class="enter" type="submit">Save models</button>
         </form>
         <form class="config-refresh" method="post" action="/config/models/refresh">
@@ -527,7 +544,7 @@ export function appPage(model: ChromeModel): string {
   <div class="shell">
     ${topbar(model)}
     ${masthead(model)}
-    <main id="main" class="stage">
+    <main id="main" class="stage${model.mapping ? " mapping" : ""}">
       <aside class="card" aria-label="Brief">
         <div class="brief-head">
           <p class="kicker">Brief pages</p>
@@ -555,8 +572,8 @@ export function appPage(model: ChromeModel): string {
         </form>
         ${askNotice}
       </section>
-      <section class="card mapping-card" hidden aria-live="polite" aria-label="Refresh in progress">
-        <div class="mapping-seal" aria-hidden="true">✽</div>
+      <section class="mapping-pane"${model.mapping ? "" : " hidden"} aria-live="polite" aria-label="Refresh in progress">
+        <img class="mapping-icon" src="/assets/eru-icon.png" width="72" height="72" alt=""/>
         <h2 id="mapping-line">Getting curious about this repo…</h2>
         <p class="mapping-sub">${model.repo ? `mapping ${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)} @${escapeHtml(model.repo.defaultBranch ?? "main")}` : "mapping the repository"}</p>
         <div class="mapping-bar"><div class="mapping-fill"></div></div>
@@ -568,8 +585,8 @@ export function appPage(model: ChromeModel): string {
       const stage = document.getElementById("main");
       const form = stage?.querySelector(".refresh-form");
       const line = document.getElementById("mapping-line");
-      const card = stage?.querySelector(".mapping-card");
-      if (!stage || !form || !line || !card) return;
+      const pane = stage?.querySelector(".mapping-pane");
+      if (!stage || !line || !pane) return;
       const LINES = [
         "Getting curious about this repo…",
         "Reading the map…",
@@ -577,22 +594,50 @@ export function appPage(model: ChromeModel): string {
         "Curiosity needs a moment to steep…",
         "Almost there — filing the pages…",
       ];
-      let timer = 0;
+      let lineTimer = 0;
+      let pollTimer = 0;
       let i = 0;
-      form.addEventListener("htmx:beforeRequest", () => {
+      const startPolling = () => {
+        if (pollTimer) return;
+        pollTimer = window.setInterval(async () => {
+          try {
+            const res = await fetch("/refresh/status", { headers: { Accept: "application/json" } });
+            const state = await res.json();
+            if (state.status === "done" || state.status === "failed") {
+              window.location.reload();
+            } else if (state.status !== "running") {
+              stopMappingView();
+            }
+          } catch {
+            /* keep polling through a dropped request */
+          }
+        }, 2500);
+      };
+      const startMappingView = () => {
         stage.classList.add("mapping");
-        card.hidden = false;
+        pane.hidden = false;
         i = 0;
         line.textContent = LINES[0];
-        timer = window.setInterval(() => {
-          i = (i + 1) % LINES.length;
-          line.textContent = LINES[i];
-        }, 4200);
-      });
-      form.addEventListener("htmx:afterRequest", () => {
-        window.clearInterval(timer);
+        if (!lineTimer) {
+          lineTimer = window.setInterval(() => {
+            i = (i + 1) % LINES.length;
+            line.textContent = LINES[i];
+          }, 4200);
+        }
+        startPolling();
+      };
+      const stopMappingView = () => {
+        window.clearInterval(lineTimer);
+        window.clearInterval(pollTimer);
+        lineTimer = 0;
+        pollTimer = 0;
         stage.classList.remove("mapping");
-        card.hidden = true;
+        pane.hidden = true;
+      };
+      if (${model.mapping ? "true" : "false"}) startMappingView();
+      form?.addEventListener("htmx:beforeRequest", startMappingView);
+      form?.addEventListener("htmx:afterRequest", (e) => {
+        if (e.detail?.failed) stopMappingView();
       });
     })();
     </script>

@@ -45,7 +45,7 @@ describe("createOpenCodeRunner", () => {
   it("maps a non-zero exit to failed", async () => {
     const runner = createOpenCodeRunner({ bin: "/bin/false", timeoutMs: 10_000 });
     const result = await runner("q", [PAGE], "o/r");
-    expect(result).toEqual({ ok: false, error: "failed" });
+    expect(result).toEqual({ ok: false, error: "failed", detail: "" });
   });
 
   it("sanitizes hostile slugs into safe map filenames", async () => {

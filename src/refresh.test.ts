@@ -93,7 +93,7 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     const missing = await createMapRefresher({ bin: "eru-no-such-bin", timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(missing).toEqual({ ok: false, error: "unconfigured" });
     const failed = await createMapRefresher({ bin: "/bin/false", timeoutMs: 10_000 })(workdir, "o/r", "main");
-    expect(failed).toEqual({ ok: false, error: "failed" });
+    expect(failed).toEqual({ ok: false, error: "failed", detail: "" });
     const garbage = await createMapRefresher({ bin: "/bin/echo", timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(garbage).toEqual({ ok: false, error: "nomap" });
   });
