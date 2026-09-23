@@ -451,15 +451,23 @@ body::before {
 }
 .provider-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; }
 .provider-card {
-  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
-  border-radius: var(--radius);
-  padding: 0.85rem 1rem;
+  background: color-mix(in srgb, var(--lavender) 30%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 65%, var(--lavender));
+  border-radius: 1.2rem;
+  padding: 1rem 1.2rem;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.5rem;
+  box-shadow: 0 6px 18px rgba(27, 26, 24, 0.05);
 }
 .provider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.8rem; }
-.provider-head h4 { margin: 0; font-family: var(--font-sans); font-weight: 600; font-size: 0.95rem; }
-.provider-id { font-size: 0.72rem; color: color-mix(in srgb, var(--ink) 45%, white); font-family: var(--font-mono); }
+.provider-head h4 { margin: 0; font-family: var(--font-serif); font-weight: 500; font-size: 1.2rem; }
+.provider-id {
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 45%, white);
+  font-family: var(--font-mono);
+}
 .provider-key-form { display: flex; gap: 0.5rem; align-items: center; }
 .provider-key-form input {
   flex: 1;
