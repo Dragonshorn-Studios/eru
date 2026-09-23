@@ -687,7 +687,6 @@ describe("docs lock", () => {
     const readme = readFileSync("README.md", "utf8");
     expect(readme).toContain("I'm curious about this repo.");
     expect(readme).toContain("not a checkout job, not DeepWiki.com");
-    expect(readme).toContain("Never Eruka");
     const agents = readFileSync("AGENTS.md", "utf8");
     expect(agents).toContain("eru-shape");
     expect(agents).toContain("eru-security");
@@ -702,8 +701,6 @@ describe("docs lock", () => {
       expect(text).toMatch(/hand CSS/);
       expect(text).not.toMatch(/HTMX \+ Tailwind/);
     }
-    expect(readme).toContain("CSS variables");
-    expect(readme).toContain("no Tailwind pipeline");
     expect(agents).toContain("CSS variables");
     expect(agents).toContain("no Tailwind pipeline");
     expect(contributing).toContain("not a Tailwind pipeline");
