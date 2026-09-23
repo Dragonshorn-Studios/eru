@@ -10,7 +10,7 @@ export const ASK_MAX_QUESTION = 2000;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
 export type AskError = "unconfigured" | "failed";
-export type AskResult = { ok: true; answer: string } | { ok: false; error: AskError };
+export type AskResult = { ok: true; answer: string } | { ok: false; error: AskError; detail?: string };
 
 export interface AskPage {
   slug: string;
@@ -61,12 +61,22 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       return { ok: true, answer: stdout.trim() };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
-      console.log("ask runner failed:", err instanceof Error ? err.message : err);
-      return { ok: false, error: "failed" };
+      const detail = childErrorDetail(err);
+      console.log("ask runner failed:", detail || (err instanceof Error ? err.message : err));
+      return { ok: false, error: "failed", detail };
     } finally {
       await rm(workdir, { recursive: true, force: true }).catch(() => {});
     }
   };
+}
+
+// execFile failures carry the child's stdout/stderr — the tail of those is the
+// real reason OpenCode died (bad model, missing provider key), while err.message
+// is only the command line. Compact it for logs and the operator notice.
+function childErrorDetail(err: unknown): string {
+  const e = err as { stderr?: unknown; stdout?: unknown };
+  const text = [e.stderr, e.stdout].find((s): s is string => typeof s === "string" && s.trim().length > 0) ?? "";
+  return text.trim().replace(/\s+/g, " ").slice(-400);
 }
 
 function pageFile(slug: string): string {
