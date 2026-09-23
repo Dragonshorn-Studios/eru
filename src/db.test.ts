@@ -5,13 +5,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   deleteForgeCredential,
+  deleteSetting,
   getForgeCredential,
   getPage,
   getPrimaryRepo,
+  getSetting,
   listPages,
   migrate,
   openDb,
   setForgeCredential,
+  setSetting,
   upsertConnectedRepo,
   upsertPage,
 } from "./db.js";
@@ -39,7 +42,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(2);
+    expect(migrations.n).toBe(5);
     again.close();
   });
 
@@ -79,9 +82,10 @@ describe("sqlite stub schema", () => {
     expect(columns.some((col) => col.name === "connected_at")).toBe(true);
     const tables = legacy.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[];
     expect(tables.map((t) => t.name)).toContain("forge_credentials");
+    expect(tables.map((t) => t.name)).toContain("settings");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(2);
+    expect(migrations.n).toBe(5);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -90,7 +94,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(2);
+    expect(after.n).toBe(5);
     legacy.close();
   });
 });
@@ -117,6 +121,18 @@ describe("forge connect storage", () => {
     expect(getPrimaryRepo(db)!.name).toBe("box");
     const count = db.prepare(`SELECT COUNT(*) AS n FROM repos`).get() as { n: number };
     expect(count.n).toBe(2);
+    db.close();
+  });
+
+  it("stores operator settings as plain key/value rows", () => {
+    const db = openDb(":memory:");
+    expect(getSetting(db, "opencode.ask_model")).toBeUndefined();
+    setSetting(db, "opencode.ask_model", "a/b", "2026-01-01T00:00:00Z");
+    expect(getSetting(db, "opencode.ask_model")).toBe("a/b");
+    setSetting(db, "opencode.ask_model", "c/d", "2026-01-02T00:00:00Z");
+    expect(getSetting(db, "opencode.ask_model")).toBe("c/d");
+    deleteSetting(db, "opencode.ask_model");
+    expect(getSetting(db, "opencode.ask_model")).toBeUndefined();
     db.close();
   });
 
@@ -152,6 +168,35 @@ describe("forge connect storage", () => {
     setForgeCredential(db, id, "enc", "2026-01-01T00:00:00Z");
     db.prepare(`DELETE FROM repos WHERE id = ?`).run(id);
     expect(getForgeCredential(db, id)).toBeUndefined();
+    db.close();
+  });
+});
+
+describe("repo auth source and page mapped_ref", () => {
+  it("defaults auth_source to manual and flips to app on app connect", () => {
+    const db = openDb(":memory:");
+    const manual = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    expect(getPrimaryRepo(db)!.authSource).toBe("manual");
+
+    const appId = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-02T00:00:00Z", "app");
+    expect(getPrimaryRepo(db)!.authSource).toBe("app");
+
+    // Reconnecting the same repo manually flips it back.
+    upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-03T00:00:00Z");
+    expect(getPrimaryRepo(db)!.authSource).toBe("manual");
+    expect(manual).not.toBe(appId);
+    db.close();
+  });
+
+  it("keeps the stored mapped_ref when an update omits it, on the same row", () => {
+    const db = openDb(":memory:");
+    const repo = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "box" }, "t0");
+    const first = upsertPage(db, repo, { slug: "arch", title: "Arch", body: "v1", sortOrder: 0, mappedRef: "main" }, "t1");
+    const second = upsertPage(db, repo, { slug: "arch", title: "Arch v2", body: "v2", sortOrder: 0 }, "t2");
+    expect(second).toBe(first);
+    const page = getPage(db, repo, "arch")!;
+    expect(page.mappedRef).toBe("main");
+    expect(page.body).toBe("v2");
     db.close();
   });
 });

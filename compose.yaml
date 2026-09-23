@@ -6,15 +6,33 @@ services:
     image: eru:local
     user: "1000:1000"
     ports:
-      - "3000:3000"
+      - "${ERU_PORT:-3000}:3000"
     environment:
       ERU_HOST: 0.0.0.0
       ERU_PORT: "3000"
       ERU_SQLITE_PATH: ${ERU_SQLITE_PATH:-/data/eru.sqlite}
+      ERU_OPENCODE_BIN: ${ERU_OPENCODE_BIN:-/opt/opencode/.opencode/bin/opencode}
+      # OpenCode reads $XDG_DATA_HOME/opencode/auth.json — put it on the
+      # eru-data volume so provider keys saved on /config survive restarts
+      # inside the read-only container.
+      XDG_DATA_HOME: ${XDG_DATA_HOME:-/data/xdg}
+      # The image is read-only; HOME must be writable (Bun cache under ~/.cache).
+      HOME: /data
       ERU_UI_PASSWORD: ${ERU_UI_PASSWORD:?set ERU_UI_PASSWORD in .env}
       ERU_UI_SESSION_SECRET: ${ERU_UI_SESSION_SECRET:?set ERU_UI_SESSION_SECRET in .env}
+      ERU_FORGE_TOKEN_KEY: ${ERU_FORGE_TOKEN_KEY:-}
+      ERU_OPENCODE_TIMEOUT_MS: ${ERU_OPENCODE_TIMEOUT_MS:-}
+      ERU_OPENCODE_MODEL: ${ERU_OPENCODE_MODEL:-}
+      ERU_OPENCODE_ASK_MODEL: ${ERU_OPENCODE_ASK_MODEL:-}
+      ERU_OPENCODE_MAP_MODEL: ${ERU_OPENCODE_MAP_MODEL:-}
+      ERU_GITHUB_APP_ID: ${ERU_GITHUB_APP_ID:-}
+      ERU_GITHUB_APP_PRIVATE_KEY: ${ERU_GITHUB_APP_PRIVATE_KEY:-}
+      ERU_GITHUB_APP_PRIVATE_KEY_FILE: ${ERU_GITHUB_APP_PRIVATE_KEY_FILE:-}
+      ERU_GITHUB_APP_INSTALLATION_ID: ${ERU_GITHUB_APP_INSTALLATION_ID:-}
+      ERU_UI_USER: ${ERU_UI_USER:-}
     volumes:
       - eru-data:/data
+      - eru-opencode:/opt/opencode
     healthcheck:
       test:
         [
@@ -36,3 +54,4 @@ services:
 
 volumes:
   eru-data:
+  eru-opencode:

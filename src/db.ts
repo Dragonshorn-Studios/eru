@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS forge_credentials (
 );
 `;
 
+const SETTINGS_SQL = `
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 const INIT_SQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
@@ -30,6 +38,8 @@ CREATE TABLE IF NOT EXISTS repos (
   forge TEXT NOT NULL DEFAULT 'github',
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
+  auth_source TEXT NOT NULL DEFAULT 'manual',
+  default_branch TEXT,
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
   connected_at TEXT,
@@ -49,6 +59,8 @@ CREATE TABLE IF NOT EXISTS pages (
   updated_at TEXT NOT NULL,
   UNIQUE (repo_id, slug)
 );
+
+${SETTINGS_SQL}
 `;
 
 interface Migration {
@@ -67,6 +79,30 @@ const MIGRATIONS: Migration[] = [
         db.exec(`ALTER TABLE repos ADD COLUMN connected_at TEXT`);
       }
       db.exec(FORGE_CREDENTIALS_SQL);
+    },
+  },
+  {
+    name: "0003_settings.sql",
+    apply(db) {
+      db.exec(SETTINGS_SQL);
+    },
+  },
+  {
+    name: "0004_auth_source.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (!columns.some((col) => col.name === "auth_source")) {
+        db.exec(`ALTER TABLE repos ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'manual'`);
+      }
+    },
+  },
+  {
+    name: "0005_default_branch.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (!columns.some((col) => col.name === "default_branch")) {
+        db.exec(`ALTER TABLE repos ADD COLUMN default_branch TEXT`);
+      }
     },
   },
 ];
@@ -113,29 +149,50 @@ export interface MappedRepo {
   forge: string;
   owner: string;
   name: string;
+  authSource: string;
+  defaultBranch: string | null;
   lastMappedRef: string | null;
   lastMappedAt: string | null;
 }
 
+export type RepoAuthSource = "manual" | "app";
+
+const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
+
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
   return db
-    .prepare(
-      `SELECT id, forge, owner, name, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
-       FROM repos ORDER BY connected_at DESC, id ASC LIMIT 1`,
-    )
+    .prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos ORDER BY connected_at DESC, id DESC LIMIT 1`)
     .get() as MappedRepo | undefined;
 }
 
-export function upsertConnectedRepo(db: SqliteDb, repo: { forge: string; owner: string; name: string }, at: string): number {
+export function getRepo(db: SqliteDb, id: number): MappedRepo | undefined {
+  return db.prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos WHERE id = ?`).get(id) as MappedRepo | undefined;
+}
+
+export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
+  return db
+    .prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos ORDER BY connected_at DESC, id DESC`)
+    .all() as MappedRepo[];
+}
+
+export function upsertConnectedRepo(
+  db: SqliteDb,
+  repo: { forge: string; owner: string; name: string; defaultBranch?: string },
+  at: string,
+  authSource: RepoAuthSource = "manual",
+): number {
   const row = db
     .prepare(
-      `INSERT INTO repos (forge, owner, name, connected_at, created_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (forge, owner, name) DO UPDATE SET connected_at = excluded.connected_at
+      `INSERT INTO repos (forge, owner, name, auth_source, default_branch, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (forge, owner, name) DO UPDATE SET
+         connected_at = excluded.connected_at,
+         auth_source = excluded.auth_source,
+         default_branch = COALESCE(excluded.default_branch, repos.default_branch)
        RETURNING id`,
     )
-    .get(repo.forge, repo.owner, repo.name, at, at) as { id: number };
+    .get(repo.forge, repo.owner, repo.name, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
   return row.id;
 }
 
@@ -158,6 +215,26 @@ export function deleteForgeCredential(db: SqliteDb, repoId: number): void {
   db.prepare(`DELETE FROM forge_credentials WHERE repo_id = ?`).run(repoId);
 }
 
+export function setLastMapped(db: SqliteDb, repoId: number, ref: string, at: string): void {
+  db.prepare(`UPDATE repos SET last_mapped_ref = ?, last_mapped_at = ? WHERE id = ?`).run(ref, at, repoId);
+}
+
+export function getSetting(db: SqliteDb, key: string): string | undefined {
+  const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(db: SqliteDb, key: string, value: string, at: string): void {
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, value, at);
+}
+
+export function deleteSetting(db: SqliteDb, key: string): void {
+  db.prepare(`DELETE FROM settings WHERE key = ?`).run(key);
+}
+
 export interface PageTocEntry {
   slug: string;
   title: string;
@@ -177,6 +254,15 @@ export function listPages(db: SqliteDb, repoId: number): PageTocEntry[] {
   return db
     .prepare(`SELECT slug, title FROM pages WHERE repo_id = ? ORDER BY sort_order ASC, id ASC`)
     .all(repoId) as PageTocEntry[];
+}
+
+export function listAllPages(db: SqliteDb, repoId: number): MapPage[] {
+  return db
+    .prepare(
+      `SELECT id, slug, title, body, sort_order AS sortOrder, mapped_ref AS mappedRef, updated_at AS updatedAt
+       FROM pages WHERE repo_id = ? ORDER BY sort_order ASC, id ASC`,
+    )
+    .all(repoId) as MapPage[];
 }
 
 export function getPage(db: SqliteDb, repoId: number, slug: string): MapPage | undefined {
@@ -202,7 +288,7 @@ export function upsertPage(
          title = excluded.title,
          body = excluded.body,
          sort_order = excluded.sort_order,
-         mapped_ref = excluded.mapped_ref,
+         mapped_ref = COALESCE(excluded.mapped_ref, pages.mapped_ref),
          updated_at = excluded.updated_at
        RETURNING id`,
     )
