@@ -37,7 +37,7 @@ docker compose up --build
 
 ## CI
 
-GitHub Actions on the hosted `ubuntu-latest` runner (`.github/workflows/ci.yml`): `npm ci`, `npm run typecheck`, `npm test`. Runs on every pull request and on pushes to `main`; the repo is public, so CI must never run on a self-hosted runner (a fork PR could otherwise execute code on private infrastructure).
+GitHub Actions (`.github/workflows/ci.yml`): `npm ci`, `npm run typecheck`, `npm test` on every pull request and on pushes to `main`. The runner is visibility-aware — `self-hosted` while the repo is private, `ubuntu-latest` once public (a fork PR on self-hosted could execute code on private infrastructure).
 
 The job uses `permissions: contents: read`. It does not mount Compose volumes or production `.env`, and it does not need UI passwords or session secrets.
 

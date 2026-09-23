@@ -14,7 +14,10 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Self-hosted is only acceptable while the repo is private; a public repo
+    # must use GitHub-hosted runners (a fork PR on self-hosted runs code on
+    # private infrastructure). flips automatically with repo visibility.
+    runs-on: ${{ github.repository_visibility == 'private' && 'self-hosted' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
