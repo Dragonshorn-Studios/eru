@@ -1,4 +1,8 @@
-# Eru
+<p align="center">
+  <img src="assets/eru-icon.png" width="128" height="128" alt="Eru flower seal" />
+</p>
+
+<h1 align="center">Eru</h1>
 
 I'm curious about this repo.
 

@@ -9,6 +9,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
 COPY scripts ./scripts
+COPY assets ./assets
 COPY src ./src
 RUN npm ci && npm run build && npm prune --omit=dev
 
