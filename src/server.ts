@@ -31,14 +31,17 @@ import {
   getForgeCredential,
   getPage,
   getPrimaryRepo,
+  getRepo,
   getSetting,
   listAllPages,
+  listConnectedRepos,
   listPages,
   setForgeCredential,
   setLastMapped,
   setSetting,
   upsertConnectedRepo,
   upsertPage,
+  type MappedRepo,
   type SqliteDb,
 } from "./db.js";
 import {
@@ -248,8 +251,20 @@ export function createApp(opts: AppOptions): Hono<Env> {
       } else {
         deleteForgeCredential(db, repoId);
       }
+      setSetting(db, SETTING_SELECTED_REPO, String(repoId), at);
     })();
     console.log(`connected ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
+    return c.redirect("/");
+  });
+
+  app.post("/repo/select", async (c) => {
+    const body = await c.req.parseBody();
+    const raw = typeof body.repo_id === "string" ? body.repo_id.trim() : "";
+    const id = Number(raw);
+    if (!/^\d+$/.test(raw) || !getRepo(db, id)) {
+      return c.text("unknown repo", 400);
+    }
+    setSetting(db, SETTING_SELECTED_REPO, String(id), new Date(now()).toISOString());
     return c.redirect("/");
   });
 
@@ -272,7 +287,10 @@ export function createApp(opts: AppOptions): Hono<Env> {
       return errorPage(CONNECT_ERRORS[result.error], connectStatus(result.error));
     }
     const at = new Date(now()).toISOString();
-    upsertConnectedRepo(db, result.repo, at, "app");
+    db.transaction(() => {
+      const repoId = upsertConnectedRepo(db, result.repo, at, "app");
+      setSetting(db, SETTING_SELECTED_REPO, String(repoId), at);
+    })();
     console.log(`connected via app ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
     return c.redirect("/");
   });
@@ -380,6 +398,18 @@ const SETTING_MAP_MODEL = "opencode.map_model";
 const SETTING_APP_ID = "github_app.id";
 const SETTING_APP_KEY = "github_app.private_key";
 const SETTING_APP_INSTALL = "github_app.installation_id";
+const SETTING_SELECTED_REPO = "ui.selected_repo";
+
+// The repo the UI acts on: the operator's pick, else the latest connect.
+// A stale stored id (repo row gone) falls back to primary.
+function selectedRepo(db: SqliteDb): MappedRepo | undefined {
+  const stored = getSetting(db, SETTING_SELECTED_REPO);
+  if (stored) {
+    const repo = getRepo(db, Number(stored));
+    if (repo) return repo;
+  }
+  return getPrimaryRepo(db);
+}
 
 type ModelPurpose = "ask" | "map";
 type ModelSource = "env" | "stored" | "default";
@@ -516,7 +546,7 @@ async function refreshNotice(
 ): Promise<string> {
   if (!ref) return "Pick a ref or SHA first.";
   if (!isValidMapRef(ref)) return "That ref does not look right.";
-  const repo = getPrimaryRepo(db);
+  const repo = selectedRepo(db);
   if (!repo) return "Connect a repo before refreshing.";
   const resolved = await repoToken(db, config, fetchImpl, githubAppFactory, repo);
   if (!resolved.ok) return resolved.notice;
@@ -566,7 +596,7 @@ async function refreshNotice(
 async function askNotice(db: SqliteDb, config: Config, ask: AskRunner, q: string): Promise<string> {
   if (!q) return "Ask something first.";
   if (q.length > ASK_MAX_QUESTION) return `Keep questions under ${ASK_MAX_QUESTION} characters.`;
-  const repo = getPrimaryRepo(db);
+  const repo = selectedRepo(db);
   if (!repo) return "Connect a repo before asking.";
   const pages = listAllPages(db, repo.id);
   if (pages.length === 0) return "The map has no pages yet — refresh the map first.";
@@ -587,18 +617,20 @@ function chromeModel(
 ): ChromeModel {
   const session = c.get("session");
   if (!session) throw new Error("eru: missing session");
-  const repo = getPrimaryRepo(db);
+  const repo = selectedRepo(db);
   const pages = repo ? listPages(db, repo.id) : [];
   const page = repo && (slug || pages.length > 0) ? getPage(db, repo.id, slug ?? pages[0].slug) ?? null : null;
   return {
     repo: repo
       ? {
+          id: repo.id,
           owner: repo.owner,
           name: repo.name,
           lastMappedRef: repo.lastMappedRef,
           lastMappedLabel: repo.lastMappedAt ?? "never",
         }
       : null,
+    repos: listConnectedRepos(db).map((r) => ({ id: r.id, owner: r.owner, name: r.name })),
     path: new URL(c.req.url).pathname,
     csrf: session.csrf,
     pages,

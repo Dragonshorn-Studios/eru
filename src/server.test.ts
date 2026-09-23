@@ -6,10 +6,12 @@ import type { Config } from "./config.js";
 import {
   getForgeCredential,
   getSetting,
+  setSetting,
   getPrimaryRepo,
   listPages,
   openDb,
   setForgeCredential,
+  setLastMapped,
   upsertConnectedRepo,
   upsertPage,
   type SqliteDb,
@@ -982,5 +984,97 @@ describe("github app", () => {
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
     expect(page).toContain("in effect from <code>ERU_GITHUB_APP_ID</code>");
     expect(page).toContain('value="111"');
+  });
+});
+
+describe("repo selection", () => {
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  function twoRepos(instance: ReturnType<typeof app>) {
+    const box = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    const cart = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-02T00:00:00Z");
+    upsertPage(instance.db, box, { slug: "boxpage", title: "BoxPage", body: "box body", sortOrder: 0, mappedRef: "main" }, "t");
+    upsertPage(instance.db, cart, { slug: "cartpage", title: "CartPage", body: "cart body", sortOrder: 0, mappedRef: "dev" }, "t");
+    setLastMapped(instance.db, box, "main", "t");
+    setLastMapped(instance.db, cart, "dev", "t");
+    return { box, cart };
+  }
+
+  it("shows a switcher with multiple repos, selects the newest connect, and honors a switch", async () => {
+    const instance = app();
+    const { box } = twoRepos(instance);
+    const { cookie, csrf } = await authed(instance);
+    const home = await (await instance.app.request("/", { headers: { Cookie: cookie } })).text();
+    expect(home).toContain('action="/repo/select"');
+    expect(home).toContain("acme / box");
+    expect(home).toContain("acme / cart");
+    // Latest connect is primary by default.
+    expect(home).toContain("CartPage");
+    expect(home).toContain("last mapped @dev");
+
+    const res = await instance.app.request("/repo/select", {
+      method: "POST",
+      body: new URLSearchParams({ repo_id: String(box), [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const switched = await (await instance.app.request("/", { headers: { Cookie: cookie } })).text();
+    expect(switched).toContain("BoxPage");
+    expect(switched).toContain("last mapped @main");
+    expect(getSetting(instance.db, "ui.selected_repo")).toBe(String(box));
+  });
+
+  it("rejects an unknown repo id and falls back to primary on a stale selection", async () => {
+    const instance = app();
+    const { box, cart } = twoRepos(instance);
+    const { cookie, csrf } = await authed(instance);
+    const bad = await instance.app.request("/repo/select", {
+      method: "POST",
+      body: new URLSearchParams({ repo_id: "9999", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(bad.status).toBe(400);
+
+    instance.db.prepare(`DELETE FROM repos WHERE id = ?`).run(box);
+    setSetting(instance.db, "ui.selected_repo", String(box), "t");
+    const home = await (await instance.app.request("/", { headers: { Cookie: cookie } })).text();
+    expect(home).toContain("CartPage");
+    expect(getPrimaryRepo(instance.db)!.id).toBe(cart);
+  });
+
+  it("connecting a repo selects it, and refresh acts on the selected repo", async () => {
+    const tar = await fakeTarball();
+    let tarballUrl = "";
+    const fetchImpl = async (url: string) => {
+      tarballUrl = url;
+      return new Response(new Uint8Array(tar));
+    };
+    const instance = app(
+      {},
+      fetchImpl,
+      undefined,
+      async () => ({ ok: true as const, pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }] }),
+    );
+    const { box } = twoRepos(instance);
+    const { cookie, csrf } = await authed(instance);
+    await instance.app.request("/repo/select", {
+      method: "POST",
+      body: new URLSearchParams({ repo_id: String(box), [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    const res = await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    expect(await res.text()).toContain("Mapped @main");
+    expect(tarballUrl).toContain("/repos/acme/box/tarball/main");
   });
 });

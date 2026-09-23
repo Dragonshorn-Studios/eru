@@ -146,14 +146,23 @@ export interface MappedRepo {
 
 export type RepoAuthSource = "manual" | "app";
 
+const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
+
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
   return db
-    .prepare(
-      `SELECT id, forge, owner, name, auth_source AS authSource, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
-       FROM repos ORDER BY connected_at DESC, id DESC LIMIT 1`,
-    )
+    .prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos ORDER BY connected_at DESC, id DESC LIMIT 1`)
     .get() as MappedRepo | undefined;
+}
+
+export function getRepo(db: SqliteDb, id: number): MappedRepo | undefined {
+  return db.prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos WHERE id = ?`).get(id) as MappedRepo | undefined;
+}
+
+export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
+  return db
+    .prepare(`SELECT ${MAPPED_REPO_COLUMNS} FROM repos ORDER BY connected_at DESC, id DESC`)
+    .all() as MappedRepo[];
 }
 
 export function upsertConnectedRepo(

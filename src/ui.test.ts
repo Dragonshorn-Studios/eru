@@ -4,7 +4,8 @@ import { appPage, loginPage } from "./ui.js";
 describe("chrome copy", () => {
   it("keeps Brief and Ask labels and omits forbidden words", () => {
     const html = appPage({
-      repo: { owner: "owner", name: "repo", lastMappedRef: "main", lastMappedLabel: "never" },
+      repo: { id: 1, owner: "owner", name: "repo", lastMappedRef: "main", lastMappedLabel: "never" },
+      repos: [{ id: 1, owner: "owner", name: "repo" }],
       path: "/",
       csrf: "csrf-token",
       pages: [{ slug: "architecture", title: "Architecture" }],

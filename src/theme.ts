@@ -429,6 +429,17 @@ body::before {
   text-decoration: underline;
   cursor: pointer;
 }
+.repo-switch { display: flex; align-items: center; gap: 0.4rem; }
+.repo-switch select {
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
+  background: color-mix(in srgb, white 60%, var(--lavender));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  cursor: pointer;
+}
 .sr-only {
   position: absolute;
   width: 1px;

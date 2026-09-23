@@ -5,13 +5,21 @@ import { ASK_MAX_QUESTION } from "./opencode.js";
 import { flowerSeal, THEME_CSS } from "./theme.js";
 import { escapeHtml } from "./util.js";
 
+export interface ChromeRepo {
+  id: number;
+  owner: string;
+  name: string;
+}
+
 export interface ChromeModel {
   repo: {
+    id: number;
     owner: string;
     name: string;
     lastMappedRef: string | null;
     lastMappedLabel: string;
   } | null;
+  repos: ChromeRepo[];
   path: string;
   csrf: string;
   pages: PageTocEntry[];
@@ -39,9 +47,25 @@ ${body}
 }
 
 function topbar(model: ChromeModel): string {
-  const repoPill = model.repo
-    ? `<span class="pill">${escapeHtml(model.repo.owner)} / ${escapeHtml(model.repo.name)}</span>`
-    : `<a class="pill pill-link" href="/connect">connect a repo</a>`;
+  let repoPill: string;
+  if (model.repos.length > 1) {
+    const options = model.repos
+      .map(
+        (r) =>
+          `<option value="${r.id}"${model.repo?.id === r.id ? " selected" : ""}>${escapeHtml(r.owner)} / ${escapeHtml(r.name)}</option>`,
+      )
+      .join("");
+    repoPill = `<form class="repo-switch" method="post" action="/repo/select">
+        ${csrfInput(model.csrf)}
+        <label class="sr-only" for="repo_id">Repository</label>
+        <select id="repo_id" name="repo_id" onchange="this.form.requestSubmit()">${options}</select>
+        <button class="link-button" type="submit">switch</button>
+      </form>`;
+  } else if (model.repo) {
+    repoPill = `<span class="pill">${escapeHtml(model.repo.owner)} / ${escapeHtml(model.repo.name)}</span>`;
+  } else {
+    repoPill = `<a class="pill pill-link" href="/connect">connect a repo</a>`;
+  }
   const mapped = model.repo
     ? model.repo.lastMappedRef
       ? `<span class="mapped">last mapped @${escapeHtml(model.repo.lastMappedRef)}</span>`
