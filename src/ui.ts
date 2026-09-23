@@ -1,6 +1,6 @@
 import { CSRF_FIELD } from "./auth.js";
 import type { MapPage, PageTocEntry } from "./db.js";
-import type { TarballError, VerifyError } from "./forge.js";
+import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { flowerSeal, THEME_CSS } from "./theme.js";
 import { escapeHtml } from "./util.js";
@@ -142,13 +142,33 @@ export interface ConfigModelRow {
   stored: string;
 }
 
+export interface ConfigAppView {
+  appId: string;
+  installationId: string;
+  appIdSource: "env" | "stored" | "default";
+  installSource: "env" | "stored" | "default";
+  keySource: "env" | "stored" | "default";
+  storedAppId: string;
+  storedInstall: string;
+  hasStoredKey: boolean;
+}
+
 export interface ConfigView {
   bin: string;
   timeoutMs: number;
+  app: ConfigAppView;
   ask: ConfigModelRow;
   map: ConfigModelRow;
   discovered: { models: string[]; error?: string; updatedAt?: string };
 }
+
+export const APP_ERRORS: Record<AppError, string> = {
+  invalid: "The GitHub App private key could not be read — check the PEM.",
+  auth: "GitHub refused the app credentials. Check the App ID and private key.",
+  unreachable: "Could not reach GitHub. Try again in a moment.",
+  noinstall: "The GitHub App has no installations — install it on an account first.",
+  ambiguous: "The GitHub App is installed on several accounts — set an installation ID on the Config page.",
+};
 
 function modelSourceHint(row: ConfigModelRow): string {
   if (row.source === "env") return `in effect from <code>${escapeHtml(row.envKey)}</code>`;
@@ -197,6 +217,28 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <button class="refresh-run" type="submit">Refresh model list</button>
           <span class="field-hint">${discoveredLine}</span>
         </form>
+        <h3>GitHub App</h3>
+        <p class="mapped">lists installable repos on Connect and mints tokens for refresh — <code>ERU_GITHUB_APP_ID</code> · <code>ERU_GITHUB_APP_PRIVATE_KEY</code>/<code>_FILE</code> · <code>ERU_GITHUB_APP_INSTALLATION_ID</code></p>
+        <form class="connect-form" method="post" action="/config/github-app" autocomplete="off">
+          ${csrfInput(model.csrf)}
+          <label class="field">
+            <span>App ID <span class="field-hint">${appFieldHint(view.app.appId, view.app.appIdSource, "ERU_GITHUB_APP_ID")}</span></span>
+            <input type="text" name="app_id" inputmode="numeric" maxlength="20" value="${escapeHtml(view.app.storedAppId)}" placeholder="${escapeHtml(view.app.appId || "123456")}"/>
+            <span class="field-hint">override via <code>ERU_GITHUB_APP_ID</code> in .env and restart</span>
+          </label>
+          <label class="field">
+            <span>Installation ID <span class="field-hint">${appFieldHint(view.app.installationId, view.app.installSource, "ERU_GITHUB_APP_INSTALLATION_ID", "auto-detect")}</span></span>
+            <input type="text" name="app_installation_id" inputmode="numeric" maxlength="20" value="${escapeHtml(view.app.storedInstall)}" placeholder="${escapeHtml(view.app.installationId || "auto-detect")}"/>
+            <span class="field-hint">leave empty to auto-detect a single installation</span>
+          </label>
+          <label class="field">
+            <span>Private key <span class="field-hint">${appKeyHint(view.app)}</span></span>
+            <textarea name="app_private_key" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN RSA PRIVATE KEY-----"></textarea>
+            <span class="field-hint">write-only — stored encrypted; leave empty to keep the saved key · env: <code>ERU_GITHUB_APP_PRIVATE_KEY</code> or <code>ERU_GITHUB_APP_PRIVATE_KEY_FILE</code></span>
+          </label>
+          <button class="enter" type="submit">Save GitHub App</button>
+        </form>
+        ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
       </section>
     </main>
     ${foot(model)}
@@ -213,7 +255,51 @@ export const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
   toobig: "That checkout is too large to map.",
 };
 
-export function connectPage(model: ChromeModel, error = "", values: { owner?: string; name?: string } = {}): string {
+function appFieldHint(effective: string, source: ConfigAppView["appIdSource"], envKey: string, fallback = "required"): string {
+  if (source === "env") return `in effect from <code>${escapeHtml(envKey)}</code>`;
+  if (source === "stored") return "saved on this page";
+  return escapeHtml(fallback);
+}
+
+function appKeyHint(app: ConfigAppView): string {
+  if (app.keySource === "env") return "key comes from env";
+  if (app.hasStoredKey) return "key saved on this page";
+  return "no key saved";
+}
+
+function appRepoSection(appList: { repos: AppRepo[] } | { error: string } | null | undefined, csrf: string): string {
+  if (!appList) return "";
+  if ("error" in appList) {
+    return `<h3>From your GitHub App</h3>
+        <p class="field-hint">repo list unavailable — ${escapeHtml(appList.error)}</p>`;
+  }
+  if (appList.repos.length === 0) {
+    return `<h3>From your GitHub App</h3>
+        <p class="field-hint">the installation can see no repositories — grant it access on GitHub first</p>`;
+  }
+  const items = appList.repos
+    .map(
+      (repo) => `<li>
+          <form method="post" action="/connect/app">
+            ${csrfInput(csrf)}
+            <input type="hidden" name="owner" value="${escapeHtml(repo.owner)}"/>
+            <input type="hidden" name="name" value="${escapeHtml(repo.name)}"/>
+            <button class="repo-pick" type="submit"><span class="mono">${escapeHtml(repo.owner)}/${escapeHtml(repo.name)}</span>${repo.privateRepo ? ' <span class="tag">private</span>' : ""}</button>
+          </form>
+        </li>`,
+    )
+    .join("");
+  return `<h3>From your GitHub App</h3>
+      <ul class="repo-list">${items}</ul>
+      <p class="or-line">— or add manually —</p>`;
+}
+
+export function connectPage(
+  model: ChromeModel,
+  error = "",
+  values: { owner?: string; name?: string } = {},
+  appList?: { repos: AppRepo[] } | { error: string } | null,
+): string {
   const flash = error ? `<p class="flash" role="alert">${escapeHtml(error)}</p>` : "";
   return layout(
     "Eru — connect a repo",
@@ -226,6 +312,7 @@ export function connectPage(model: ChromeModel, error = "", values: { owner?: st
         <h2>Connect a repo</h2>
         <p class="page-lead">Point Eru at one GitHub repository. A least-privilege token is stored encrypted; it never reaches logs.</p>
         ${flash}
+        ${appRepoSection(appList, model.csrf)}
         <form class="connect-form" method="post" action="/connect" autocomplete="off">
           ${csrfInput(model.csrf)}
           <label class="field">

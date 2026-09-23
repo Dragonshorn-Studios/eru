@@ -1,9 +1,11 @@
+import { generateKeyPairSync } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
 import {
   getForgeCredential,
+  getSetting,
   getPrimaryRepo,
   listPages,
   openDb,
@@ -397,11 +399,46 @@ describe("durable Brief pages", () => {
     expect(body).not.toContain("<script>alert(1)");
   });
 
-  it("404s an unknown slug when pages exist", async () => {
+  it("escapes hostile titles and mapped refs, not just bodies", async () => {
+    const instance = app();
+    const repoId = upsertConnectedRepo(
+      instance.db,
+      { forge: "github", owner: "acme", name: "box" },
+      "2026-01-01T00:00:00Z",
+    );
+    upsertPage(
+      instance.db,
+      repoId,
+      {
+        slug: "evil",
+        title: '<img src=x onerror=alert("t")>',
+        body: "b",
+        sortOrder: 0,
+        mappedRef: '<svg onload=alert("r")>',
+      },
+      "t",
+    );
+    const loggedIn = await login(instance.app);
+    const cookie = `${SESSION_COOKIE}=${cookieValue(cookieLine(loggedIn))}`;
+    const res = await instance.app.request("/brief/evil", { headers: { Cookie: cookie } });
+    const body = await res.text();
+    expect(body).toContain("&lt;img src=x");
+    expect(body).toContain("&lt;svg onload");
+    expect(body).not.toContain('<img src=x onerror=alert("t")>');
+    expect(body).not.toContain('<svg onload=alert("r")>');
+  });
+
+  it("404s an unknown slug when pages exist, and falls to the empty state when none do", async () => {
     const instance = app();
     const cookie = await seed(instance, PAGES);
     const res = await instance.app.request("/brief/nope", { headers: { Cookie: cookie } });
     expect(res.status).toBe(404);
+
+    const empty = app();
+    const emptyCookie = await seed(empty, []);
+    const res2 = await empty.app.request("/brief/missing", { headers: { Cookie: emptyCookie } });
+    expect(res2.status).toBe(200);
+    expect(await res2.text()).toContain("No map pages yet");
   });
 
   it("shows a clear empty state before the first refresh and a connect prompt without a repo", async () => {
@@ -785,5 +822,165 @@ describe("config page", () => {
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
     expect(page).toContain("2 models discovered");
     expect(page).toContain('value="prov/a"');
+  });
+});
+
+describe("github app", () => {
+  const APP_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+
+  function appFetch(seen: { auth: string; path: string }[], tarballBody?: Buffer) {
+    return async (url: string, init: RequestInit) => {
+      const u = new URL(url);
+      seen.push({ auth: (init.headers as Record<string, string>)?.Authorization ?? "none", path: u.pathname });
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if (u.pathname === "/app/installations") return json(200, [{ id: 7 }]);
+      if (u.pathname === "/app/installations/7/access_tokens") {
+        return json(201, { token: "ghs_inst_tok", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (u.pathname === "/installation/repositories") {
+        return json(200, {
+          total_count: 2,
+          repositories: [
+            { owner: { login: "acme" }, name: "box", private: true },
+            { owner: { login: "acme" }, name: "cart", private: false },
+          ],
+        });
+      }
+      if (u.pathname === "/repos/acme/box") return json(200, { owner: { login: "acme" }, name: "box" });
+      if (u.pathname.startsWith("/repos/") && u.pathname.includes("/tarball/") && tarballBody) {
+        return new Response(new Uint8Array(tarballBody));
+      }
+      return json(404, {});
+    };
+  }
+
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  async function post(instance: ReturnType<typeof app>, path: string, fields: Record<string, string>) {
+    const { cookie, csrf } = await authed(instance);
+    return instance.app.request(path, {
+      method: "POST",
+      body: new URLSearchParams({ ...fields, [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+  }
+
+  it("saves app config with the private key encrypted, and removes it", async () => {
+    const instance = app();
+    const res = await post(instance, "/config/github-app", {
+      app_id: "4242",
+      app_installation_id: "777",
+      app_private_key: APP_PEM,
+    });
+    expect(res.status).toBe(302);
+    expect(getSetting(instance.db, "github_app.id")).toBe("4242");
+    expect(getSetting(instance.db, "github_app.installation_id")).toBe("777");
+    const storedKey = getSetting(instance.db, "github_app.private_key")!;
+    expect(storedKey).toMatch(/^v1\./);
+    expect(storedKey).not.toContain("PRIVATE KEY");
+    expect(decryptForgeToken(instance.config.sessionSecret, storedKey)).toBe(APP_PEM.trim());
+
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("key saved on this page");
+
+    const removed = await post(instance, "/config/github-app/remove", {});
+    expect(removed.status).toBe(302);
+    expect(getSetting(instance.db, "github_app.id")).toBeUndefined();
+    expect(getSetting(instance.db, "github_app.private_key")).toBeUndefined();
+  });
+
+  it("rejects malformed app fields without storing", async () => {
+    const instance = app();
+    for (const fields of [
+      { app_id: "abc", app_installation_id: "", app_private_key: "" },
+      { app_id: "1", app_installation_id: "x", app_private_key: "" },
+      { app_id: "1", app_installation_id: "", app_private_key: "not-a-pem" },
+    ]) {
+      const res = await post(instance, "/config/github-app", fields);
+      expect(res.status).toBe(400);
+    }
+    expect(getSetting(instance.db, "github_app.id")).toBeUndefined();
+  });
+
+  it("lists installation repos on /connect and connects one via the app", async () => {
+    const seen: { auth: string; path: string }[] = [];
+    const instance = app({ githubAppId: "4242", githubAppPrivateKey: APP_PEM }, appFetch(seen));
+    const { cookie, csrf } = await authed(instance);
+    const page = await (await instance.app.request("/connect", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("acme/box");
+    expect(page).toContain("acme/cart");
+    expect(page).toContain("private");
+    expect(page).toContain('action="/connect/app"');
+    expect(page).toContain("or add manually");
+
+    const res = await instance.app.request("/connect/app", {
+      method: "POST",
+      body: new URLSearchParams({ owner: "acme", name: "box", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const repo = getPrimaryRepo(instance.db)!;
+    expect(repo.authSource).toBe("app");
+    expect(getForgeCredential(instance.db, repo.id)).toBeUndefined();
+    // The repo verify ran on an installation token minted from the app JWT.
+    expect(seen.some((s) => s.path === "/app/installations/7/access_tokens" && s.auth.startsWith("Bearer eyJ"))).toBe(
+      true,
+    );
+    expect(seen.some((s) => s.path === "/repos/acme/box" && s.auth === "Bearer ghs_inst_tok")).toBe(true);
+  });
+
+  it("refreshes an app-connected repo with the installation token", async () => {
+    const tar = await fakeTarball();
+    const seen: { auth: string; path: string }[] = [];
+    const instance = app(
+      { githubAppId: "4242", githubAppPrivateKey: APP_PEM },
+      appFetch(seen, tar),
+      undefined,
+      async () => ({ ok: true as const, pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }] }),
+    );
+    const repoId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "t", "app");
+    expect(repoId).toBeGreaterThan(0);
+
+    const { cookie, csrf } = await authed(instance);
+    const res = await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    expect(await res.text()).toContain("Mapped @main");
+    const tarballCall = seen.find((s) => s.path.includes("/tarball/main"));
+    expect(tarballCall?.auth).toBe("Bearer ghs_inst_tok");
+  });
+
+  it("refuses refresh on an app repo when the app is no longer configured", async () => {
+    const instance = app();
+    upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "t", "app");
+    const { cookie, csrf } = await authed(instance);
+    const res = await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    expect(await res.text()).toContain("GitHub App is not configured");
+  });
+
+  it("shows env app id as in-effect even when a stored one exists", async () => {
+    const instance = app({ githubAppId: "99999", githubAppPrivateKey: APP_PEM });
+    await post(instance, "/config/github-app", { app_id: "111", app_installation_id: "", app_private_key: "" });
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("in effect from <code>ERU_GITHUB_APP_ID</code>");
+    expect(page).toContain('value="111"');
   });
 });

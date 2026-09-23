@@ -381,6 +381,54 @@ body::before {
   color: var(--ink);
 }
 .field input::placeholder { color: color-mix(in srgb, var(--ink) 35%, white); }
+.field textarea {
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, white 75%, var(--cream));
+  border-radius: 0.8rem;
+  padding: 0.7rem 1rem;
+  font: 0.8rem/1.5 "SFMono-Regular", ui-monospace, Menlo, monospace;
+  color: var(--ink);
+  resize: vertical;
+}
+.repo-list { list-style: none; margin: 0.4rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; max-height: 16rem; overflow-y: auto; }
+.repo-list form { margin: 0; }
+.repo-pick {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
+  background: color-mix(in srgb, white 75%, var(--cream));
+  border-radius: 0.8rem;
+  padding: 0.6rem 0.9rem;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.repo-pick:hover { background: var(--lavender); }
+.repo-pick .mono { font-family: "SFMono-Regular", ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+.repo-pick .tag {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 50%, white);
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+.or-line { text-align: center; color: color-mix(in srgb, var(--ink) 40%, white); font-size: 0.8rem; margin: 1rem 0 0.2rem; }
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--ink) 50%, white);
+  text-decoration: underline;
+  cursor: pointer;
+}
 .sr-only {
   position: absolute;
   width: 1px;

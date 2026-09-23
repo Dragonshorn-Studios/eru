@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { parseInteger } from "./util.js";
 
 export const MIN_SESSION_SECRET = 16;
@@ -23,6 +24,9 @@ export interface Config {
   openCodeModel?: string;
   openCodeAskModel?: string;
   openCodeMapModel?: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -67,6 +71,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const openCodeAskModel = env.ERU_OPENCODE_ASK_MODEL?.trim() || undefined;
   const openCodeMapModel = env.ERU_OPENCODE_MAP_MODEL?.trim() || undefined;
 
+  const githubAppId = optionalDigits(env, "ERU_GITHUB_APP_ID");
+  const githubAppPrivateKey = loadAppPrivateKey(env);
+  const githubAppInstallationId = optionalDigits(env, "ERU_GITHUB_APP_INSTALLATION_ID");
+  if (githubAppId && !githubAppPrivateKey) {
+    throw new Error("eru: ERU_GITHUB_APP_ID needs ERU_GITHUB_APP_PRIVATE_KEY or ERU_GITHUB_APP_PRIVATE_KEY_FILE");
+  }
+  if (githubAppPrivateKey && !githubAppId) {
+    throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY needs ERU_GITHUB_APP_ID");
+  }
+
 
   return {
     host,
@@ -82,7 +96,43 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     openCodeModel,
     openCodeAskModel,
     openCodeMapModel,
+    githubAppId,
+    githubAppPrivateKey,
+    githubAppInstallationId,
   };
+}
+
+function optionalDigits(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key]?.trim();
+  if (value === undefined || value === "") return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`eru: ${key} is not a number`);
+  }
+  return value;
+}
+
+// PEM can come inline (with literal \n escapes) or from a file path; the file
+// wins when both are set so operators can rotate by moving a file.
+function loadAppPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
+  const file = env.ERU_GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  if (file) {
+    let pem: string;
+    try {
+      pem = readFileSync(file, "utf8").trim();
+    } catch {
+      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is unreadable");
+    }
+    if (!pem.includes("PRIVATE KEY")) {
+      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is not a PEM private key");
+    }
+    return pem;
+  }
+  const inline = env.ERU_GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
+  if (!inline) return undefined;
+  if (!inline.includes("PRIVATE KEY")) {
+    throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY is not a PEM private key");
+  }
+  return inline;
 }
 
 function requiredOrDefault(env: NodeJS.ProcessEnv, key: string, fallback: string): string {

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, sign } from "node:crypto";
 
 export const FORGE_GITHUB = "github";
 export const GITHUB_API_BASE = "https://api.github.com";
@@ -178,4 +178,171 @@ export async function fetchRepoTarball(
   }
   if (data.byteLength > TARBALL_MAX_BYTES) return { ok: false, error: "toobig" };
   return { ok: true, data: Buffer.from(data) };
+}
+
+// ---- GitHub App auth -------------------------------------------------------
+// A GitHub App authenticates as itself with a short-lived RS256 JWT signed by
+// the app's private key, then mints per-installation access tokens used like
+// PATs. The private key is stored with the same AES-GCM envelope as forge
+// tokens and is never rendered back.
+
+export interface GithubAppCredentials {
+  appId: string;
+  privateKey: string;
+  installationId?: string;
+}
+
+export type AppError = "invalid" | "auth" | "unreachable" | "noinstall" | "ambiguous";
+
+export interface AppRepo {
+  owner: string;
+  name: string;
+  privateRepo: boolean;
+}
+
+const APP_JWT_TTL_SECONDS = 600;
+const APP_JWT_CLOCK_SKEW_SECONDS = 60;
+const TOKEN_REFRESH_MARGIN_MS = 60_000;
+const APP_REPO_PAGE_LIMIT = 10;
+
+export function githubAppJwt(appId: string, privateKey: string, now: () => number = Date.now): string {
+  const iat = Math.floor(now() / 1000) - APP_JWT_CLOCK_SKEW_SECONDS;
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ iat, exp: iat + APP_JWT_TTL_SECONDS, iss: appId })).toString("base64url");
+  const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), privateKey).toString("base64url");
+  return `${header}.${payload}.${signature}`;
+}
+
+type AppResult<T> = { ok: true; value: T } | { ok: false; error: AppError };
+
+async function appFetch(
+  creds: GithubAppCredentials,
+  path: string,
+  fetchImpl: FetchLike,
+  apiBase: string,
+  init: RequestInit = {},
+): Promise<AppResult<Response>> {
+  let jwt: string;
+  try {
+    jwt = githubAppJwt(creds.appId, creds.privateKey);
+  } catch {
+    return { ok: false, error: "invalid" };
+  }
+  let res: Response;
+  try {
+    res = await fetchImpl(`${apiBase.replace(/\/+$/, "")}${path}`, {
+      ...init,
+      headers: { ...forgeHeaders(jwt), ...(init.headers as Record<string, string> | undefined) },
+      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "unreachable" };
+  }
+  if (res.status === 401 || res.status === 403) return { ok: false, error: "auth" };
+  if (!res.ok) return { ok: false, error: "unreachable" };
+  return { ok: true, value: res };
+}
+
+export interface GithubAppClient {
+  /** Resolve the installation to act as: the configured id, or the only one listed. */
+  installationId(): Promise<AppResult<string>>;
+  /** Mint (or reuse a cached) installation access token. */
+  installationToken(): Promise<AppResult<string>>;
+  /** Repositories the installation can read. */
+  listRepos(): Promise<AppResult<AppRepo[]>>;
+}
+
+export function createGithubAppClient(
+  creds: GithubAppCredentials,
+  fetchImpl: FetchLike = fetch,
+  apiBase: string = GITHUB_API_BASE,
+): GithubAppClient {
+  let cachedToken: { token: string; expiresAtMs: number } | undefined;
+
+  async function installationId(): Promise<AppResult<string>> {
+    if (creds.installationId) return { ok: true, value: creds.installationId };
+    const res = await appFetch(creds, "/app/installations", fetchImpl, apiBase);
+    if (!res.ok) return res;
+    let data: unknown;
+    try {
+      data = await res.value.json();
+    } catch {
+      return { ok: false, error: "unreachable" };
+    }
+    const list = Array.isArray(data) ? data : [];
+    const ids = list
+      .map((row) => (row as { id?: unknown })?.id)
+      .filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0);
+    if (ids.length === 0) return { ok: false, error: "noinstall" };
+    if (ids.length > 1) return { ok: false, error: "ambiguous" };
+    return { ok: true, value: String(ids[0]) };
+  }
+
+  async function installationToken(): Promise<AppResult<string>> {
+    if (cachedToken && cachedToken.expiresAtMs - TOKEN_REFRESH_MARGIN_MS > Date.now()) {
+      return { ok: true, value: cachedToken.token };
+    }
+    const install = await installationId();
+    if (!install.ok) return install;
+    const res = await appFetch(
+      creds,
+      `/app/installations/${encodeURIComponent(install.value)}/access_tokens`,
+      fetchImpl,
+      apiBase,
+      { method: "POST" },
+    );
+    if (!res.ok) return res;
+    let data: unknown;
+    try {
+      data = await res.value.json();
+    } catch {
+      return { ok: false, error: "unreachable" };
+    }
+    const body = data as { token?: unknown; expires_at?: unknown };
+    if (typeof body?.token !== "string" || !body.token) return { ok: false, error: "unreachable" };
+    const expiresAtMs = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
+    cachedToken = {
+      token: body.token,
+      expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + APP_JWT_TTL_SECONDS * 1000,
+    };
+    return { ok: true, value: body.token };
+  }
+
+  async function listRepos(): Promise<AppResult<AppRepo[]>> {
+    const token = await installationToken();
+    if (!token.ok) return token;
+    const repos: AppRepo[] = [];
+    for (let page = 1; page <= APP_REPO_PAGE_LIMIT; page += 1) {
+      let res: Response;
+      try {
+        res = await fetchImpl(
+          `${apiBase.replace(/\/+$/, "")}/installation/repositories?per_page=100&page=${page}`,
+          { headers: forgeHeaders(token.value), signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS) },
+        );
+      } catch {
+        return { ok: false, error: "unreachable" };
+      }
+      if (res.status === 401 || res.status === 403) return { ok: false, error: "auth" };
+      if (!res.ok) return { ok: false, error: "unreachable" };
+      let data: unknown;
+      try {
+        data = await res.json();
+      } catch {
+        return { ok: false, error: "unreachable" };
+      }
+      const list = (data as { repositories?: unknown })?.repositories;
+      const rows = Array.isArray(list) ? list : [];
+      for (const row of rows) {
+        const owner = (row as { owner?: { login?: unknown } })?.owner?.login;
+        const name = (row as { name?: unknown })?.name;
+        if (typeof owner === "string" && typeof name === "string") {
+          repos.push({ owner, name, privateRepo: (row as { private?: unknown })?.private === true });
+        }
+      }
+      if (rows.length < 100) return { ok: true, value: repos };
+    }
+    return { ok: true, value: repos };
+  }
+
+  return { installationId, installationToken, listRepos };
 }

@@ -64,6 +64,8 @@ On start Eru migrates:
 
 Re-running migrate is a no-op once those files are recorded. Connect a GitHub repo at `/connect`; the token is stored encrypted (AES-256-GCM; set `ERU_FORGE_TOKEN_KEY` to keep it decryptable across session-secret rotation) and used only for forge reads.
 
+A GitHub App can replace the manual token: set `ERU_GITHUB_APP_ID` + `ERU_GITHUB_APP_PRIVATE_KEY` (or `_FILE`, plus optional `ERU_GITHUB_APP_INSTALLATION_ID`) in `.env`, or save the same fields on `/config` (the PEM is stored with the same encrypted envelope). `/connect` then lists the installation's repositories to pick from — or a repo can still be added manually. App-connected repos refresh with short-lived installation tokens minted on demand; environment variables always win over what `/config` saved.
+
 Ask shells out to OpenCode (`ERU_OPENCODE_BIN`, default `opencode`). Each question runs in a throwaway directory holding only the materialized `map/*.md` files, with an `opencode.json` that denies every tool except read/glob/grep (never bash, edit, write, or webfetch). A missing or failing binary fails closed with an operator notice.
 
 ## License

@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig, MIN_SESSION_SECRET } from "./config.js";
 
@@ -69,5 +72,47 @@ describe("loadConfig", () => {
   it("fails closed on an empty or short forge token key", () => {
     expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "   " })).toThrow(/ERU_FORGE_TOKEN_KEY/);
     expect(() => loadConfig({ ...secrets, ERU_FORGE_TOKEN_KEY: "short" })).toThrow(/too short/);
+  });
+});
+
+describe("github app config", () => {
+  const PEM = "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----";
+
+  it("loads app id + inline PEM, normalizing \\n escapes", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM.replace(/\n/g, "\\n"),
+      ERU_GITHUB_APP_INSTALLATION_ID: "6789",
+    });
+    expect(cfg.githubAppId).toBe("12345");
+    expect(cfg.githubAppPrivateKey).toBe(PEM);
+    expect(cfg.githubAppInstallationId).toBe("6789");
+    expect(loadConfig({ ...secrets }).githubAppId).toBeUndefined();
+  });
+
+  it("reads the PEM from a file, and the file wins over an inline key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "eru-pem-"));
+    const file = join(dir, "app.pem");
+    writeFileSync(file, PEM);
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "1",
+      ERU_GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\nother\\n-----END PRIVATE KEY-----",
+      ERU_GITHUB_APP_PRIVATE_KEY_FILE: file,
+    });
+    expect(cfg.githubAppPrivateKey).toBe(PEM);
+  });
+
+  it("fails closed on a partial app config or a non-PEM key", () => {
+    expect(() => loadConfig({ ...secrets, ERU_GITHUB_APP_ID: "1" })).toThrow(/PRIVATE_KEY/);
+    expect(() => loadConfig({ ...secrets, ERU_GITHUB_APP_PRIVATE_KEY: PEM })).toThrow(/APP_ID/);
+    expect(() => loadConfig({ ...secrets, ERU_GITHUB_APP_ID: "1", ERU_GITHUB_APP_PRIVATE_KEY: "blob" })).toThrow(
+      /PEM/,
+    );
+    expect(() => loadConfig({ ...secrets, ERU_GITHUB_APP_ID: "abc" })).toThrow(/APP_ID/);
+    expect(() =>
+      loadConfig({ ...secrets, ERU_GITHUB_APP_ID: "1", ERU_GITHUB_APP_PRIVATE_KEY: PEM, ERU_GITHUB_APP_PRIVATE_KEY_FILE: "/nope.pem" }),
+    ).toThrow(/PRIVATE_KEY_FILE/);
   });
 });

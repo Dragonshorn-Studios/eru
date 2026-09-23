@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS repos (
   forge TEXT NOT NULL DEFAULT 'github',
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
+  auth_source TEXT NOT NULL DEFAULT 'manual',
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
   connected_at TEXT,
@@ -85,6 +86,15 @@ const MIGRATIONS: Migration[] = [
       db.exec(SETTINGS_SQL);
     },
   },
+  {
+    name: "0004_auth_source.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (!columns.some((col) => col.name === "auth_source")) {
+        db.exec(`ALTER TABLE repos ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'manual'`);
+      }
+    },
+  },
 ];
 
 export function openDb(path: string): SqliteDb {
@@ -129,29 +139,39 @@ export interface MappedRepo {
   forge: string;
   owner: string;
   name: string;
+  authSource: string;
   lastMappedRef: string | null;
   lastMappedAt: string | null;
 }
+
+export type RepoAuthSource = "manual" | "app";
 
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
   return db
     .prepare(
-      `SELECT id, forge, owner, name, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
+      `SELECT id, forge, owner, name, auth_source AS authSource, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt
        FROM repos ORDER BY connected_at DESC, id DESC LIMIT 1`,
     )
     .get() as MappedRepo | undefined;
 }
 
-export function upsertConnectedRepo(db: SqliteDb, repo: { forge: string; owner: string; name: string }, at: string): number {
+export function upsertConnectedRepo(
+  db: SqliteDb,
+  repo: { forge: string; owner: string; name: string },
+  at: string,
+  authSource: RepoAuthSource = "manual",
+): number {
   const row = db
     .prepare(
-      `INSERT INTO repos (forge, owner, name, connected_at, created_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (forge, owner, name) DO UPDATE SET connected_at = excluded.connected_at
+      `INSERT INTO repos (forge, owner, name, auth_source, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (forge, owner, name) DO UPDATE SET
+         connected_at = excluded.connected_at,
+         auth_source = excluded.auth_source
        RETURNING id`,
     )
-    .get(repo.forge, repo.owner, repo.name, at, at) as { id: number };
+    .get(repo.forge, repo.owner, repo.name, authSource, at, at) as { id: number };
   return row.id;
 }
 
@@ -247,7 +267,7 @@ export function upsertPage(
          title = excluded.title,
          body = excluded.body,
          sort_order = excluded.sort_order,
-         mapped_ref = excluded.mapped_ref,
+         mapped_ref = COALESCE(excluded.mapped_ref, pages.mapped_ref),
          updated_at = excluded.updated_at
        RETURNING id`,
     )
