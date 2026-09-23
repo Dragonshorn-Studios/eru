@@ -24,7 +24,7 @@ export interface MappedPageDraft {
 export type RefreshError = "unconfigured" | "failed" | "nomap";
 export type RefreshResult = { ok: true; pages: MappedPageDraft[] } | { ok: false; error: RefreshError };
 
-export type RefreshRunner = (workdir: string, repoLabel: string, ref: string) => Promise<RefreshResult>;
+export type RefreshRunner = (workdir: string, repoLabel: string, ref: string, model?: string) => Promise<RefreshResult>;
 
 export function isValidMapRef(ref: string): boolean {
   return MAP_REF_RE.test(ref) && !ref.includes("..");
@@ -34,7 +34,7 @@ export function isValidMapRef(ref: string): boolean {
 // deny-everything permission file as Ask, and the map comes back as JSON on
 // stdout which we validate before it ever touches SQLite.
 export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
-  return async (workdir, repoLabel, ref) => {
+  return async (workdir, repoLabel, ref, model) => {
     try {
       await writeFile(
         join(workdir, "opencode.json"),
@@ -43,7 +43,8 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
         }),
       );
       const args = ["run", "--format", "default"];
-      if (opts.model) args.push("-m", opts.model);
+      const runModel = model ?? opts.model;
+      if (runModel) args.push("-m", runModel);
       args.push(refreshPrompt(repoLabel, ref));
       const { stdout } = await execFileP(opts.bin, args, {
         cwd: workdir,

@@ -170,6 +170,19 @@ body::before {
   margin: 0 0 0.6rem;
   font-size: 2rem;
 }
+.card h3 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 1.25rem;
+  margin: 1rem 0 0.4rem;
+}
+.config-refresh {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+  flex-wrap: wrap;
+}
 .kicker {
   font-size: 0.72rem;
   letter-spacing: 0.22em;

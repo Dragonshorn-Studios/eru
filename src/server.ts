@@ -27,13 +27,16 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import {
   deleteForgeCredential,
+  deleteSetting,
   getForgeCredential,
   getPage,
   getPrimaryRepo,
+  getSetting,
   listAllPages,
   listPages,
   setForgeCredential,
   setLastMapped,
+  setSetting,
   upsertConnectedRepo,
   upsertPage,
   type SqliteDb,
@@ -48,11 +51,19 @@ import {
   type TarballError,
   type VerifyError,
 } from "./forge.js";
-import { ASK_MAX_QUESTION, createOpenCodeRunner, type AskRunner } from "./opencode.js";
+import {
+  ASK_MAX_QUESTION,
+  createModelDiscovery,
+  createOpenCodeRunner,
+  isValidModelName,
+  type AskRunner,
+  type ModelDiscovery,
+} from "./opencode.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
   appPage,
   askResultFragment,
+  configPage,
   CONNECT_ERRORS,
   connectPage,
   REFRESH_TARBALL_ERRORS,
@@ -60,6 +71,7 @@ import {
   loginPage,
   themeCss,
   type ChromeModel,
+  type ConfigView,
 } from "./ui.js";
 
 export interface AppOptions {
@@ -70,6 +82,7 @@ export interface AppOptions {
   fetchImpl?: FetchLike;
   askRunner?: AskRunner;
   refreshRunner?: RefreshRunner;
+  modelDiscovery?: ModelDiscovery;
 }
 
 type Env = {
@@ -89,6 +102,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const refresh =
     opts.refreshRunner ??
     createMapRefresher({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
+  const modelDiscovery =
+    opts.modelDiscovery ?? createModelDiscovery({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs });
+  void modelDiscovery.refresh();
   const app = new Hono<Env>();
   const htmxJs = loadHtmx();
 
@@ -211,7 +227,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   app.post("/ask", async (c) => {
     const body = await c.req.parseBody();
     const q = typeof body.q === "string" ? body.q.trim() : "";
-    const notice = await askNotice(db, ask, q);
+    const notice = await askNotice(db, config, ask, q);
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(askResultFragment(notice));
@@ -228,6 +244,34 @@ export function createApp(opts: AppOptions): Hono<Env> {
       return c.body(refreshResultFragment(notice));
     }
     return html(c, appPage(chromeModel(c, db, undefined, undefined, notice)));
+  });
+
+  app.get("/config", (c) => html(c, configPage(chromeModel(c, db), configView(db, config, modelDiscovery))));
+
+  app.post("/config/models", async (c) => {
+    const body = await c.req.parseBody();
+    const askModel = typeof body.ask_model === "string" ? body.ask_model.trim() : "";
+    const mapModel = typeof body.map_model === "string" ? body.map_model.trim() : "";
+    if ((askModel && !isValidModelName(askModel)) || (mapModel && !isValidModelName(mapModel))) {
+      return html(
+        c,
+        configPage(chromeModel(c, db), configView(db, config, modelDiscovery), "That is not a model name."),
+        400,
+      );
+    }
+    const at = new Date(now()).toISOString();
+    db.transaction(() => {
+      if (askModel) setSetting(db, SETTING_ASK_MODEL, askModel, at);
+      else deleteSetting(db, SETTING_ASK_MODEL);
+      if (mapModel) setSetting(db, SETTING_MAP_MODEL, mapModel, at);
+      else deleteSetting(db, SETTING_MAP_MODEL);
+    })();
+    return c.redirect("/config");
+  });
+
+  app.post("/config/models/refresh", async (c) => {
+    await modelDiscovery.refresh();
+    return c.redirect("/config");
   });
 
   return app;
@@ -248,6 +292,54 @@ function requestClientKey(c: Context<Env>): string {
 
 function connectStatus(error: VerifyError): ContentfulStatusCode {
   return error === "unreachable" ? 502 : 400;
+}
+
+const SETTING_ASK_MODEL = "opencode.ask_model";
+const SETTING_MAP_MODEL = "opencode.map_model";
+
+type ModelPurpose = "ask" | "map";
+type ModelSource = "env" | "stored" | "default";
+
+// Purpose env > saved setting > general env > OpenCode's own default.
+function resolveModel(config: Config, db: SqliteDb, purpose: ModelPurpose): { value?: string; source: ModelSource } {
+  const envSpecific = purpose === "ask" ? config.openCodeAskModel : config.openCodeMapModel;
+  if (envSpecific) return { value: envSpecific, source: "env" };
+  const stored = getSetting(db, purpose === "ask" ? SETTING_ASK_MODEL : SETTING_MAP_MODEL);
+  if (stored) return { value: stored, source: "stored" };
+  if (config.openCodeModel) return { value: config.openCodeModel, source: "env" };
+  return { source: "default" };
+}
+
+function modelRow(
+  label: string,
+  field: string,
+  envKey: string,
+  resolved: { value?: string; source: ModelSource },
+  stored: string,
+): ConfigView["ask"] {
+  return { label, field, envKey, effective: resolved.value ?? "", source: resolved.source, stored };
+}
+
+function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery): ConfigView {
+  return {
+    bin: config.openCodeBin,
+    timeoutMs: config.openCodeTimeoutMs,
+    ask: modelRow(
+      "Ask model",
+      "ask_model",
+      "ERU_OPENCODE_ASK_MODEL",
+      resolveModel(config, db, "ask"),
+      getSetting(db, SETTING_ASK_MODEL) ?? "",
+    ),
+    map: modelRow(
+      "Map model",
+      "map_model",
+      "ERU_OPENCODE_MAP_MODEL",
+      resolveModel(config, db, "map"),
+      getSetting(db, SETTING_MAP_MODEL) ?? "",
+    ),
+    discovered: discovery.snapshot(),
+  };
 }
 
 async function refreshNotice(
@@ -289,7 +381,12 @@ async function refreshNotice(
   }
 
   try {
-    const result = await refresh(joinPath(workdir, "checkout"), `${repo.owner}/${repo.name}`, ref);
+    const result = await refresh(
+      joinPath(workdir, "checkout"),
+      `${repo.owner}/${repo.name}`,
+      ref,
+      resolveModel(config, db, "map").value,
+    );
     if (!result.ok) {
       console.log(`refresh failed: ${result.error}`);
       if (result.error === "unconfigured") return "OpenCode is not configured on this host (check ERU_OPENCODE_BIN).";
@@ -310,14 +407,14 @@ async function refreshNotice(
   }
 }
 
-async function askNotice(db: SqliteDb, ask: AskRunner, q: string): Promise<string> {
+async function askNotice(db: SqliteDb, config: Config, ask: AskRunner, q: string): Promise<string> {
   if (!q) return "Ask something first.";
   if (q.length > ASK_MAX_QUESTION) return `Keep questions under ${ASK_MAX_QUESTION} characters.`;
   const repo = getPrimaryRepo(db);
   if (!repo) return "Connect a repo before asking.";
   const pages = listAllPages(db, repo.id);
   if (pages.length === 0) return "The map has no pages yet — refresh the map first.";
-  const result = await ask(q, pages, `${repo.owner}/${repo.name}`);
+  const result = await ask(q, pages, `${repo.owner}/${repo.name}`, resolveModel(config, db, "ask").value);
   if (result.ok) return result.answer || "OpenCode returned an empty answer.";
   console.log(`ask refused: ${result.error}`);
   return result.error === "unconfigured"

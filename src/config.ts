@@ -21,6 +21,8 @@ export interface Config {
   openCodeBin: string;
   openCodeTimeoutMs: number;
   openCodeModel?: string;
+  openCodeAskModel?: string;
+  openCodeMapModel?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -62,6 +64,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_OPENCODE_TIMEOUT_MS is invalid");
   }
   const openCodeModel = env.ERU_OPENCODE_MODEL?.trim() || undefined;
+  const openCodeAskModel = env.ERU_OPENCODE_ASK_MODEL?.trim() || undefined;
+  const openCodeMapModel = env.ERU_OPENCODE_MAP_MODEL?.trim() || undefined;
 
 
   return {
@@ -76,6 +80,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     openCodeBin,
     openCodeTimeoutMs,
     openCodeModel,
+    openCodeAskModel,
+    openCodeMapModel,
   };
 }
 

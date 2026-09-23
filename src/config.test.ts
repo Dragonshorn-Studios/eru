@@ -29,6 +29,13 @@ describe("loadConfig", () => {
     expect(cfg.openCodeBin).toBe("/opt/oc");
     expect(cfg.openCodeTimeoutMs).toBe(5_000);
     expect(cfg.openCodeModel).toBe("anthropic/claude");
+    const scoped = loadConfig({
+      ...secrets,
+      ERU_OPENCODE_ASK_MODEL: "anthropic/haiku",
+      ERU_OPENCODE_MAP_MODEL: " openai/gpt-5 ",
+    });
+    expect(scoped.openCodeAskModel).toBe("anthropic/haiku");
+    expect(scoped.openCodeMapModel).toBe("openai/gpt-5");
     expect(() => loadConfig({ ...secrets, ERU_OPENCODE_TIMEOUT_MS: "10" })).toThrow(/ERU_OPENCODE_TIMEOUT_MS/);
     expect(() => loadConfig({ ...secrets, ERU_OPENCODE_BIN: " " })).toThrow(/ERU_OPENCODE_BIN/);
   });

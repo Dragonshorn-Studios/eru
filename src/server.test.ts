@@ -66,6 +66,19 @@ function cookieValue(line: string): string {
   return line.split(";")[0].slice(SESSION_COOKIE.length + 1);
 }
 
+async function fakeTarball() {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, mkdir, writeFile, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { promisify } = await import("node:util");
+  const dir = await mkdtemp(join(tmpdir(), "eru-tar-"));
+  await mkdir(join(dir, "repo-sha"));
+  await writeFile(join(dir, "repo-sha", "index.ts"), "export {};\n");
+  await promisify(execFile)("tar", ["-czf", join(dir, "a.tgz"), "-C", dir, "repo-sha"]);
+  return readFile(join(dir, "a.tgz"));
+}
+
 describe("operator gate", () => {
   it("serves health without a cookie and without Basic Auth", async () => {
     const { app: instance } = app();
@@ -497,19 +510,6 @@ describe("refresh map", () => {
     });
   }
 
-  async function fakeTarball() {
-    const { execFile } = await import("node:child_process");
-    const { mkdtemp, mkdir, writeFile, readFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const { promisify } = await import("node:util");
-    const dir = await mkdtemp(join(tmpdir(), "eru-tar-"));
-    await mkdir(join(dir, "repo-sha"));
-    await writeFile(join(dir, "repo-sha", "index.ts"), "export {};\n");
-    await promisify(execFile)("tar", ["-czf", join(dir, "a.tgz"), "-C", dir, "repo-sha"]);
-    return readFile(join(dir, "a.tgz"));
-  }
-
   it("upserts pages and last_mapped_ref from OpenCode output", async () => {
     const tar = await fakeTarball();
     let sentAuth: string | undefined;
@@ -653,5 +653,137 @@ describe("docs lock", () => {
       expect(pointer.length).toBeLessThan(cursor.length);
       expect(pointer).not.toEqual(cursor);
     }
+  });
+});
+
+describe("config page", () => {
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  async function post(instance: ReturnType<typeof app>, path: string, fields: Record<string, string>) {
+    const { cookie, csrf } = await authed(instance);
+    return instance.app.request(path, {
+      method: "POST",
+      body: new URLSearchParams({ ...fields, [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+  }
+
+  it("renders model fields with env hints and the discovery datalist", async () => {
+    const instance = app({ openCodeModel: "anthropic/claude-sonnet-4" });
+    const { cookie } = await authed(instance);
+    const res = await instance.app.request("/config", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Ask model");
+    expect(body).toContain("Map model");
+    expect(body).toContain("ERU_OPENCODE_ASK_MODEL");
+    expect(body).toContain("ERU_OPENCODE_MAP_MODEL");
+    expect(body).toContain('list="opencode-models"');
+    expect(body).toContain("anthropic/claude-sonnet-4");
+  });
+
+  it("saves models to settings and passes them to the runners", async () => {
+    let askModel: string | undefined;
+    let mapModel: string | undefined;
+    const askRunner: AskRunner = async (_q, _p, _l, model) => {
+      askModel = model;
+      return { ok: true, answer: "ok" };
+    };
+    const refreshRunner: RefreshRunner = async (_w, _l, _r, model) => {
+      mapModel = model;
+      return { ok: false, error: "nomap" };
+    };
+    const instance = app({}, async () => new Response(new Uint8Array(await fakeTarball())), askRunner, refreshRunner);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }], "tok");
+
+    const res = await post(instance, "/config/models", {
+      ask_model: "anthropic/claude-haiku",
+      map_model: "openai/gpt-5",
+    });
+    expect(res.status).toBe(302);
+
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    await instance.app.request("/ask", {
+      method: "POST",
+      body: new URLSearchParams({ q: "hi", [CSRF_FIELD]: session.csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
+    });
+    expect(askModel).toBe("anthropic/claude-haiku");
+
+    await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ ref: "main", [CSRF_FIELD]: session.csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
+    });
+    expect(mapModel).toBe("openai/gpt-5");
+
+    // Clearing the field removes the stored override.
+    await post(instance, "/config/models", { ask_model: "", map_model: "openai/gpt-5" });
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("OpenCode default");
+  });
+
+  it("env-specific model beats the saved setting", async () => {
+    let askModel: string | undefined;
+    const askRunner: AskRunner = async (_q, _p, _l, model) => {
+      askModel = model;
+      return { ok: true, answer: "ok" };
+    };
+    const instance = app({ openCodeAskModel: "env/forced" }, undefined, askRunner);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
+    await post(instance, "/config/models", { ask_model: "stored/loses", map_model: "" });
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    await instance.app.request("/ask", {
+      method: "POST",
+      body: new URLSearchParams({ q: "hi", [CSRF_FIELD]: session.csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
+    });
+    expect(askModel).toBe("env/forced");
+
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("in effect from <code>ERU_OPENCODE_ASK_MODEL</code>");
+  });
+
+  it("rejects malformed model names without storing", async () => {
+    const instance = app();
+    const res = await post(instance, "/config/models", { ask_model: "not a model!", map_model: "" });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("not a model name");
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("OpenCode default");
+  });
+
+  it("refreshes the discovered model list", async () => {
+    let refreshed = 0;
+    const discovery = {
+      snapshot: () => ({ models: ["prov/a", "prov/b"] }),
+      refresh: async () => {
+        refreshed++;
+      },
+    };
+    const config = gatedConfig();
+    const db = openDb(":memory:");
+    const instance = { app: createApp({ config, db, modelDiscovery: discovery }), config, db };
+    expect(refreshed).toBe(1); // boot refresh
+    const res = await post(instance, "/config/models/refresh", {});
+    expect(res.status).toBe(302);
+    expect(refreshed).toBe(2);
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("2 models discovered");
+    expect(page).toContain('value="prov/a"');
   });
 });

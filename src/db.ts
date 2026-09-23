@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS forge_credentials (
 );
 `;
 
+const SETTINGS_SQL = `
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 const INIT_SQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT PRIMARY KEY,
@@ -49,6 +57,8 @@ CREATE TABLE IF NOT EXISTS pages (
   updated_at TEXT NOT NULL,
   UNIQUE (repo_id, slug)
 );
+
+${SETTINGS_SQL}
 `;
 
 interface Migration {
@@ -67,6 +77,12 @@ const MIGRATIONS: Migration[] = [
         db.exec(`ALTER TABLE repos ADD COLUMN connected_at TEXT`);
       }
       db.exec(FORGE_CREDENTIALS_SQL);
+    },
+  },
+  {
+    name: "0003_settings.sql",
+    apply(db) {
+      db.exec(SETTINGS_SQL);
     },
   },
 ];
@@ -160,6 +176,22 @@ export function deleteForgeCredential(db: SqliteDb, repoId: number): void {
 
 export function setLastMapped(db: SqliteDb, repoId: number, ref: string, at: string): void {
   db.prepare(`UPDATE repos SET last_mapped_ref = ?, last_mapped_at = ? WHERE id = ?`).run(ref, at, repoId);
+}
+
+export function getSetting(db: SqliteDb, key: string): string | undefined {
+  const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(db: SqliteDb, key: string, value: string, at: string): void {
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, value, at);
+}
+
+export function deleteSetting(db: SqliteDb, key: string): void {
+  db.prepare(`DELETE FROM settings WHERE key = ?`).run(key);
 }
 
 export interface PageTocEntry {

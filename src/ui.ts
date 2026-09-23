@@ -55,6 +55,7 @@ function topbar(model: ChromeModel): string {
       ${repoPill}
       ${mapped}
       <span class="grow"></span>
+      <a class="pill pill-link" href="/config">Config</a>
       <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit">Log out</button></form>
     </header>`;
 }
@@ -131,6 +132,78 @@ export const CONNECT_ERRORS: Record<VerifyError, string> = {
   auth: "The forge token cannot read that repository, or the request was rate limited. Use a least-privilege token for this repo.",
   unreachable: "Could not reach the forge. Try again in a moment.",
 };
+
+export interface ConfigModelRow {
+  label: string;
+  field: string;
+  envKey: string;
+  effective: string;
+  source: "env" | "stored" | "default";
+  stored: string;
+}
+
+export interface ConfigView {
+  bin: string;
+  timeoutMs: number;
+  ask: ConfigModelRow;
+  map: ConfigModelRow;
+  discovered: { models: string[]; error?: string; updatedAt?: string };
+}
+
+function modelSourceHint(row: ConfigModelRow): string {
+  if (row.source === "env") return `in effect from <code>${escapeHtml(row.envKey)}</code>`;
+  if (row.source === "stored") return "saved on this page";
+  return "OpenCode default";
+}
+
+function configModelField(row: ConfigModelRow): string {
+  return `<label class="field">
+    <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective || "opencode default")} · ${modelSourceHint(row)}</span></span>
+    <input type="text" name="${row.field}" list="opencode-models" autocomplete="off" value="${escapeHtml(row.stored)}" placeholder="${escapeHtml(row.effective || "provider/model")}"/>
+    <span class="field-hint">override via <code>${escapeHtml(row.envKey)}</code> in .env and restart</span>
+  </label>`;
+}
+
+export function configPage(model: ChromeModel, view: ConfigView, notice = ""): string {
+  const flash = notice ? `<p class="flash" role="alert">${escapeHtml(notice)}</p>` : "";
+  const options = view.discovered.models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("");
+  const discoveredLine = view.discovered.error
+    ? `model list unavailable — ${escapeHtml(view.discovered.error)}`
+    : view.discovered.models.length > 0
+      ? `${view.discovered.models.length} models discovered${view.discovered.updatedAt ? ` · ${escapeHtml(view.discovered.updatedAt)}` : ""}`
+      : "no models discovered yet — press Refresh model list once OpenCode is configured";
+  return layout(
+    "Eru — config",
+    `<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    ${topbar(model)}
+    <main id="main" class="connect">
+      <section class="card connect-card">
+        <h2>Config</h2>
+        <p class="page-lead">OpenCode settings. Environment variables win over anything saved here — change <code>.env</code> and restart for those.</p>
+        ${flash}
+        <h3>OpenCode</h3>
+        <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> · timeout <code>${view.timeoutMs} ms</code> — change <code>ERU_OPENCODE_BIN</code> / <code>ERU_OPENCODE_TIMEOUT_MS</code></p>
+        <form class="connect-form" method="post" action="/config/models" autocomplete="off">
+          ${csrfInput(model.csrf)}
+          <datalist id="opencode-models">${options}</datalist>
+          ${configModelField(view.ask)}
+          ${configModelField(view.map)}
+          <button class="enter" type="submit">Save models</button>
+        </form>
+        <form class="config-refresh" method="post" action="/config/models/refresh">
+          ${csrfInput(model.csrf)}
+          <button class="refresh-run" type="submit">Refresh model list</button>
+          <span class="field-hint">${discoveredLine}</span>
+        </form>
+      </section>
+    </main>
+    ${foot(model)}
+  </div>
+</body>`,
+  );
+}
 
 export const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
   invalid: "That ref does not look right.",
