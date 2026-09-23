@@ -101,6 +101,49 @@ body::before {
   color: color-mix(in srgb, var(--ink) 55%, white);
   cursor: pointer;
   font: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+}
+.user-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, var(--cream) 70%, white);
+  border-radius: 999px;
+  padding: 0.22rem 0.75rem 0.22rem 0.22rem;
+  font-size: 0.85rem;
+}
+.user-pill .user-name {
+  color: color-mix(in srgb, var(--ink) 75%, white);
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-pill form { display: inline-flex; margin: 0; }
+.user-pill .logout:hover { color: var(--ink); text-decoration: underline; }
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-block;
+  object-fit: cover;
+}
+.avatar-mono {
+  background: color-mix(in srgb, var(--mint) 65%, white);
+  border: 1px solid color-mix(in srgb, var(--moss) 45%, transparent);
+  color: color-mix(in srgb, var(--ink) 70%, white);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
 }
 
 .masthead {
@@ -119,23 +162,28 @@ body::before {
   color: color-mix(in srgb, var(--ink) 50%, white);
 }
 .tabs {
-  display: flex;
-  gap: 0.4rem;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lavender) 45%, var(--cream));
 }
 .tab {
   font-size: 0.82rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   text-decoration: none;
-  color: color-mix(in srgb, var(--ink) 55%, white);
-  padding: 0.45rem 1.1rem;
+  color: color-mix(in srgb, var(--ink) 60%, white);
+  padding: 0.45rem 1.3rem;
   border-radius: 999px;
   border: 1px solid transparent;
 }
 .tab[aria-current="page"] {
   color: var(--ink);
-  border-color: color-mix(in srgb, var(--moss) 60%, white);
-  background: color-mix(in srgb, var(--mint) 40%, var(--cream));
+  border-color: color-mix(in srgb, var(--ink) 10%, transparent);
+  background: var(--cream);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 14%, transparent);
 }
 .tab:hover { color: var(--ink); }
 
@@ -291,17 +339,18 @@ body::before {
 .refresh-form input:disabled { opacity: 0.5; }
 .refresh-run {
   font-family: var(--font-sans);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 0.6rem 1.2rem;
+  padding: 0.65rem 1.2rem;
   border: none;
   border-radius: 999px;
   background: color-mix(in srgb, var(--moss) 55%, white);
-  color: color-mix(in srgb, var(--ink) 75%, white);
+  color: color-mix(in srgb, var(--ink) 80%, white);
   cursor: pointer;
-  align-self: flex-start;
+  width: 100%;
 }
+.refresh-run:hover:not(:disabled) { filter: brightness(0.96); }
 .refresh-run:disabled { opacity: 0.5; cursor: default; }
 .refresh-result {
   font-size: 0.85rem;

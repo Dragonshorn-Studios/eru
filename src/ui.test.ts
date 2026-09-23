@@ -6,6 +6,7 @@ describe("chrome copy", () => {
     const html = appPage({
       repo: { id: 1, owner: "owner", name: "repo", lastMappedRef: "main", lastMappedLabel: "never" },
       repos: [{ id: 1, owner: "owner", name: "repo" }],
+      user: { name: "operator", avatarUrl: null },
       path: "/",
       csrf: "csrf-token",
       pages: [{ slug: "architecture", title: "Architecture" }],

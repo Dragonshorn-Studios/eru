@@ -27,6 +27,7 @@ export interface Config {
   githubAppId?: string;
   githubAppPrivateKey?: string;
   githubAppInstallationId?: string;
+  uiUser?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -81,6 +82,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY needs ERU_GITHUB_APP_ID");
   }
 
+  const uiUser = env.ERU_UI_USER?.trim() || undefined;
+  if (uiUser && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(uiUser)) {
+    throw new Error("eru: ERU_UI_USER is not a GitHub login");
+  }
+
 
   return {
     host,
@@ -99,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     githubAppId,
     githubAppPrivateKey,
     githubAppInstallationId,
+    uiUser,
   };
 }
 

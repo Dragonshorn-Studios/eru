@@ -20,6 +20,7 @@ export interface ChromeModel {
     lastMappedLabel: string;
   } | null;
   repos: ChromeRepo[];
+  user: { name: string; avatarUrl: string | null };
   path: string;
   csrf: string;
   pages: PageTocEntry[];
@@ -80,7 +81,11 @@ function topbar(model: ChromeModel): string {
       ${mapped}
       <span class="grow"></span>
       <a class="pill pill-link" href="/config">Config</a>
-      <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit">Log out</button></form>
+      <span class="user-pill">
+        ${model.user.avatarUrl ? `<img class="avatar" src="${escapeHtml(model.user.avatarUrl)}" alt="" width="24" height="24"/>` : `<span class="avatar avatar-mono" aria-hidden="true">${escapeHtml(model.user.name.slice(0, 2))}</span>`}
+        <span class="user-name">${escapeHtml(model.user.name)}</span>
+        <form method="post" action="/logout">${csrfInput(model.csrf)}<button class="logout" type="submit" title="Log out">log out</button></form>
+      </span>
     </header>`;
 }
 
@@ -181,6 +186,7 @@ export interface ConfigView {
   bin: string;
   timeoutMs: number;
   app: ConfigAppView;
+  user: ConfigModelRow;
   ask: ConfigModelRow;
   map: ConfigModelRow;
   discovered: { models: string[]; error?: string; updatedAt?: string };
@@ -263,6 +269,19 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <button class="enter" type="submit">Save GitHub App</button>
         </form>
         ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
+      </section>
+      <section class="card">
+        <h2>Operator</h2>
+        <p class="mapped">the name (and GitHub avatar) shown in the top bar — <code>ERU_UI_USER</code></p>
+        <form class="connect-form" method="post" action="/config/user" autocomplete="off">
+          ${csrfInput(model.csrf)}
+          <label class="field">
+            <span>GitHub login <span class="field-hint">in effect: ${escapeHtml(view.user.effective)} · ${modelSourceHint(view.user)}</span></span>
+            <input type="text" name="ui_user" maxlength="39" value="${escapeHtml(view.user.stored)}" placeholder="${escapeHtml(view.user.effective === "operator" ? "github login (blank = operator)" : view.user.effective)}"/>
+            <span class="field-hint">shows your github.com avatar; leave empty for a monogram · override via <code>ERU_UI_USER</code></span>
+          </label>
+          <button class="enter" type="submit">Save operator</button>
+        </form>
       </section>
     </main>
     ${foot(model)}

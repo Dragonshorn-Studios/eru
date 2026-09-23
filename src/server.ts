@@ -211,16 +211,16 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.redirect("/login");
   });
 
-  app.get("/", (c) => html(c, appPage(chromeModel(c, db))));
-  app.get("/brief", (c) => html(c, appPage(chromeModel(c, db))));
+  app.get("/", (c) => html(c, appPage(chromeModel(c, db, config))));
+  app.get("/brief", (c) => html(c, appPage(chromeModel(c, db, config))));
   app.get("/brief/:slug", (c) => {
-    const model = chromeModel(c, db, c.req.param("slug"));
+    const model = chromeModel(c, db, config, c.req.param("slug"));
     if (!model.page && model.pages.length > 0) return c.text("page not found", 404);
     return html(c, appPage(model));
   });
-  app.get("/ask", (c) => html(c, appPage(chromeModel(c, db))));
+  app.get("/ask", (c) => html(c, appPage(chromeModel(c, db, config))));
 
-  app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db), "", {}, await appRepoList())));
+  app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db, config), "", {}, await appRepoList())));
 
   async function appRepoList(): Promise<{ repos: AppRepo[] } | { error: string } | null> {
     const client = githubApp();
@@ -241,7 +241,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const result = await verifyGithubRepo(owner, name, token, fetchImpl);
     if (!result.ok) {
       console.log(`connect refused: ${result.error}`);
-      return html(c, connectPage(chromeModel(c, db), CONNECT_ERRORS[result.error], { owner, name }), connectStatus(result.error));
+      return html(c, connectPage(chromeModel(c, db, config), CONNECT_ERRORS[result.error], { owner, name }), connectStatus(result.error));
     }
     const at = new Date(now()).toISOString();
     db.transaction(() => {
@@ -273,7 +273,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const owner = typeof body.owner === "string" ? body.owner.trim() : "";
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const errorPage = async (error: string, status: ContentfulStatusCode = 400) =>
-      html(c, connectPage(chromeModel(c, db), error, { owner, name }, await appRepoList()), status);
+      html(c, connectPage(chromeModel(c, db, config), error, { owner, name }, await appRepoList()), status);
     const client = githubApp();
     if (!client) return errorPage("No GitHub App is configured — add one on the Config page or connect manually.");
     const token = await client.installationToken();
@@ -303,7 +303,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(askResultFragment(notice));
     }
-    return html(c, appPage(chromeModel(c, db, undefined, notice)));
+    return html(c, appPage(chromeModel(c, db, config, undefined, notice)));
   });
 
   app.post("/refresh", async (c) => {
@@ -314,10 +314,10 @@ export function createApp(opts: AppOptions): Hono<Env> {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(refreshResultFragment(notice));
     }
-    return html(c, appPage(chromeModel(c, db, undefined, undefined, notice)));
+    return html(c, appPage(chromeModel(c, db, config, undefined, undefined, notice)));
   });
 
-  app.get("/config", (c) => html(c, configPage(chromeModel(c, db), configView(db, config, modelDiscovery))));
+  app.get("/config", (c) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery))));
 
   app.post("/config/models", async (c) => {
     const body = await c.req.parseBody();
@@ -326,7 +326,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     if ((askModel && !isValidModelName(askModel)) || (mapModel && !isValidModelName(mapModel))) {
       return html(
         c,
-        configPage(chromeModel(c, db), configView(db, config, modelDiscovery), "That is not a model name."),
+        configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), "That is not a model name."),
         400,
       );
     }
@@ -350,7 +350,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const appId = typeof body.app_id === "string" ? body.app_id.trim() : "";
     const installationId = typeof body.app_installation_id === "string" ? body.app_installation_id.trim() : "";
     const privateKey = typeof body.app_private_key === "string" ? body.app_private_key.trim() : "";
-    const reject = (notice: string) => html(c, configPage(chromeModel(c, db), configView(db, config, modelDiscovery), notice), 400);
+    const reject = (notice: string) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), notice), 400);
     if (!appId || !/^\d+$/.test(appId)) return reject("App ID is a number — find it on the app's GitHub settings page.");
     if (installationId && !/^\d+$/.test(installationId)) return reject("Installation ID is a number, or leave it empty to auto-detect.");
     if (privateKey && !privateKey.includes("PRIVATE KEY")) return reject("That does not look like a PEM private key.");
@@ -370,6 +370,17 @@ export function createApp(opts: AppOptions): Hono<Env> {
       deleteSetting(db, SETTING_APP_INSTALL);
       deleteSetting(db, SETTING_APP_KEY);
     })();
+    return c.redirect("/config");
+  });
+
+  app.post("/config/user", async (c) => {
+    const body = await c.req.parseBody();
+    const user = typeof body.ui_user === "string" ? body.ui_user.trim() : "";
+    if (user && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(user)) {
+      return html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery), "That is not a GitHub login."), 400);
+    }
+    if (user) setSetting(db, SETTING_UI_USER, user, new Date(now()).toISOString());
+    else deleteSetting(db, SETTING_UI_USER);
     return c.redirect("/config");
   });
 
@@ -399,6 +410,15 @@ const SETTING_APP_ID = "github_app.id";
 const SETTING_APP_KEY = "github_app.private_key";
 const SETTING_APP_INSTALL = "github_app.installation_id";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
+const SETTING_UI_USER = "ui.user";
+
+// Who the topbar pill shows: env login > saved login > a plain "operator".
+function resolveUser(config: Config, db: SqliteDb): { name: string; source: ModelSource } {
+  if (config.uiUser) return { name: config.uiUser, source: "env" };
+  const stored = getSetting(db, SETTING_UI_USER);
+  if (stored) return { name: stored, source: "stored" };
+  return { name: "operator", source: "default" };
+}
 
 // The repo the UI acts on: the operator's pick, else the latest connect.
 // A stale stored id (repo row gone) falls back to primary.
@@ -517,6 +537,17 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery): Co
       storedInstall,
       hasStoredKey: Boolean(getSetting(db, SETTING_APP_KEY)),
     },
+    user: (() => {
+      const u = resolveUser(config, db);
+      return {
+        label: "Operator name",
+        field: "ui_user",
+        envKey: "ERU_UI_USER",
+        effective: u.name,
+        source: u.source,
+        stored: getSetting(db, SETTING_UI_USER) ?? "",
+      };
+    })(),
     ask: modelRow(
       "Ask model",
       "ask_model",
@@ -611,6 +642,7 @@ async function askNotice(db: SqliteDb, config: Config, ask: AskRunner, q: string
 function chromeModel(
   c: Context<Env>,
   db: SqliteDb,
+  config: Config,
   slug?: string,
   askNotice?: string,
   refreshNotice?: string,
@@ -620,7 +652,12 @@ function chromeModel(
   const repo = selectedRepo(db);
   const pages = repo ? listPages(db, repo.id) : [];
   const page = repo && (slug || pages.length > 0) ? getPage(db, repo.id, slug ?? pages[0].slug) ?? null : null;
+  const user = resolveUser(config, db);
   return {
+    user: {
+      name: user.name,
+      avatarUrl: user.source === "default" ? null : `https://github.com/${encodeURIComponent(user.name)}.png?size=64`,
+    },
     repo: repo
       ? {
           id: repo.id,

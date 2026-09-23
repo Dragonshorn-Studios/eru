@@ -1078,3 +1078,75 @@ describe("repo selection", () => {
     expect(tarballUrl).toContain("/repos/acme/box/tarball/main");
   });
 });
+
+describe("operator pill", () => {
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  it("falls back to an operator monogram and picks up env or saved logins", async () => {
+    const instance = app({ uiUser: "env-user" });
+    const { cookie } = await authed(instance);
+    const res = await instance.app.request("/", { headers: { Cookie: cookie } });
+    const html = await res.text();
+    expect(html).toContain('src="https://github.com/env-user.png?size=64"');
+    expect(html).toContain("env-user");
+
+    const plain = app();
+    const plainAuth = await authed(plain);
+    const resPlain = await plain.app.request("/", { headers: { Cookie: plainAuth.cookie } });
+    const htmlPlain = await resPlain.text();
+    expect(htmlPlain).toContain(">op<");
+    expect(htmlPlain).not.toContain("github.com/operator.png");
+  });
+
+  it("saves and clears the login via /config/user", async () => {
+    const instance = app();
+    const { cookie, csrf } = await authed(instance);
+    const save = await instance.app.request("/config/user", {
+      method: "POST",
+      body: new URLSearchParams({ ui_user: "stored-user", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(save.status).toBe(302);
+
+    const home = await instance.app.request("/", { headers: { Cookie: cookie } });
+    expect(await home.text()).toContain('src="https://github.com/stored-user.png?size=64"');
+    const configPageRes = await instance.app.request("/config", { headers: { Cookie: cookie } });
+    expect(await configPageRes.text()).toContain('value="stored-user"');
+
+    const bad = await instance.app.request("/config/user", {
+      method: "POST",
+      body: new URLSearchParams({ ui_user: "not a login!", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(bad.status).toBe(400);
+    expect(getSetting(instance.db, "ui.user")).toBe("stored-user");
+
+    const clear = await instance.app.request("/config/user", {
+      method: "POST",
+      body: new URLSearchParams({ ui_user: "", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(clear.status).toBe(302);
+    const home2 = await instance.app.request("/", { headers: { Cookie: cookie } });
+    expect(await home2.text()).toContain(">op<");
+  });
+
+  it("env login beats the stored one", async () => {
+    const instance = app({ uiUser: "env-wins" });
+    const { cookie, csrf } = await authed(instance);
+    await instance.app.request("/config/user", {
+      method: "POST",
+      body: new URLSearchParams({ ui_user: "stored-user", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    const home = await instance.app.request("/", { headers: { Cookie: cookie } });
+    const html = await home.text();
+    expect(html).toContain("github.com/env-wins.png");
+    expect(html).not.toContain("stored-user.png");
+  });
+});

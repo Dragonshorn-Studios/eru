@@ -116,3 +116,11 @@ describe("github app config", () => {
     ).toThrow(/PRIVATE_KEY_FILE/);
   });
 });
+
+describe("ui user config", () => {
+  it("parses a GitHub login and rejects malformed values", () => {
+    expect(loadConfig({ ...secrets, ERU_UI_USER: "octo-cat" }).uiUser).toBe("octo-cat");
+    expect(loadConfig({ ...secrets }).uiUser).toBeUndefined();
+    expect(() => loadConfig({ ...secrets, ERU_UI_USER: "not a login!" })).toThrow("ERU_UI_USER");
+  });
+});
