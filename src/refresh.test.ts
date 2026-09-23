@@ -95,6 +95,7 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     const failed = await createMapRefresher({ bin: "/bin/false", timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(failed).toEqual({ ok: false, error: "failed", detail: "" });
     const garbage = await createMapRefresher({ bin: "/bin/echo", timeoutMs: 10_000 })(workdir, "o/r", "main");
-    expect(garbage).toEqual({ ok: false, error: "nomap" });
+    expect(garbage).toMatchObject({ ok: false, error: "nomap" });
+    expect(garbage.ok === false && "detail" in garbage && garbage.detail!.length > 0).toBe(true);
   });
 });
