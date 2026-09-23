@@ -124,3 +124,41 @@ describe("ui user config", () => {
     expect(() => loadConfig({ ...secrets, ERU_UI_USER: "not a login!" })).toThrow("ERU_UI_USER");
   });
 });
+
+describe("github oauth config", () => {
+  const oauth = {
+    ERU_OAUTH_CLIENT_ID: "Iv1.example",
+    ERU_OAUTH_CLIENT_SECRET: "oauth-secret",
+    ERU_OAUTH_ADMIN_IDS: "42, 7",
+    ERU_PUBLIC_URL: "https://eru.example.test/",
+  };
+
+  it("loads the oauth block and strips the public URL trailing slash", () => {
+    const cfg = loadConfig({ ...secrets, ...oauth });
+    expect(cfg.oauthClientId).toBe("Iv1.example");
+    expect(cfg.oauthAdminIds).toEqual([42, 7]);
+    expect(cfg.publicUrl).toBe("https://eru.example.test");
+    expect(cfg.uiLocalLogin).toBe(false);
+    expect(loadConfig({ ...secrets }).oauthClientId).toBeUndefined();
+    expect(loadConfig({ ...secrets }).oauthAdminIds).toEqual([]);
+  });
+
+  it("fails closed on half an oauth pair or a missing allowlist/public URL", () => {
+    expect(() => loadConfig({ ...secrets, ERU_OAUTH_CLIENT_ID: "x" })).toThrow(/both/);
+    expect(() => loadConfig({ ...secrets, ERU_OAUTH_CLIENT_SECRET: "x" })).toThrow(/both/);
+    const noIds = { ...oauth };
+    delete (noIds as Record<string, string>).ERU_OAUTH_ADMIN_IDS;
+    expect(() => loadConfig({ ...secrets, ...noIds })).toThrow(/ERU_OAUTH_ADMIN_IDS/);
+    const noUrl = { ...oauth };
+    delete (noUrl as Record<string, string>).ERU_PUBLIC_URL;
+    expect(() => loadConfig({ ...secrets, ...noUrl })).toThrow(/ERU_PUBLIC_URL/);
+    expect(() => loadConfig({ ...secrets, ...oauth, ERU_OAUTH_ADMIN_IDS: "abc" })).toThrow(/numeric/);
+  });
+
+  it("parses ERU_UI_LOCAL_LOGIN", () => {
+    expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "true" }).uiLocalLogin).toBe(true);
+    expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "1" }).uiLocalLogin).toBe(true);
+    expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "no" }).uiLocalLogin).toBe(false);
+    expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "garbage" }).uiLocalLogin).toBe(false);
+  });
+});

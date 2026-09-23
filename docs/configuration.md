@@ -43,6 +43,21 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_GITHUB_APP_ID` | — | GitHub App ID |
 | `ERU_GITHUB_APP_PRIVATE_KEY` / `ERU_GITHUB_APP_PRIVATE_KEY_FILE` | — | App private key, inline or file path |
 | `ERU_GITHUB_APP_INSTALLATION_ID` | — | Installation ID (auto-detected when omitted) |
+| `ERU_OAUTH_CLIENT_ID` / `ERU_OAUTH_CLIENT_SECRET` | — | GitHub OAuth App credentials — both or neither |
+| `ERU_OAUTH_ADMIN_IDS` | — | Comma-separated numeric GitHub user ids allowed to sign in (required with OAuth) |
+| `ERU_PUBLIC_URL` | — | Public URL Eru is reached at, e.g. `https://eru.example` (required with OAuth) |
+| `ERU_UI_LOCAL_LOGIN` | `false` | Keep the shared-password form when OAuth is on |
 | `XDG_DATA_HOME` | — | Where `auth.json` lives; Compose sets `/data/xdg` on the `eru-data` volume |
+
+## GitHub OAuth login
+
+Setting `ERU_OAUTH_CLIENT_ID` + `ERU_OAUTH_CLIENT_SECRET` enables a "Sign in with GitHub" button on `/login`. Setup:
+
+1. Create an OAuth App under GitHub → Settings → Developer settings. The authorization callback URL must be exactly `$ERU_PUBLIC_URL/login/github/callback`.
+2. Set `ERU_PUBLIC_URL` to the URL operators use to reach Eru (no trailing slash needed).
+3. Set `ERU_OAUTH_ADMIN_IDS` to the comma-separated numeric GitHub user ids allowed in — the id is checked on every request, so removing an id locks that account out at the next page load.
+4. `ERU_UI_LOCAL_LOGIN=true` keeps the shared-password form alongside the GitHub button — useful as a break-glass path.
+
+Sessions carry the GitHub identity (login + avatar) in the signed cookie; the OAuth token is used once to fetch the profile and then discarded.
 
 Every field that exists on `/config` (models, operator login, GitHub App) can also be set here — a saved value overrides the env var, and the page marks it.

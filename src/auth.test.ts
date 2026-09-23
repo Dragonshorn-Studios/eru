@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   LoginLimiter,
+  OAuthStateStore,
   clientKey,
   cookieSecure,
   csrfOK,
   isPublicPath,
+  issueOAuthSession,
   issueSession,
   passwordsMatch,
   safeNextPath,
@@ -66,6 +68,39 @@ describe("session helpers", () => {
   it("signs v1 payloads", () => {
     const token = signSession("secret", { exp: 2_000, csrf: "abc" });
     expect(token.startsWith("v1.2000.abc.")).toBe(true);
+  });
+
+  it("round-trips v2 OAuth sessions with the GitHub identity", () => {
+    const gh = { id: 42, login: "octo-cat", avatarUrl: "https://avatars.githubusercontent.com/u/42" };
+    const { token, session } = issueOAuthSession("secret", gh, 1_000);
+    expect(token.startsWith("v2.")).toBe(true);
+    expect(verifySession("secret", token, 1_500)).toEqual(session);
+    expect(verifySession("other", token, 1_500)).toBeUndefined();
+    expect(verifySession("secret", `${token}x`, 1_500)).toBeUndefined();
+    expect(verifySession("secret", token, session.exp)).toBeUndefined();
+    expect(verifySession("secret", undefined)).toBeUndefined();
+    const noAvatar = issueOAuthSession("secret", { id: 7, login: "plain", avatarUrl: null }, 1_000);
+    expect(verifySession("secret", noAvatar.token, 1_500)?.github?.avatarUrl).toBeNull();
+    // A non-https avatar (or a tampered payload) never survives verification.
+    const evil = issueOAuthSession("secret", { id: 9, login: "js", avatarUrl: "javascript:alert(1)" }, 1_000);
+    expect(verifySession("secret", evil.token, 1_500)?.github?.avatarUrl).toBeNull();
+    expect(() => issueOAuthSession("secret", { id: 0, login: "x", avatarUrl: null })).toThrow();
+    expect(() => issueOAuthSession("secret", { id: 1, login: "", avatarUrl: null })).toThrow();
+  });
+});
+
+describe("oauth state store", () => {
+  it("issues single-use states with a next path and a TTL", () => {
+    const store = new OAuthStateStore();
+    const state = store.issue(1_000, 60_000, "/config");
+    expect(store.consume(state, 2_000)).toBe("/config");
+    expect(store.consume(state, 2_000)).toBeUndefined();
+    expect(store.consume(undefined, 2_000)).toBeUndefined();
+    const expired = store.issue(1_000, 60_000);
+    expect(store.consume(expired, 62_000)).toBeUndefined();
+    // Issue sweeps expired entries so abandoned flows do not accumulate.
+    const fresh = store.issue(70_000, 60_000);
+    expect(store.consume(fresh, 71_000)).toBe("/");
   });
 });
 

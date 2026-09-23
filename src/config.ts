@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parseInteger } from "./util.js";
+import { parseBooleanEnv, parseInteger } from "./util.js";
 
 export const MIN_SESSION_SECRET = 16;
 export const DEFAULT_HOST = "0.0.0.0";
@@ -28,6 +28,11 @@ export interface Config {
   githubAppPrivateKey?: string;
   githubAppInstallationId?: string;
   uiUser?: string;
+  publicUrl: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthAdminIds: number[];
+  uiLocalLogin: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -84,6 +89,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_UI_USER is not a GitHub login");
   }
 
+  const oauthClientId = env.ERU_OAUTH_CLIENT_ID?.trim() || undefined;
+  const oauthClientSecret = env.ERU_OAUTH_CLIENT_SECRET?.trim() || undefined;
+  if (Boolean(oauthClientId) !== Boolean(oauthClientSecret)) {
+    throw new Error("eru: set both ERU_OAUTH_CLIENT_ID and ERU_OAUTH_CLIENT_SECRET (or neither)");
+  }
+  const oauthAdminIds = parseIdList(env.ERU_OAUTH_ADMIN_IDS);
+  const publicUrl = env.ERU_PUBLIC_URL?.trim().replace(/\/+$/, "") ?? "";
+  const uiLocalLogin = parseBooleanEnv(env.ERU_UI_LOCAL_LOGIN);
+  if (oauthClientId) {
+    if (oauthAdminIds.length === 0) {
+      throw new Error("eru: GitHub OAuth requires ERU_OAUTH_ADMIN_IDS (numeric GitHub user ids)");
+    }
+    if (!publicUrl) {
+      throw new Error("eru: GitHub OAuth requires ERU_PUBLIC_URL to build the exact callback URL");
+    }
+  }
+
 
   return {
     host,
@@ -103,7 +125,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     githubAppPrivateKey,
     githubAppInstallationId,
     uiUser,
+    publicUrl,
+    oauthClientId,
+    oauthClientSecret,
+    oauthAdminIds,
+    uiLocalLogin,
   };
+}
+
+function parseIdList(raw: string | undefined): number[] {
+  const value = raw?.trim();
+  if (!value) return [];
+  const ids = value.split(",").map((piece) => Number(piece.trim()));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+    throw new Error("eru: ERU_OAUTH_ADMIN_IDS must be comma-separated numeric GitHub user ids");
+  }
+  return ids;
 }
 
 function optionalDigits(env: NodeJS.ProcessEnv, key: string): string | undefined {

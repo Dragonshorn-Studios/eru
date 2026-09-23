@@ -15,12 +15,20 @@ import {
   csrfOK,
   isMutating,
   isPublicPath,
+  issueOAuthSession,
   issueSession,
+  OAuthStateStore,
   passwordsMatch,
   safeNextPath,
   verifySession,
   type UiSession,
 } from "./auth.js";
+import {
+  exchangeOAuthCode,
+  fetchGithubUser,
+  oauthAuthorizeUrl,
+  oauthEnabled,
+} from "./oauth.js";
 import type { Config } from "./config.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,6 +99,7 @@ export interface AppOptions {
   limiter?: LoginLimiter;
   now?: () => number;
   fetchImpl?: FetchLike;
+  oauthFetch?: typeof fetch;
   askRunner?: AskRunner;
   refreshRunner?: RefreshRunner;
   modelDiscovery?: ModelDiscovery;
@@ -121,6 +130,12 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
   const mapping = opts.mappingTracker ?? createMappingTracker();
 
+  const oauthOn = oauthEnabled(config);
+  const passwordLoginOn = !oauthOn || config.uiLocalLogin;
+  const loginOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  const oauthStates = new OAuthStateStore();
+  const OAUTH_STATE_TTL_MS = 10 * 60_000;
+
   // Reused across requests so the minted installation token survives between
   // calls; rebuilt whenever the resolved app credentials change.
   let appClientCached: { sig: string; client: GithubAppClient } | undefined;
@@ -145,7 +160,14 @@ export function createApp(opts: AppOptions): Hono<Env> {
     c.header("X-Frame-Options", "DENY");
     c.header("Referrer-Policy", "no-referrer");
     const path = new URL(c.req.url).pathname;
-    const session = verifySession(config.sessionSecret, getCookie(c, SESSION_COOKIE), now());
+    let session = verifySession(config.sessionSecret, getCookie(c, SESSION_COOKIE), now());
+    // The GitHub allowlist is re-checked on every request: removing an id from
+    // ERU_OAUTH_ADMIN_IDS takes effect without waiting for session expiry.
+    if (session?.github && !config.oauthAdminIds.includes(session.github.id)) {
+      console.warn(`auth: session denied (not allowlisted) id=${session.github.id} login=${session.github.login}`);
+      deleteCookie(c, SESSION_COOKIE, { path: "/" });
+      session = undefined;
+    }
     if (session) c.set("session", session);
 
     if (isPublicPath(path)) {
@@ -220,15 +242,15 @@ export function createApp(opts: AppOptions): Hono<Env> {
 
   app.get("/login", (c) => {
     if (c.get("session")) return c.redirect("/");
-    return html(c, loginPage());
+    return html(c, loginPage({ ...loginOpts, next: c.req.query("next") }));
   });
 
   app.post("/login", async (c) => {
     const body = await c.req.parseBody();
     const password = typeof body.password === "string" ? body.password : "";
-    if (!passwordsMatch(password, config.uiPassword)) {
+    if (!passwordLoginOn || !passwordsMatch(password, config.uiPassword)) {
       console.log("login refused");
-      return html(c, loginPage("Refused."), 401);
+      return html(c, loginPage({ ...loginOpts, error: "Refused.", next: c.req.query("next") }), 401);
     }
     const issued = issueSession(config.sessionSecret, now());
     setCookie(c, SESSION_COOKIE, issued.token, {
@@ -239,6 +261,57 @@ export function createApp(opts: AppOptions): Hono<Env> {
       maxAge: Math.floor(SESSION_TTL_MS / 1000),
     });
     return c.redirect(safeNextPath(c.req.query("next")));
+  });
+
+  app.get("/login/github", (c) => {
+    if (!oauthOn) return c.redirect("/login");
+    if (!limiter.allow(`oauth-start:${requestClientKey(c)}`)) {
+      console.warn(`auth: oauth start rate limited ip=${requestClientKey(c)}`);
+      return c.text("too many requests", 429);
+    }
+    const state = oauthStates.issue(now(), OAUTH_STATE_TTL_MS, safeNextPath(c.req.query("next")));
+    return c.redirect(oauthAuthorizeUrl(config, state));
+  });
+
+  app.get("/login/github/callback", async (c) => {
+    if (!oauthOn) return c.redirect("/login");
+    const ip = requestClientKey(c);
+    const url = new URL(c.req.url);
+    const next = oauthStates.consume(url.searchParams.get("state") ?? undefined, now());
+    if (next === undefined) {
+      limiter.allow(`oauth-fail:${ip}`);
+      console.warn(`auth: oauth state rejected (missing, expired, or replayed) ip=${ip}`);
+      return html(c, loginPage({ ...loginOpts, error: "Sign-in link expired — try again." }), 403);
+    }
+    if (url.searchParams.get("error")) {
+      // User-initiated cancel or provider refusal: no code exists, so this is
+      // not a protocol failure and does not count toward the failure budget.
+      console.log(`auth: oauth sign-in not completed at provider (${url.searchParams.get("error")}) ip=${ip}`);
+      return html(c, loginPage({ ...loginOpts, error: "Sign-in was cancelled." }), 400);
+    }
+    const oauthFetch = opts.oauthFetch ?? fetch;
+    const accessToken = await exchangeOAuthCode(config, url.searchParams.get("code") ?? "", oauthFetch);
+    const user = accessToken ? await fetchGithubUser(accessToken, oauthFetch) : undefined;
+    if (!user) {
+      limiter.allow(`oauth-fail:${ip}`);
+      console.warn("auth: oauth token exchange or user lookup failed");
+      return html(c, loginPage({ ...loginOpts, error: "GitHub sign-in failed — try again." }), 502);
+    }
+    if (!config.oauthAdminIds.includes(user.id)) {
+      limiter.allow(`oauth-fail:${ip}`);
+      console.warn(`auth: oauth login denied id=${user.id} login=${user.login} ip=${ip}`);
+      return html(c, loginPage({ ...loginOpts, error: "This GitHub account is not an operator here." }), 403);
+    }
+    const issued = issueOAuthSession(config.sessionSecret, user, now());
+    setCookie(c, SESSION_COOKIE, issued.token, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: cookieSecure(c.req.url, c.req.header("x-forwarded-proto")),
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    });
+    console.log(`auth: oauth login id=${user.id} login=${user.login}`);
+    return c.redirect(safeNextPath(next));
   });
 
   app.post("/logout", (c) => {
@@ -784,10 +857,17 @@ function chromeModel(
   const pages = repo ? listPages(db, repo.id) : [];
   const page = repo && (slug || pages.length > 0) ? getPage(db, repo.id, slug ?? pages[0].slug) ?? null : null;
   const user = resolveUser(config, db);
+  // A GitHub-logged-in session knows its real login and avatar; it wins over
+  // the stored/env display name.
+  const gh = session.github;
   return {
     user: {
-      name: user.name,
-      avatarUrl: user.source === "default" ? null : `https://github.com/${encodeURIComponent(user.name)}.png?size=64`,
+      name: gh?.login ?? user.name,
+      avatarUrl: gh
+        ? (gh.avatarUrl ?? `https://github.com/${encodeURIComponent(gh.login)}.png?size=64`)
+        : user.source === "default"
+          ? null
+          : `https://github.com/${encodeURIComponent(user.name)}.png?size=64`,
     },
     repo: repo
       ? {
