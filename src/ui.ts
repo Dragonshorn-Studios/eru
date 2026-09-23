@@ -573,6 +573,24 @@ export function appPage(model: ChromeModel): string {
         ${askNotice}
       </section>
       <section class="mapping-pane"${model.mapping ? "" : " hidden"} aria-live="polite" aria-label="Refresh in progress">
+        <div class="mapping-fx" aria-hidden="true">
+          <svg class="fx-strands fx-left" viewBox="0 0 220 900" preserveAspectRatio="none">
+            <path d="M215 -20 C 150 120, 235 250, 165 400 S 205 640, 140 920"/>
+            <path d="M190 -20 C 120 160, 200 300, 130 460 S 175 690, 110 920"/>
+            <path d="M160 -10 C 100 140, 165 280, 105 440 S 140 660, 85 920"/>
+            <path d="M130 -10 C 80 170, 140 320, 80 480 S 110 700, 60 920"/>
+            <path d="M205 -20 C 175 100, 225 210, 185 340 S 190 580, 160 760"/>
+          </svg>
+          <svg class="fx-strands fx-right" viewBox="0 0 220 900" preserveAspectRatio="none">
+            <path d="M5 -20 C 70 130, -15 260, 60 410 S 15 650, 85 920"/>
+            <path d="M30 -20 C 100 170, 20 310, 95 470 S 50 700, 115 920"/>
+            <path d="M60 -10 C 120 150, 55 290, 120 450 S 85 670, 140 920"/>
+            <path d="M90 -10 C 145 180, 85 330, 145 490 S 115 710, 165 920"/>
+            <path d="M15 -20 C 45 110, 0 220, 40 350 S 30 590, 65 770"/>
+          </svg>
+          <div class="fx-bokeh-field">${Array.from({ length: 8 }, () => `<span class="fx-bokeh"></span>`).join("")}</div>
+          <div class="fx-petal-field">${Array.from({ length: 10 }, () => `<span class="fx-petal"></span>`).join("")}</div>
+        </div>
         <img class="mapping-icon" src="/assets/eru-icon.png" width="72" height="72" alt=""/>
         <h2 id="mapping-line">Getting curious about this repo…</h2>
         <p class="mapping-sub">${model.repo ? `mapping ${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)} @${escapeHtml(model.repo.defaultBranch ?? "main")}` : "mapping the repository"}</p>
