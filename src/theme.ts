@@ -372,6 +372,84 @@ a:hover { color: var(--ink); }
 @media (max-width: 700px) {
   .mapping-pane h2 { white-space: normal; }
 }
+.mapping-pane { position: relative; z-index: 1; }
+/* Hyouka mapping scene: dark hair-like strands sway on the flanks while
+   pastel bokeh glows and mint petals drift behind the progress text.
+   Pure CSS/SVG — decorative only, hidden with the pane. */
+.mapping-fx {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+.fx-bokeh-field, .fx-petal-field { position: absolute; inset: 0; }
+.fx-strands { position: absolute; top: 0; bottom: 0; width: 24%; height: 100%; }
+.fx-left { left: 0; }
+.fx-right { right: 0; }
+.fx-strands path {
+  fill: none;
+  stroke: var(--ink);
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: fx-sway 9s ease-in-out infinite alternate;
+}
+.fx-strands path:nth-child(1) { stroke-width: 2.6; opacity: 0.2; animation-duration: 9.5s; }
+.fx-strands path:nth-child(2) { stroke-width: 2; opacity: 0.15; animation-duration: 11s; animation-delay: -3s; }
+.fx-strands path:nth-child(3) { stroke-width: 1.6; opacity: 0.12; animation-duration: 8s; animation-delay: -5.5s; }
+.fx-strands path:nth-child(4) { stroke-width: 1.3; opacity: 0.09; animation-duration: 12.5s; animation-delay: -2s; }
+.fx-strands path:nth-child(5) { stroke-width: 1.8; opacity: 0.14; animation-duration: 10s; animation-delay: -7s; stroke: var(--moss); }
+@keyframes fx-sway {
+  from { transform: translate(0, 0) rotate(0deg); }
+  to { transform: translate(22px, 36px) rotate(3.5deg); }
+}
+.fx-bokeh {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(18px);
+  opacity: 0.45;
+  animation: fx-bokeh 12s ease-in-out infinite alternate;
+}
+.fx-bokeh:nth-of-type(1) { left: 4%; top: 12%; width: 120px; height: 120px; background: var(--lavender); animation-duration: 11s; }
+.fx-bokeh:nth-of-type(2) { left: 12%; top: 62%; width: 80px; height: 80px; background: var(--pink); animation-duration: 13s; animation-delay: -4s; }
+.fx-bokeh:nth-of-type(3) { left: 22%; top: 32%; width: 55px; height: 55px; background: var(--mint); animation-duration: 9s; animation-delay: -6s; }
+.fx-bokeh:nth-of-type(4) { left: 7%; top: 80%; width: 100px; height: 100px; background: var(--rose); animation-duration: 14s; animation-delay: -2s; }
+.fx-bokeh:nth-of-type(5) { right: 5%; top: 18%; width: 110px; height: 110px; background: var(--pink); animation-duration: 12s; animation-delay: -5s; }
+.fx-bokeh:nth-of-type(6) { right: 14%; top: 55%; width: 70px; height: 70px; background: var(--lavender); animation-duration: 10s; animation-delay: -3s; }
+.fx-bokeh:nth-of-type(7) { right: 20%; top: 78%; width: 90px; height: 90px; background: var(--mint); animation-duration: 15s; animation-delay: -8s; }
+.fx-bokeh:nth-of-type(8) { right: 8%; top: 40%; width: 48px; height: 48px; background: var(--rose); animation-duration: 8.5s; animation-delay: -1.5s; }
+@keyframes fx-bokeh {
+  from { transform: translate(0, 0) scale(1); opacity: 0.32; }
+  to { transform: translate(-34px, 48px) scale(1.16); opacity: 0.58; }
+}
+.fx-petal {
+  position: absolute;
+  width: 15px;
+  height: 10px;
+  background: var(--mint);
+  border: 1px solid color-mix(in srgb, var(--moss) 60%, transparent);
+  border-radius: 70% 8% 70% 8%;
+  opacity: 0.8;
+  animation: fx-petal 10s ease-in-out infinite alternate;
+}
+.fx-petal:nth-of-type(1) { left: 9%; top: 8%; animation-duration: 9s; }
+.fx-petal:nth-of-type(2) { left: 17%; top: 22%; width: 11px; height: 8px; animation-duration: 12s; animation-delay: -4s; background: var(--rose); }
+.fx-petal:nth-of-type(3) { left: 6%; top: 44%; animation-duration: 8s; animation-delay: -6s; }
+.fx-petal:nth-of-type(4) { left: 21%; top: 58%; width: 12px; height: 8px; animation-duration: 11s; animation-delay: -2.5s; }
+.fx-petal:nth-of-type(5) { left: 11%; top: 86%; animation-duration: 10s; animation-delay: -7s; background: var(--rose); }
+.fx-petal:nth-of-type(6) { right: 10%; top: 12%; animation-duration: 11.5s; animation-delay: -3.5s; }
+.fx-petal:nth-of-type(7) { right: 18%; top: 30%; width: 11px; height: 8px; animation-duration: 9.5s; animation-delay: -5s; }
+.fx-petal:nth-of-type(8) { right: 7%; top: 52%; animation-duration: 12.5s; animation-delay: -8s; background: var(--rose); }
+.fx-petal:nth-of-type(9) { right: 16%; top: 68%; width: 12px; height: 8px; animation-duration: 8.5s; animation-delay: -1s; }
+.fx-petal:nth-of-type(10) { right: 9%; top: 88%; animation-duration: 10.5s; animation-delay: -6.5s; }
+@keyframes fx-petal {
+  from { transform: translate(0, 0) rotate(-14deg); }
+  to { transform: translate(-26px, 62px) rotate(46deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx-strands path, .fx-bokeh, .fx-petal, .mapping-fill { animation: none; }
+}
 .mapping-sub { font-family: var(--font-mono); font-size: 0.82rem; color: color-mix(in srgb, var(--ink) 50%, white); margin: 0 0 1.4rem; }
 .mapping-bar {
   height: 10px;
