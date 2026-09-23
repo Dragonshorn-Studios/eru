@@ -4,14 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: self-hosted
+    # Self-hosted is only acceptable while the repo is private; a public repo
+    # must use GitHub-hosted runners (a fork PR on self-hosted runs code on
+    # private infrastructure). flips automatically with repo visibility.
+    runs-on: ${{ github.repository_visibility == 'private' && 'self-hosted' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,6 +25,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

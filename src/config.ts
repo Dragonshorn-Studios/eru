@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { parseInteger } from "./util.js";
 
 export const MIN_SESSION_SECRET = 16;
@@ -6,6 +7,8 @@ export const DEFAULT_PORT = 3000;
 export const DEFAULT_SQLITE_PATH = "./data/eru.sqlite";
 export const DEFAULT_LOGIN_LIMIT = 5;
 export const DEFAULT_LOGIN_WINDOW_MS = 60_000;
+export const DEFAULT_OPENCODE_BIN = "opencode";
+export const DEFAULT_OPENCODE_TIMEOUT_MS = 120_000;
 
 export interface Config {
   host: string;
@@ -13,8 +16,18 @@ export interface Config {
   sqlitePath: string;
   uiPassword: string;
   sessionSecret: string;
+  forgeKeySecret?: string;
   loginLimit: number;
   loginWindowMs: number;
+  openCodeBin: string;
+  openCodeTimeoutMs: number;
+  openCodeModel?: string;
+  openCodeAskModel?: string;
+  openCodeMapModel?: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
+  uiUser?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -38,15 +51,92 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_UI_SESSION_SECRET is too short");
   }
 
+  let forgeKeySecret: string | undefined;
+  const forgeKeyEnv = env.ERU_FORGE_TOKEN_KEY?.trim();
+  if (forgeKeyEnv) {
+    if (forgeKeyEnv.length < MIN_SESSION_SECRET) {
+      throw new Error("eru: ERU_FORGE_TOKEN_KEY is too short");
+    }
+    forgeKeySecret = forgeKeyEnv;
+  }
+
+  const openCodeBin = requiredOrDefault(env, "ERU_OPENCODE_BIN", DEFAULT_OPENCODE_BIN);
+  const openCodeTimeoutMs = parseInteger(env.ERU_OPENCODE_TIMEOUT_MS, DEFAULT_OPENCODE_TIMEOUT_MS);
+  if (!Number.isInteger(openCodeTimeoutMs) || openCodeTimeoutMs < 1_000 || openCodeTimeoutMs > 600_000) {
+    throw new Error("eru: ERU_OPENCODE_TIMEOUT_MS is invalid");
+  }
+  const openCodeModel = env.ERU_OPENCODE_MODEL?.trim() || undefined;
+  const openCodeAskModel = env.ERU_OPENCODE_ASK_MODEL?.trim() || undefined;
+  const openCodeMapModel = env.ERU_OPENCODE_MAP_MODEL?.trim() || undefined;
+
+  const githubAppId = optionalDigits(env, "ERU_GITHUB_APP_ID");
+  const githubAppPrivateKey = loadAppPrivateKey(env);
+  const githubAppInstallationId = optionalDigits(env, "ERU_GITHUB_APP_INSTALLATION_ID");
+  if (githubAppId && !githubAppPrivateKey) {
+    throw new Error("eru: ERU_GITHUB_APP_ID needs ERU_GITHUB_APP_PRIVATE_KEY or ERU_GITHUB_APP_PRIVATE_KEY_FILE");
+  }
+  if (githubAppPrivateKey && !githubAppId) {
+    throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY needs ERU_GITHUB_APP_ID");
+  }
+
+  const uiUser = env.ERU_UI_USER?.trim() || undefined;
+  if (uiUser && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(uiUser)) {
+    throw new Error("eru: ERU_UI_USER is not a GitHub login");
+  }
+
+
   return {
     host,
     port,
     sqlitePath,
     uiPassword,
     sessionSecret,
+    forgeKeySecret,
     loginLimit: DEFAULT_LOGIN_LIMIT,
     loginWindowMs: DEFAULT_LOGIN_WINDOW_MS,
+    openCodeBin,
+    openCodeTimeoutMs,
+    openCodeModel,
+    openCodeAskModel,
+    openCodeMapModel,
+    githubAppId,
+    githubAppPrivateKey,
+    githubAppInstallationId,
+    uiUser,
   };
+}
+
+function optionalDigits(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key]?.trim();
+  if (value === undefined || value === "") return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`eru: ${key} is not a number`);
+  }
+  return value;
+}
+
+// PEM can come inline (with literal \n escapes) or from a file path; the file
+// wins when both are set so operators can rotate by moving a file.
+function loadAppPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
+  const file = env.ERU_GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  if (file) {
+    let pem: string;
+    try {
+      pem = readFileSync(file, "utf8").trim();
+    } catch {
+      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is unreadable");
+    }
+    if (!pem.includes("PRIVATE KEY")) {
+      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is not a PEM private key");
+    }
+    return pem;
+  }
+  const inline = env.ERU_GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
+  if (!inline) return undefined;
+  if (!inline.includes("PRIVATE KEY")) {
+    throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY is not a PEM private key");
+  }
+  return inline;
 }
 
 function requiredOrDefault(env: NodeJS.ProcessEnv, key: string, fallback: string): string {
