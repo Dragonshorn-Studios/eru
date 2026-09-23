@@ -26,6 +26,20 @@ export const PROVIDER_CREDENTIAL_OPTIONS: ReadonlyArray<{
   helpLabel?: string;
 }> = [
   {
+    id: "opencode",
+    label: "OpenCode Zen",
+    envVars: ["OPENCODE_API_KEY"],
+    helpUrl: "https://opencode.ai/auth",
+    helpLabel: "Zen console → Create API key",
+  },
+  {
+    id: "opencode-go",
+    label: "OpenCode Go",
+    envVars: ["OPENCODE_API_KEY"],
+    helpUrl: "https://opencode.ai/auth",
+    helpLabel: "Zen console → subscribe to Go → API key",
+  },
+  {
     id: "anthropic",
     label: "Anthropic",
     envVars: ["ANTHROPIC_API_KEY"],

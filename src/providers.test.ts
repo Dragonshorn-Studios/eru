@@ -24,6 +24,8 @@ describe("ProviderCredentialStore", () => {
     expect(byId.get("openai")?.source).toBe("environment");
     expect(byId.get("openai")?.envVar).toBe("OPENAI_API_KEY");
     expect(byId.get("groq")?.source).toBe("none");
+    expect(byId.get("opencode-go")?.label).toBe("OpenCode Go");
+    expect(byId.get("opencode-go")?.source).toBe("none");
     expect(byId.get("my-custom")?.source).toBe("stored");
     expect(byId.get("my-custom")?.label).toBe("my-custom");
   });
