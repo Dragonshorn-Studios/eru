@@ -6,7 +6,7 @@ Self-hosted OpenCode notes that stay with the repo. Page the map, then ask. Refr
 
 > *A self-hosted service that maps a git repository into durable SQLite notes, then answers questions about them.*
 
-Eru is named after Chitanda Eru from the anime *Hyouka*. Never Eruka. The catchphrase above is intentional brand voice, not filler — the prose below should be read on its own terms.
+Eru is named after Chitanda Eru from the anime *Hyouka*. The catchphrase above is intentional brand voice, not filler — the prose below should be read on its own terms.
 
 ## What it does
 
@@ -25,7 +25,7 @@ GitHub ──► forge adapter ──► tarball ──► OpenCode ──► ma
 
 ## Stack
 
-- Single Node.js >= 22 process (TypeScript, Hono) — server-rendered HTML + HTMX + CSS variables + hand CSS, no Tailwind pipeline, no SPA framework.
+- Single Node.js >= 22 process (TypeScript, Hono) — server-rendered HTML + HTMX + CSS variables + hand CSS, no SPA framework.
 - SQLite via better-sqlite3 — no Redis, no Postgres.
 - Docker Compose for deployment — no Kubernetes.
 - OpenCode CLI as the model backend, deny-listed to read/glob/grep tools.
