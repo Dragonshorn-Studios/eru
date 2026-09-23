@@ -129,6 +129,8 @@ export interface ProviderCredentialStatus {
   source: ProviderCredentialSource;
   /** The env var supplying the key when source === "environment". */
   envVar?: string;
+  /** Env var that would supply a key but is shadowed by the stored one. */
+  overridesEnvVar?: string;
   /** Last-4 fingerprint of the stored key when source === "stored". */
   fingerprint?: string;
   /** Where the operator obtains an API key; absent for unknown/custom providers. */
@@ -219,8 +221,10 @@ export class ProviderCredentialStore {
       const storedKey = seen.get(option.id);
       seen.delete(option.id);
       const base = { id: option.id, label: option.label, helpUrl: option.helpUrl, helpLabel: option.helpLabel };
+      if (storedKey) {
+        return { ...base, source: "stored" as const, fingerprint: fingerprint(storedKey), overridesEnvVar: envVar };
+      }
       if (envVar) return { ...base, source: "environment" as const, envVar };
-      if (storedKey) return { ...base, source: "stored" as const, fingerprint: fingerprint(storedKey) };
       return { ...base, source: "none" as const };
     });
     for (const [id, key] of seen) {

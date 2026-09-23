@@ -775,15 +775,15 @@ describe("config page", () => {
     expect(page).toContain("OpenCode default");
   });
 
-  it("env-specific model beats the saved setting", async () => {
+  it("saved model beats the env override and is marked as overriding", async () => {
     let askModel: string | undefined;
     const askRunner: AskRunner = async (_q, _p, _l, model) => {
       askModel = model;
       return { ok: true, answer: "ok" };
     };
-    const instance = app({ openCodeAskModel: "env/forced" }, undefined, askRunner);
+    const instance = app({ openCodeAskModel: "env/fallback" }, undefined, askRunner);
     await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
-    await post(instance, "/config/models", { ask_model: "stored/loses", map_model: "" });
+    await post(instance, "/config/models", { ask_model: "stored/wins", map_model: "" });
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(instance.config.sessionSecret, token)!;
@@ -792,11 +792,11 @@ describe("config page", () => {
       body: new URLSearchParams({ q: "hi", [CSRF_FIELD]: session.csrf }),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
     });
-    expect(askModel).toBe("env/forced");
+    expect(askModel).toBe("stored/wins");
 
     const { cookie } = await authed(instance);
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
-    expect(page).toContain("in effect from <code>ERU_OPENCODE_ASK_MODEL</code>");
+    expect(page).toContain("saved on this page · overrides <code>ERU_OPENCODE_ASK_MODEL</code>");
   });
 
   it("rejects malformed model names without storing", async () => {
@@ -981,12 +981,12 @@ describe("github app", () => {
     expect(await res.text()).toContain("GitHub App is not configured");
   });
 
-  it("shows env app id as in-effect even when a stored one exists", async () => {
+  it("shows a stored app id as in-effect and marks the env var as overridden", async () => {
     const instance = app({ githubAppId: "99999", githubAppPrivateKey: APP_PEM });
     await post(instance, "/config/github-app", { app_id: "111", app_installation_id: "", app_private_key: "" });
     const { cookie } = await authed(instance);
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
-    expect(page).toContain("in effect from <code>ERU_GITHUB_APP_ID</code>");
+    expect(page).toContain("saved on this page · overrides <code>ERU_GITHUB_APP_ID</code>");
     expect(page).toContain('value="111"');
   });
 });
@@ -1140,8 +1140,8 @@ describe("operator pill", () => {
     expect(await home2.text()).toContain(">op<");
   });
 
-  it("env login beats the stored one", async () => {
-    const instance = app({ uiUser: "env-wins" });
+  it("env login is used until a stored one exists", async () => {
+    const instance = app({ uiUser: "env-fallback" });
     const { cookie, csrf } = await authed(instance);
     await instance.app.request("/config/user", {
       method: "POST",
@@ -1150,8 +1150,11 @@ describe("operator pill", () => {
     });
     const home = await instance.app.request("/", { headers: { Cookie: cookie } });
     const html = await home.text();
-    expect(html).toContain("github.com/env-wins.png");
-    expect(html).not.toContain("stored-user.png");
+    expect(html).toContain("github.com/stored-user.png");
+    expect(html).not.toContain("env-fallback.png");
+
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("saved on this page · overrides <code>ERU_UI_USER</code>");
   });
 });
 

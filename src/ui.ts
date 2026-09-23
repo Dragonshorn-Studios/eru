@@ -170,6 +170,8 @@ export interface ConfigModelRow {
   effective: string;
   source: "env" | "stored" | "default";
   stored: string;
+  /** Env var set but shadowed by the saved value. */
+  overriddenEnv?: string;
 }
 
 export interface ConfigAppView {
@@ -181,6 +183,9 @@ export interface ConfigAppView {
   storedAppId: string;
   storedInstall: string;
   hasStoredKey: boolean;
+  appIdOverriddenEnv: boolean;
+  installOverriddenEnv: boolean;
+  keyOverriddenEnv: boolean;
 }
 
 export interface ConfigView {
@@ -205,7 +210,9 @@ export const APP_ERRORS: Record<AppError, string> = {
 
 function modelSourceHint(row: ConfigModelRow): string {
   if (row.source === "env") return `in effect from <code>${escapeHtml(row.envKey)}</code>`;
-  if (row.source === "stored") return "saved on this page";
+  if (row.source === "stored") {
+    return row.overriddenEnv ? `saved on this page · overrides <code>${escapeHtml(row.overriddenEnv)}</code>` : "saved on this page";
+  }
   return "OpenCode default";
 }
 
@@ -213,7 +220,7 @@ function configModelField(row: ConfigModelRow): string {
   return `<label class="field">
     <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective || "opencode default")} · ${modelSourceHint(row)}</span></span>
     <input type="text" name="${row.field}" list="opencode-models" autocomplete="off" value="${escapeHtml(row.stored)}" placeholder="${escapeHtml(row.effective || "provider/model")}"/>
-    <span class="field-hint">override via <code>${escapeHtml(row.envKey)}</code> in .env and restart</span>
+    <span class="field-hint"><code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
   </label>`;
 }
 
@@ -222,7 +229,8 @@ function providerBadge(provider: ProviderCredentialStatus): string {
     return `<span class="badge badge-env">key from env <code>${escapeHtml(provider.envVar ?? "")}</code></span>`;
   }
   if (provider.source === "stored") {
-    return `<span class="badge badge-stored">stored in auth.json ···${escapeHtml(provider.fingerprint ?? "")}</span>`;
+    const overridden = provider.overridesEnvVar ? ` · overrides <code>${escapeHtml(provider.overridesEnvVar)}</code>` : "";
+    return `<span class="badge badge-stored">stored in auth.json ···${escapeHtml(provider.fingerprint ?? "")}${overridden}</span>`;
   }
   return `<span class="badge badge-none">no key</span>`;
 }
@@ -235,7 +243,7 @@ function providerCard(provider: ProviderCredentialStatus, csrf: string): string 
     : "";
   const envNote =
     provider.source === "environment"
-      ? `<p class="field-hint">the env var wins over a stored key — unset it to use the stored one</p>`
+      ? `<p class="field-hint">the env var is used until a key is saved here</p>`
       : "";
   return `<li class="provider-card" data-provider="${escapeHtml(`${provider.id} ${provider.label}`.toLowerCase())}">
       <div class="provider-head">
@@ -285,7 +293,7 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
       </aside>
       <section class="card config-card">
         <h2>Config</h2>
-        <p class="page-lead">Environment variables win over anything saved here — change <code>.env</code> and restart for those.</p>
+        <p class="page-lead">Saved values win over environment variables — clear a saved field to fall back to <code>.env</code> or the default.</p>
         ${flash}
         <h3 id="models">OpenCode models</h3>
         <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> · timeout <code>${view.timeoutMs} ms</code> — change <code>ERU_OPENCODE_BIN</code> / <code>ERU_OPENCODE_TIMEOUT_MS</code></p>
@@ -302,7 +310,7 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <span class="field-hint">${discoveredLine}</span>
         </form>
         <h3 id="providers">Provider API keys</h3>
-        <p class="mapped">written to OpenCode's credential file <code>${escapeHtml(view.authPath)}</code> — never the eru database. Keys are write-only; an env var wins over a stored key. OAuth providers still enroll with <code>opencode auth login</code>.</p>
+        <p class="mapped">written to OpenCode's credential file <code>${escapeHtml(view.authPath)}</code> — never the eru database. Keys are write-only; a saved key overrides the env var. OAuth providers still enroll with <code>opencode auth login</code>.</p>
         <p class="provider-filter"><input type="search" id="provider-filter" placeholder="filter providers…" aria-label="Filter providers"/><span class="field-hint" id="provider-filter-empty" hidden>No providers match.</span></p>
         <ul class="provider-list" id="provider-list">${providerRows}</ul>
         <script>
@@ -328,12 +336,12 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
         <form class="connect-form" method="post" action="/config/github-app" autocomplete="off">
           ${csrfInput(model.csrf)}
           <label class="field">
-            <span>App ID <span class="field-hint">${appFieldHint(view.app.appId, view.app.appIdSource, "ERU_GITHUB_APP_ID")}</span></span>
+            <span>App ID <span class="field-hint">${appFieldHint(view.app.appId, view.app.appIdSource, "ERU_GITHUB_APP_ID", "required", view.app.appIdOverriddenEnv)}</span></span>
             <input type="text" name="app_id" inputmode="numeric" maxlength="20" value="${escapeHtml(view.app.storedAppId)}" placeholder="${escapeHtml(view.app.appId || "123456")}"/>
-            <span class="field-hint">override via <code>ERU_GITHUB_APP_ID</code> in .env and restart</span>
+            <span class="field-hint"><code>ERU_GITHUB_APP_ID</code> in .env is used when nothing is saved here</span>
           </label>
           <label class="field">
-            <span>Installation ID <span class="field-hint">${appFieldHint(view.app.installationId, view.app.installSource, "ERU_GITHUB_APP_INSTALLATION_ID", "auto-detect")}</span></span>
+            <span>Installation ID <span class="field-hint">${appFieldHint(view.app.installationId, view.app.installSource, "ERU_GITHUB_APP_INSTALLATION_ID", "auto-detect", view.app.installOverriddenEnv)}</span></span>
             <input type="text" name="app_installation_id" inputmode="numeric" maxlength="20" value="${escapeHtml(view.app.storedInstall)}" placeholder="${escapeHtml(view.app.installationId || "auto-detect")}"/>
             <span class="field-hint">leave empty to auto-detect a single installation</span>
           </label>
@@ -352,7 +360,7 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <label class="field">
             <span>GitHub login <span class="field-hint">in effect: ${escapeHtml(view.user.effective)} · ${modelSourceHint(view.user)}</span></span>
             <input type="text" name="ui_user" maxlength="39" value="${escapeHtml(view.user.stored)}" placeholder="${escapeHtml(view.user.effective === "operator" ? "github login (blank = operator)" : view.user.effective)}"/>
-            <span class="field-hint">shows your github.com avatar; leave empty for a monogram · override via <code>ERU_UI_USER</code></span>
+            <span class="field-hint">shows your github.com avatar; leave empty for a monogram · <code>ERU_UI_USER</code> in .env is used when nothing is saved here</span>
           </label>
           <button class="enter" type="submit">Save operator</button>
         </form>
@@ -372,15 +380,27 @@ export const REFRESH_TARBALL_ERRORS: Record<TarballError, string> = {
   toobig: "That checkout is too large to map.",
 };
 
-function appFieldHint(effective: string, source: ConfigAppView["appIdSource"], envKey: string, fallback = "required"): string {
+function appFieldHint(
+  effective: string,
+  source: ConfigAppView["appIdSource"],
+  envKey: string,
+  fallback = "required",
+  overriddenEnv = false,
+): string {
   if (source === "env") return `in effect from <code>${escapeHtml(envKey)}</code>`;
-  if (source === "stored") return "saved on this page";
+  if (source === "stored") {
+    return overriddenEnv ? `saved on this page · overrides <code>${escapeHtml(envKey)}</code>` : "saved on this page";
+  }
   return escapeHtml(fallback);
 }
 
 function appKeyHint(app: ConfigAppView): string {
-  if (app.keySource === "env") return "key comes from env";
-  if (app.hasStoredKey) return "key saved on this page";
+  if (app.keySource === "env") {
+    return app.hasStoredKey ? "key comes from env — saved key is unreadable" : "key comes from env";
+  }
+  if (app.hasStoredKey) {
+    return app.keyOverriddenEnv ? "key saved on this page · overrides env key" : "key saved on this page";
+  }
   return "no key saved";
 }
 

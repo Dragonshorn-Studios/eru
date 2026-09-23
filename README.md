@@ -64,11 +64,11 @@ On start Eru migrates:
 
 Re-running migrate is a no-op once those files are recorded. Connect a GitHub repo at `/connect`; the token is stored encrypted (AES-256-GCM; set `ERU_FORGE_TOKEN_KEY` to keep it decryptable across session-secret rotation) and used only for forge reads.
 
-A GitHub App can replace the manual token: set `ERU_GITHUB_APP_ID` + `ERU_GITHUB_APP_PRIVATE_KEY` (or `_FILE`, plus optional `ERU_GITHUB_APP_INSTALLATION_ID`) in `.env`, or save the same fields on `/config` (the PEM is stored with the same encrypted envelope). `/connect` then lists the installation's repositories to pick from — or a repo can still be added manually. App-connected repos refresh with short-lived installation tokens minted on demand; environment variables always win over what `/config` saved.
+A GitHub App can replace the manual token: set `ERU_GITHUB_APP_ID` + `ERU_GITHUB_APP_PRIVATE_KEY` (or `_FILE`, plus optional `ERU_GITHUB_APP_INSTALLATION_ID`) in `.env`, or save the same fields on `/config` (the PEM is stored with the same encrypted envelope). `/connect` then lists the installation's repositories to pick from — or a repo can still be added manually. App-connected repos refresh with short-lived installation tokens minted on demand; saved `/config` values always win over environment variables.
 
 Ask shells out to OpenCode (`ERU_OPENCODE_BIN`, default `opencode`). Each question runs in a throwaway directory holding only the materialized `map/*.md` files, with an `opencode.json` that denies every tool except read/glob/grep (never bash, edit, write, or webfetch). A missing or failing binary fails closed with an operator notice.
 
-Provider API keys are managed on `/config` → Provider keys: they are written to OpenCode's own `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`), never to the eru database or `.env`. Keys are write-only (the page shows source and a last-4 fingerprint), an env var of the same provider wins over a stored key, and OAuth providers still enroll with `opencode auth login`. In Compose the container is read-only, so `XDG_DATA_HOME` defaults to `/data/xdg` on the `eru-data` volume.
+Provider API keys are managed on `/config` → Provider keys: they are written to OpenCode's own `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`), never to the eru database or `.env`. Keys are write-only (the page shows source and a last-4 fingerprint), a stored key overrides the env var of the same provider, and OAuth providers still enroll with `opencode auth login`. In Compose the container is read-only, so `XDG_DATA_HOME` defaults to `/data/xdg` on the `eru-data` volume.
 
 ## License
 

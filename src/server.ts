@@ -432,11 +432,11 @@ const SETTING_APP_INSTALL = "github_app.installation_id";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
 
-// Who the topbar pill shows: env login > saved login > a plain "operator".
-function resolveUser(config: Config, db: SqliteDb): { name: string; source: ModelSource } {
-  if (config.uiUser) return { name: config.uiUser, source: "env" };
+// Who the topbar pill shows: saved login > env login > a plain "operator".
+function resolveUser(config: Config, db: SqliteDb): { name: string; source: ModelSource; overriddenEnv?: string } {
   const stored = getSetting(db, SETTING_UI_USER);
-  if (stored) return { name: stored, source: "stored" };
+  if (stored) return { name: stored, source: "stored", overriddenEnv: config.uiUser ? "ERU_UI_USER" : undefined };
+  if (config.uiUser) return { name: config.uiUser, source: "env" };
   return { name: "operator", source: "default" };
 }
 
@@ -459,19 +459,22 @@ interface ResolvedGithubApp {
   appIdSource: "env" | "stored";
   installSource: "env" | "stored" | "none";
   keySource: "env" | "stored";
+  appIdOverriddenEnv: boolean;
+  installOverriddenEnv: boolean;
+  keyOverriddenEnv: boolean;
 }
 
-// Env wins per field over what /config saved; the stored private key uses the
+// Saved values win per field over env; the stored private key uses the
 // same encrypted envelope as forge tokens.
 function resolveGithubApp(config: Config, db: SqliteDb): ResolvedGithubApp | null {
   const storedId = getSetting(db, SETTING_APP_ID);
   const storedInstall = getSetting(db, SETTING_APP_INSTALL);
   const storedKey = getSetting(db, SETTING_APP_KEY);
-  const appId = config.githubAppId ?? storedId;
-  const installationId = config.githubAppInstallationId ?? storedInstall;
-  let privateKey = config.githubAppPrivateKey;
-  let keySource: ResolvedGithubApp["keySource"] | "none" = privateKey ? "env" : "none";
-  if (!privateKey && storedKey) {
+  const appId = storedId ?? config.githubAppId;
+  const installationId = storedInstall ?? config.githubAppInstallationId;
+  let privateKey: string | undefined;
+  let keySource: ResolvedGithubApp["keySource"] | "none" = "none";
+  if (storedKey) {
     try {
       privateKey = decryptForgeToken(forgeKeySecrets(config), storedKey);
       keySource = "stored";
@@ -479,12 +482,19 @@ function resolveGithubApp(config: Config, db: SqliteDb): ResolvedGithubApp | nul
       console.log("github app: stored private key unreadable");
     }
   }
+  if (!privateKey && config.githubAppPrivateKey) {
+    privateKey = config.githubAppPrivateKey;
+    keySource = "env";
+  }
   if (!appId || !privateKey || keySource === "none") return null;
   return {
     creds: { appId, privateKey, installationId: installationId || undefined },
-    appIdSource: config.githubAppId ? "env" : "stored",
-    installSource: config.githubAppInstallationId ? "env" : storedInstall ? "stored" : "none",
+    appIdSource: storedId ? "stored" : "env",
+    installSource: storedInstall ? "stored" : config.githubAppInstallationId ? "env" : "none",
     keySource,
+    appIdOverriddenEnv: Boolean(storedId && config.githubAppId),
+    installOverriddenEnv: Boolean(storedInstall && config.githubAppInstallationId),
+    keyOverriddenEnv: keySource === "stored" && Boolean(config.githubAppPrivateKey),
   };
 }
 
@@ -520,12 +530,19 @@ async function repoToken(
   return { ok: true, token: "" };
 }
 
-// Purpose env > saved setting > general env > OpenCode's own default.
-function resolveModel(config: Config, db: SqliteDb, purpose: ModelPurpose): { value?: string; source: ModelSource } {
+// Saved setting > purpose env > general env > OpenCode's own default.
+function resolveModel(
+  config: Config,
+  db: SqliteDb,
+  purpose: ModelPurpose,
+): { value?: string; source: ModelSource; overriddenEnv?: string } {
   const envSpecific = purpose === "ask" ? config.openCodeAskModel : config.openCodeMapModel;
-  if (envSpecific) return { value: envSpecific, source: "env" };
+  const envKey = purpose === "ask" ? "ERU_OPENCODE_ASK_MODEL" : "ERU_OPENCODE_MAP_MODEL";
   const stored = getSetting(db, purpose === "ask" ? SETTING_ASK_MODEL : SETTING_MAP_MODEL);
-  if (stored) return { value: stored, source: "stored" };
+  if (stored) {
+    return { value: stored, source: "stored", overriddenEnv: envSpecific ? envKey : config.openCodeModel ? "ERU_OPENCODE_MODEL" : undefined };
+  }
+  if (envSpecific) return { value: envSpecific, source: "env" };
   if (config.openCodeModel) return { value: config.openCodeModel, source: "env" };
   return { source: "default" };
 }
@@ -534,10 +551,10 @@ function modelRow(
   label: string,
   field: string,
   envKey: string,
-  resolved: { value?: string; source: ModelSource },
+  resolved: { value?: string; source: ModelSource; overriddenEnv?: string },
   stored: string,
 ): ConfigView["ask"] {
-  return { label, field, envKey, effective: resolved.value ?? "", source: resolved.source, stored };
+  return { label, field, envKey, effective: resolved.value ?? "", source: resolved.source, stored, overriddenEnv: resolved.overriddenEnv };
 }
 
 function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, providers: ProviderCredentialStore): ConfigView {
@@ -556,6 +573,9 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
       storedAppId,
       storedInstall,
       hasStoredKey: Boolean(getSetting(db, SETTING_APP_KEY)),
+      appIdOverriddenEnv: app?.appIdOverriddenEnv ?? false,
+      installOverriddenEnv: app?.installOverriddenEnv ?? false,
+      keyOverriddenEnv: app?.keyOverriddenEnv ?? false,
     },
     user: (() => {
       const u = resolveUser(config, db);
@@ -566,6 +586,7 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
         effective: u.name,
         source: u.source,
         stored: getSetting(db, SETTING_UI_USER) ?? "",
+        overriddenEnv: u.overriddenEnv,
       };
     })(),
     ask: modelRow(

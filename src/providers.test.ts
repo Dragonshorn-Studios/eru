@@ -41,6 +41,15 @@ describe("ProviderCredentialStore", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it("a stored key overrides the env var of the same provider", () => {
+    const path = authDir();
+    const s = store(path, { GROQ_API_KEY: "gsk_env" });
+    expect(s.set("groq", "gsk_stored")).toEqual({ ok: true });
+    const groq = s.list().find((p) => p.id === "groq")!;
+    expect(groq.source).toBe("stored");
+    expect(groq.overridesEnvVar).toBe("GROQ_API_KEY");
+  });
+
   it("creates the directory tree when writing a fresh auth.json", () => {
     const base = mkdtempSync(join(tmpdir(), "eru-auth-"));
     const path = join(base, "deep", "opencode", "auth.json");
