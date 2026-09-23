@@ -417,6 +417,15 @@ body::before {
 }
 .config-nav { position: sticky; top: 1rem; }
 .config-card { min-width: 0; }
+.config-card a {
+  color: color-mix(in srgb, var(--ink) 60%, white);
+  text-decoration-color: color-mix(in srgb, var(--moss) 70%, transparent);
+  text-underline-offset: 2px;
+}
+.config-card a:hover {
+  color: var(--ink);
+  text-decoration-color: color-mix(in srgb, var(--moss) 90%, white);
+}
 .config-card h3 { margin-top: 1.6rem; padding-top: 1.2rem; border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent); }
 .config-card h3:first-of-type { margin-top: 1rem; padding-top: 0; border-top: 0; }
 .badge {
