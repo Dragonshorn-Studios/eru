@@ -45,14 +45,21 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       const args = ["run", "--format", "default"];
       const runModel = model ?? opts.model;
       if (runModel) args.push("-m", runModel);
-      args.push(refreshPrompt(repoLabel, ref));
+      // `--` guards the prompt: opencode args are yargs-parsed and array
+      // options can otherwise swallow a trailing positional (maomao learned
+      // this with --file).
+      args.push("--", refreshPrompt(repoLabel, ref));
       const { stdout } = await execFileP(opts.bin, args, {
         cwd: workdir,
         timeout: opts.timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });
       const pages = parseMapPages(stdout);
-      if (!pages || pages.length === 0) return { ok: false, error: "nomap" };
+      if (!pages || pages.length === 0) {
+        const detail = stdout.trim().replace(/\s+/g, " ").slice(-400);
+        console.log("refresh runner produced no map:", detail || "(empty output)");
+        return { ok: false, error: "nomap", detail };
+      }
       return { ok: true, pages };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };

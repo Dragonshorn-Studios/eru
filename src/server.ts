@@ -735,10 +735,10 @@ async function refreshNotice(
       if (result.error === "unconfigured") {
         return { ok: false, notice: "OpenCode is not configured on this host (check ERU_OPENCODE_BIN)." };
       }
-      if (result.error === "nomap") {
-        return { ok: false, notice: "OpenCode did not return map pages — nothing was stored." };
-      }
       const detail = result.detail ? ` — ${result.detail.slice(-160)}` : " — check the service log.";
+      if (result.error === "nomap") {
+        return { ok: false, notice: `OpenCode did not return map pages${detail}` };
+      }
       return { ok: false, notice: `OpenCode could not map the checkout${detail}` };
     }
     const at = new Date(now()).toISOString();

@@ -52,7 +52,10 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       const args = ["run", "--format", "default"];
       const runModel = model ?? opts.model;
       if (runModel) args.push("-m", runModel);
-      args.push(prompt(repoLabel, question));
+      // `--` guards the prompt: opencode args are yargs-parsed and array
+      // options can otherwise swallow a trailing positional (maomao learned
+      // this with --file).
+      args.push("--", prompt(repoLabel, question));
       const { stdout } = await execFileP(opts.bin, args, {
         cwd: workdir,
         timeout: opts.timeoutMs,
