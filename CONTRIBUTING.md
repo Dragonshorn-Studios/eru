@@ -27,6 +27,8 @@ npm run dev
 
 Open `/login` for the operator gate. `GET /health` is liveness only.
 
+The `/ask` page needs its island bundle: `npm run build` (or `npm run build:ask`) produces `dist/assets/ask.js`. Without it the rest of the app still works and `/ask` reports the bundle is missing.
+
 ## Compose
 
 ```sh

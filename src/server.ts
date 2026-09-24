@@ -71,21 +71,31 @@ import {
   type TarballResult,
   type VerifyError,
 } from "./forge.js";
+import { createModelDiscovery, isValidModelName, type ModelDiscovery } from "./opencode.js";
+import { createOpenCodeServer, type OpenCodeServe } from "./askserver.js";
+import { askProxy } from "./askproxy.js";
 import {
-  ASK_MAX_QUESTION,
-  createModelDiscovery,
-  createOpenCodeRunner,
-  isValidModelName,
-  type AskRunner,
-  type ModelDiscovery,
-} from "./opencode.js";
+  ASK_AGENT,
+  askWorkspaceRoot,
+  deleteThreadRow,
+  getThread,
+  insertThread,
+  listThreads,
+  materializeWorkspace,
+  renameThread,
+  setThreadSession,
+  sweepWorkspaces,
+  threadStale,
+  threadWorkspace,
+  type AskThread,
+} from "./askthreads.js";
 import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
   APP_ERRORS,
   appPage,
-  askResultFragment,
+  askPage,
   configPage,
   CONNECT_ERRORS,
   connectPage,
@@ -104,7 +114,8 @@ export interface AppOptions {
   now?: () => number;
   fetchImpl?: FetchLike;
   oauthFetch?: typeof fetch;
-  askRunner?: AskRunner;
+  openCodeServe?: OpenCodeServe;
+  askWorkdir?: string;
   refreshRunner?: RefreshRunner;
   modelDiscovery?: ModelDiscovery;
   providerStore?: ProviderCredentialStore;
@@ -122,9 +133,10 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const limiter = opts.limiter ?? new LoginLimiter(config.loginLimit, config.loginWindowMs);
   const now = opts.now ?? Date.now;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const ask =
-    opts.askRunner ??
-    createOpenCodeRunner({ bin: config.openCodeBin, timeoutMs: () => resolveTimeout(config, db).value, model: config.openCodeModel });
+  const ocServe =
+    opts.openCodeServe ?? createOpenCodeServer({ bin: config.openCodeBin, log: (msg) => console.log(`ask: ${msg}`) });
+  const askWorkdir = opts.askWorkdir ?? askWorkspaceRoot(config.sqlitePath, config.askWorkdir);
+  void sweepWorkspaces(db, askWorkdir).catch(() => {});
   const refresh =
     opts.refreshRunner ??
     createMapRefresher({ bin: config.openCodeBin, timeoutMs: () => resolveTimeout(config, db).value, model: config.openCodeModel });
@@ -212,6 +224,16 @@ export function createApp(opts: AppOptions): Hono<Env> {
     c.header("Content-Type", "text/css; charset=utf-8");
     c.header("Cache-Control", "no-store");
     return c.body(themeCss());
+  });
+
+  // The Ask island bundle is optional at runtime: the server still works
+  // (Brief, Connect, refresh) when scripts/build-ask.mjs has not run.
+  app.get("/assets/ask.js", (c) => {
+    const bundle = tryLoadPublicAsset("ask.js");
+    if (!bundle) return c.text("ask bundle missing — run node scripts/build-ask.mjs", 404);
+    c.header("Content-Type", "text/javascript; charset=utf-8");
+    c.header("Cache-Control", "no-store");
+    return c.body(bundle);
   });
 
   app.get("/assets/htmx.min.js", (c) => {
@@ -326,8 +348,8 @@ export function createApp(opts: AppOptions): Hono<Env> {
   // Brief/Ask pages also surface the mapping job for the selected repo: a
   // running job turns the pane into the progress view, and a finished job's
   // notice is consumed exactly once here.
-  function appModel(c: Context<Env>, slug?: string, askNotice?: string, refreshNotice?: string): ChromeModel {
-    const model = chromeModel(c, db, config, slug, askNotice, refreshNotice);
+  function appModel(c: Context<Env>, slug?: string, refreshNotice?: string): ChromeModel {
+    const model = chromeModel(c, db, config, slug, refreshNotice);
     if (model.repo) {
       const job = mapping.get(model.repo.id);
       if (job?.status === "running") {
@@ -347,7 +369,146 @@ export function createApp(opts: AppOptions): Hono<Env> {
     if (!model.page && model.pages.length > 0) return c.text("page not found", 404);
     return html(c, appPage(model));
   });
-  app.get("/ask", (c) => html(c, appPage(appModel(c))));
+  app.get("/ask", (c) => html(c, askPage(appModel(c))));
+
+  // Ask API + proxy: thread metadata stays on Eru (SQLite), OpenCode session
+  // traffic flows through /ask/oc/<threadId>/* to the loopback server.
+  app.get("/ask/api/status", async (c) => {
+    const repo = selectedRepo(db);
+    if (!ocServe.url()) await ocServe.ensure().catch(() => {});
+    return c.json({
+      opencode: ocServe.url() ? "up" : "down",
+      agent: ASK_AGENT,
+      model: resolveModel(config, db, "ask").value ?? null,
+      repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name, lastMappedRef: repo.lastMappedRef } : null,
+      hasMap: repo ? listAllPages(db, repo.id).length > 0 : false,
+    });
+  });
+
+  function threadView(repo: MappedRepo, t: AskThread) {
+    return {
+      id: t.id,
+      sessionId: t.sessionId,
+      title: t.title,
+      mappedRef: t.mappedRef,
+      stale: threadStale(t, repo.lastMappedRef),
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+    };
+  }
+
+  // Session titles are generated upstream by OpenCode; mirror them into the
+  // thread row while the row's own title is still empty.
+  async function syncThreadTitle(repo: MappedRepo, t: AskThread): Promise<void> {
+    if (t.title || !t.sessionId) return;
+    const upstream = ocServe.url();
+    if (!upstream) return;
+    try {
+      const res = await ocFetch(ocServe, `/session/${t.sessionId}`, { directory: threadWorkspace(askWorkdir, t.id) }, fetchImpl);
+      if (!res.ok) return;
+      const session = (await res.json()) as { title?: string };
+      if (session.title) renameThread(db, t.id, session.title, new Date(now()).toISOString());
+    } catch {
+      /* title sync is best-effort */
+    }
+  }
+
+  app.get("/ask/api/threads", async (c) => {
+    const repo = selectedRepo(db);
+    if (!repo) return c.json({ threads: [] });
+    const threads = listThreads(db, repo.id);
+    await Promise.all(threads.map((t) => syncThreadTitle(repo, t)));
+    return c.json({ threads: threads.map((t) => threadView(repo, t)) });
+  });
+
+  app.post("/ask/api/threads", async (c) => {
+    const repo = selectedRepo(db);
+    if (!repo) return c.json({ error: "Connect a repo before asking." }, 400);
+    const pages = listAllPages(db, repo.id);
+    if (pages.length === 0) {
+      return c.json({ error: "The map has no pages yet — refresh the map first." }, 409);
+    }
+    if (!ocServe.url()) await ocServe.ensure().catch(() => {});
+    const upstream = ocServe.url();
+    if (!upstream) {
+      return c.json({ error: "OpenCode serve is not running — check ERU_OPENCODE_BIN." }, 503);
+    }
+    const at = new Date(now()).toISOString();
+    const thread = insertThread(db, repo.id, repo.lastMappedRef, at);
+    try {
+      const dir = await materializeWorkspace(askWorkdir, thread.id, pages);
+      const res = await ocFetch(ocServe, "/session", {
+        method: "POST",
+        directory: dir,
+        body: {},
+      }, fetchImpl);
+      if (res.ok) {
+        const session = (await res.json()) as { id?: string };
+        if (session.id) setThreadSession(db, thread.id, session.id, at);
+      } else {
+        console.log(`ask: session create refused upstream — ${res.status}`);
+      }
+    } catch (err) {
+      // The island can still create the session through the proxy on first
+      // send; the thread row survives either way.
+      console.log("ask: workspace/session setup failed —", err instanceof Error ? err.message : err);
+    }
+    return c.json({ thread: threadView(repo, getThread(db, thread.id) ?? thread) }, 201);
+  });
+
+  // The island records the upstream session id once OpenCode assigns it, so
+  // a reload can resume the same conversation.
+  app.put("/ask/api/threads/:id/session", async (c) => {
+    const repo = selectedRepo(db);
+    const thread = getThread(db, c.req.param("id"));
+    if (!repo || !thread || thread.repoId !== repo.id) return c.json({ error: "no such thread" }, 404);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "session id required" }, 400);
+    }
+    const sessionId = typeof body === "object" && body && "sessionId" in body ? String((body as { sessionId: unknown }).sessionId) : "";
+    if (!sessionId || sessionId.length > 200) return c.json({ error: "session id required" }, 400);
+    if (thread.sessionId && thread.sessionId !== sessionId) return c.json({ error: "session already set" }, 409);
+    setThreadSession(db, thread.id, sessionId, new Date(now()).toISOString());
+    return c.json({ ok: true });
+  });
+
+  app.get("/ask/api/threads/:id", (c) => {
+    const repo = selectedRepo(db);
+    const thread = getThread(db, c.req.param("id"));
+    if (!repo || !thread || thread.repoId !== repo.id) return c.json({ error: "no such thread" }, 404);
+    return c.json({ thread: threadView(repo, thread) });
+  });
+
+  app.delete("/ask/api/threads/:id", async (c) => {
+    const repo = selectedRepo(db);
+    const thread = getThread(db, c.req.param("id"));
+    if (!repo || !thread || thread.repoId !== repo.id) return c.json({ error: "no such thread" }, 404);
+    const upstream = ocServe.url();
+    if (upstream && thread.sessionId) {
+      await ocFetch(ocServe, `/session/${thread.sessionId}`, {
+        method: "DELETE",
+        directory: threadWorkspace(askWorkdir, thread.id),
+      }, fetchImpl).catch(() => {});
+    }
+    await rm(threadWorkspace(askWorkdir, thread.id), { recursive: true, force: true }).catch(() => {});
+    deleteThreadRow(db, thread.id);
+    return c.body(null, 204);
+  });
+
+  app.all("/ask/oc/:threadId/*", (c) =>
+    askProxy(c, {
+      db,
+      workdir: askWorkdir,
+      repo: selectedRepo(db),
+      server: ocServe,
+      now,
+      fetchImpl,
+      timeoutMs: () => resolveTimeout(config, db).value,
+    }),
+  );
 
   app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db, config), "", {}, await appRepoList())));
 
@@ -424,24 +585,13 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.redirect("/");
   });
 
-  app.post("/ask", async (c) => {
-    const body = await c.req.parseBody();
-    const q = typeof body.q === "string" ? body.q.trim() : "";
-    const notice = await askNotice(db, config, ask, q);
-    if (c.req.header("HX-Request") === "true") {
-      c.header("Content-Type", "text/html; charset=utf-8");
-      return c.body(askResultFragment(notice));
-    }
-    return html(c, appPage(appModel(c, undefined, notice)));
-  });
-
   // Refresh runs in the background so the job survives page navigation: POST
   // starts it, the pane polls /refresh/status, and the next full render
   // consumes the finished notice. A second POST while running is a no-op.
   app.post("/refresh", async (c) => {
     const repo = selectedRepo(db);
     if (c.req.header("HX-Request") !== "true" && !repo) {
-      return html(c, appPage(appModel(c, undefined, undefined, "Connect a repo before refreshing.")));
+      return html(c, appPage(appModel(c, undefined, "Connect a repo before refreshing.")));
     }
     if (!repo) {
       c.header("Content-Type", "text/html; charset=utf-8");
@@ -869,19 +1019,26 @@ async function refreshNotice(
   }
 }
 
-async function askNotice(db: SqliteDb, config: Config, ask: AskRunner, q: string): Promise<string> {
-  if (!q) return "Ask something first.";
-  if (q.length > ASK_MAX_QUESTION) return `Keep questions under ${ASK_MAX_QUESTION} characters.`;
-  const repo = selectedRepo(db);
-  if (!repo) return "Connect a repo before asking.";
-  const pages = listAllPages(db, repo.id);
-  if (pages.length === 0) return "The map has no pages yet — refresh the map first.";
-  const result = await ask(q, pages, `${repo.owner}/${repo.name}`, resolveModel(config, db, "ask").value);
-  if (result.ok) return result.answer || "OpenCode returned an empty answer.";
-  console.log(`ask refused: ${result.error}`);
-  if (result.error === "unconfigured") return "OpenCode is not configured on this host (check ERU_OPENCODE_BIN).";
-  const detail = result.detail ? ` — ${result.detail.slice(-160)}` : " — check the service log.";
-  return `OpenCode could not answer${detail}`;
+// Authenticated fetch to the loopback OpenCode server: Eru is the only
+// client, and the per-boot password never reaches the browser.
+function ocFetch(
+  serve: OpenCodeServe,
+  path: string,
+  opts: { method?: string; directory?: string; body?: unknown } = {},
+  fetchImpl: FetchLike = fetch,
+): Promise<Response> {
+  const upstream = serve.url();
+  if (!upstream) return Promise.reject(new Error("opencode serve is down"));
+  const target = new URL(`${upstream}${path}`);
+  if (opts.directory) target.searchParams.set("directory", opts.directory);
+  return fetchImpl(target.toString(), {
+    method: opts.method ?? "GET",
+    headers: {
+      authorization: `Basic ${Buffer.from(`opencode:${serve.password()}`).toString("base64")}`,
+      ...(opts.body ? { "content-type": "application/json" } : {}),
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
 }
 
 function chromeModel(
@@ -889,7 +1046,6 @@ function chromeModel(
   db: SqliteDb,
   config: Config,
   slug?: string,
-  askNotice?: string,
   refreshNotice?: string,
 ): ChromeModel {
   const session = c.get("session");
@@ -925,7 +1081,6 @@ function chromeModel(
     csrf: session.csrf,
     pages,
     page,
-    askNotice,
     refreshNotice,
   };
 }
@@ -945,6 +1100,14 @@ function loadHtmx(): string {
 }
 
 function loadPublicAsset(name: string): ArrayBuffer {
+  const found = tryLoadPublicAsset(name);
+  if (!found) throw new Error(`eru: ${name} is missing`);
+  return found;
+}
+
+const publicAssetCache = new Map<string, ArrayBuffer | null>();
+function tryLoadPublicAsset(name: string): ArrayBuffer | null {
+  if (publicAssetCache.has(name)) return publicAssetCache.get(name) ?? null;
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     join(here, "assets", name),
@@ -952,8 +1115,13 @@ function loadPublicAsset(name: string): ArrayBuffer {
     join(process.cwd(), "assets", name),
     join(here, "..", "assets", name),
   ];
+  let found: ArrayBuffer | null = null;
   for (const path of candidates) {
-    if (existsSync(path)) return Uint8Array.from(readFileSync(path)).buffer;
+    if (existsSync(path)) {
+      found = Uint8Array.from(readFileSync(path)).buffer;
+      break;
+    }
   }
-  throw new Error(`eru: ${name} is missing`);
+  publicAssetCache.set(name, found);
+  return found;
 }
