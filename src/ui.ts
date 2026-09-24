@@ -271,7 +271,7 @@ function configTimeoutField(row: ConfigModelRow): string {
   return `<label class="field">
     <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective)} · ${modelSourceHint(row)}</span></span>
     <input type="text" name="${escapeHtml(row.field)}" inputmode="numeric" maxlength="6" value="${escapeHtml(row.stored)}" placeholder="${escapeHtml(row.effective)}"/>
-    <span class="field-hint">milliseconds, ${OPENCODE_TIMEOUT_MIN_MS}\u2013${OPENCODE_TIMEOUT_MAX_MS} · <code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
+    <span class="field-hint">milliseconds, ${OPENCODE_TIMEOUT_MIN_MS}–${OPENCODE_TIMEOUT_MAX_MS} · <code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
   </label>`;
 }
 

@@ -31,8 +31,7 @@ import {
 } from "./oauth.js";
 import {
   DEFAULT_OPENCODE_TIMEOUT_MS,
-  OPENCODE_TIMEOUT_MAX_MS,
-  OPENCODE_TIMEOUT_MIN_MS,
+  parseOpenCodeTimeout,
   type Config,
 } from "./config.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -592,12 +591,6 @@ const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
 const SETTING_OPENCODE_TIMEOUT = "opencode.timeout_ms";
 
-export function parseOpenCodeTimeout(raw: string): number | undefined {
-  if (!/^\d+$/.test(raw)) return undefined;
-  const ms = Number(raw);
-  return ms >= OPENCODE_TIMEOUT_MIN_MS && ms <= OPENCODE_TIMEOUT_MAX_MS ? ms : undefined;
-}
-
 // Saved setting > env > default — the same precedence as the model fields.
 function resolveTimeout(config: Config, db: SqliteDb): { value: number; source: ModelSource; overriddenEnv?: string } {
   const envSet = config.openCodeTimeoutMs !== DEFAULT_OPENCODE_TIMEOUT_MS;
@@ -815,7 +808,10 @@ async function refreshNotice(
   let ref = "";
   let tarball: TarballResult | undefined;
   for (const candidate of candidates) {
-    if (!isValidMapRef(candidate)) return { ok: false, notice: "The stored default branch does not look like a ref." };
+    if (!isValidMapRef(candidate)) {
+      console.log(`refresh ${label}: stored default branch is not a valid ref — ${candidate}`);
+      return { ok: false, notice: "The stored default branch does not look like a ref." };
+    }
     console.log(`refresh ${label} @${candidate}: fetching checkout tarball`);
     tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
     if (tarball.ok) {
@@ -835,8 +831,8 @@ async function refreshNotice(
   const workdir = await mkdtemp(joinPath(tmpdir(), "eru-map-"));
   try {
     await extractTarball(tarball.data, workdir);
-  } catch {
-    console.log(`refresh ${label} @${ref}: could not unpack the checkout`);
+  } catch (err) {
+    console.log(`refresh ${label} @${ref}: could not unpack the checkout —`, err instanceof Error ? err.message : err);
     return { ok: false, notice: "Could not unpack the checkout — refresh failed." };
   }
   console.log(`refresh ${label} @${ref}: checkout extracted — starting OpenCode`);

@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig, MIN_SESSION_SECRET } from "./config.js";
+import { loadConfig, MIN_SESSION_SECRET, parseOpenCodeTimeout } from "./config.js";
 
 const secrets = {
   ERU_UI_PASSWORD: "test-ui-password",
@@ -160,5 +160,17 @@ describe("github oauth config", () => {
     expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "1" }).uiLocalLogin).toBe(true);
     expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "no" }).uiLocalLogin).toBe(false);
     expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "garbage" }).uiLocalLogin).toBe(false);
+  });
+});
+
+describe("parseOpenCodeTimeout", () => {
+  it("accepts only integers in the 1000-600000 range", () => {
+    expect(parseOpenCodeTimeout("1000")).toBe(1000);
+    expect(parseOpenCodeTimeout("600000")).toBe(600000);
+    expect(parseOpenCodeTimeout("999")).toBeUndefined();
+    expect(parseOpenCodeTimeout("600001")).toBeUndefined();
+    expect(parseOpenCodeTimeout("abc")).toBeUndefined();
+    expect(parseOpenCodeTimeout("12.5")).toBeUndefined();
+    expect(parseOpenCodeTimeout("")).toBeUndefined();
   });
 });
