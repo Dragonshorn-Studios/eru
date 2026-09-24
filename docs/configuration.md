@@ -36,7 +36,7 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_SQLITE_PATH` | `./data/eru.sqlite` | SQLite file location |
 | `ERU_UI_USER` | — | GitHub login for the top-bar pill + avatar (also settable on `/config`) |
 | `ERU_OPENCODE_BIN` | `opencode` | Path to the OpenCode CLI; Compose defaults to `/opt/opencode/.opencode/bin/opencode` |
-| `ERU_OPENCODE_TIMEOUT_MS` | `120000` | Timeout for OpenCode invocations |
+| `ERU_OPENCODE_TIMEOUT_MS` | `120000` | Timeout for OpenCode invocations (also settable on `/config`) |
 | `ERU_OPENCODE_ASK_MODEL` | — | `provider/model` for Ask |
 | `ERU_OPENCODE_MAP_MODEL` | — | `provider/model` for map generation |
 | `ERU_OPENCODE_MODEL` | — | Both purposes (lowest precedence) |

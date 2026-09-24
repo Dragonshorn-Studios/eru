@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { OpenCodeOptions } from "./opencode.js";
+import { opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 
 const execFileP = promisify(execFile);
@@ -50,16 +50,17 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // options can otherwise swallow a trailing positional (maomao learned
       // this with --file).
       args.push("--", refreshPrompt(repoLabel, ref));
-      console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${opts.timeoutMs}ms)`);
+      const timeoutMs = opencodeTimeout(opts);
+      console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${timeoutMs}ms)`);
       const child = await runChild(opts.bin, args, {
         cwd: workdir,
         env: opencodeChildEnv(),
-        timeoutMs: opts.timeoutMs,
+        timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });
       console.log(`refresh ${repoLabel} @${ref}: exit=${child.code} in ${Math.round(child.durationMs / 1000)}s`);
       if (child.timedOut) {
-        const detail = `timed out after ${opts.timeoutMs}ms`;
+        const detail = `timed out after ${timeoutMs}ms`;
         console.log(`refresh ${repoLabel}: ${detail}`, outputTail(child.stderr, child.stdout));
         return { ok: false, error: "failed", detail };
       }

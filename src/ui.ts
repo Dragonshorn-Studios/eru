@@ -1,4 +1,5 @@
 import { CSRF_FIELD } from "./auth.js";
+import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
 import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
@@ -220,7 +221,7 @@ export interface ConfigAppView {
 
 export interface ConfigView {
   bin: string;
-  timeoutMs: number;
+  timeout: ConfigModelRow;
   app: ConfigAppView;
   user: ConfigModelRow;
   ask: ConfigModelRow;
@@ -261,6 +262,16 @@ function configModelField(row: ConfigModelRow, discovered: string[], keyedProvid
     <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective || "opencode default")} · ${modelSourceHint(row)}</span></span>
     <select name="${row.field}">${options.join("")}</select>
     <span class="field-hint"><code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
+  </label>`;
+}
+
+// The timeout is a number field, not a picker — same saved > env > default
+// hints as the model rows.
+function configTimeoutField(row: ConfigModelRow): string {
+  return `<label class="field">
+    <span>${escapeHtml(row.label)} <span class="field-hint">in effect: ${escapeHtml(row.effective)} · ${modelSourceHint(row)}</span></span>
+    <input type="text" name="${escapeHtml(row.field)}" inputmode="numeric" maxlength="6" value="${escapeHtml(row.stored)}" placeholder="${escapeHtml(row.effective)}"/>
+    <span class="field-hint">milliseconds, ${OPENCODE_TIMEOUT_MIN_MS}–${OPENCODE_TIMEOUT_MAX_MS} · <code>${escapeHtml(row.envKey)}</code> in .env is used when nothing is saved here</span>
   </label>`;
 }
 
@@ -338,11 +349,12 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
         <p class="page-lead">Saved values win over environment variables — clear a saved field to fall back to <code>.env</code> or the default.</p>
         ${flash}
         <h3 id="models">OpenCode models</h3>
-        <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> · timeout <code>${view.timeoutMs} ms</code> — change <code>ERU_OPENCODE_BIN</code> / <code>ERU_OPENCODE_TIMEOUT_MS</code></p>
+        <p class="mapped">binary <code>${escapeHtml(view.bin)}</code> — change <code>ERU_OPENCODE_BIN</code> in .env</p>
         <form class="connect-form" method="post" action="/config/models" autocomplete="off">
           ${csrfInput(model.csrf)}
           ${configModelField(view.ask, view.discovered.models, keyedProviders)}
           ${configModelField(view.map, view.discovered.models, keyedProviders)}
+          ${configTimeoutField(view.timeout)}
           <button class="enter" type="submit">Save models</button>
         </form>
         <form class="config-refresh" method="post" action="/config/models/refresh">
