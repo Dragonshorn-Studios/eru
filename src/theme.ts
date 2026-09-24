@@ -375,7 +375,7 @@ a:hover { color: var(--ink); }
 .ask-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .ask-thread { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .ask-viewport { flex: 1; min-height: 0; overflow-y: auto; padding: 1.4rem 1.6rem; position: relative; }
-.ask-msgs { width: 100%; max-width: 44rem; margin-inline: auto; }
+.ask-msgs { width: 100%; max-width: 68rem; margin-inline: auto; }
 .ask-msg { margin-bottom: 1.1rem; }
 .ask-bubble {
   background: color-mix(in srgb, white 62%, var(--cream));
@@ -436,7 +436,7 @@ a:hover { color: var(--ink); }
   align-items: flex-end;
   gap: 0.6rem;
   width: 100%;
-  max-width: 44rem;
+  max-width: 68rem;
   margin-inline: auto;
 }
 .ask-input {
