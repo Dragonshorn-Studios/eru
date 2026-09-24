@@ -305,6 +305,9 @@ a:hover { color: var(--ink); }
 .ask-body .shell { height: 100dvh; overflow: hidden; }
 .ask-body .stage { min-height: 0; }
 .ask-island { padding: 0; display: flex; min-height: 0; overflow: hidden; }
+/* The React mount div must pass the flex chain through or .ask-app's
+   flex:1 never engages and the composer is clipped instead of pinned. */
+#ask-root { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; }
 .ask-app { display: flex; width: 100%; flex: 1; min-height: 0; }
 .ask-rail {
   width: 15rem;
