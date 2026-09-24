@@ -4,7 +4,7 @@ Server-rendered HTML + HTMX, locked pastel tokens (cream, lavender, pink, mint, 
 
 ## `/login`
 
-The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe compare, signed `HttpOnly` `SameSite=Lax` cookie.
+The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe compare, signed `HttpOnly` `SameSite=Lax` cookie. When `ERU_OAUTH_CLIENT_ID`/`SECRET` are configured, a **Sign in with GitHub** button appears (OAuth against a numeric-id allowlist, `ERU_OAUTH_ADMIN_IDS`); the password form then only shows with `ERU_UI_LOCAL_LOGIN=true`.
 
 ![login](ui/login.png)
 

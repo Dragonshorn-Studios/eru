@@ -15,3 +15,7 @@ export function parseInteger(raw: string | undefined, fallback: number): number 
   }
   return n;
 }
+
+export function parseBooleanEnv(value: string | undefined): boolean {
+  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}

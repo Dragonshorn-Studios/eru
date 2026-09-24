@@ -36,6 +36,9 @@ function gatedConfig(overrides: Partial<Config> = {}): Config {
     loginWindowMs: 60_000,
     openCodeBin: "opencode",
     openCodeTimeoutMs: 120_000,
+    publicUrl: "http://eru.test",
+    oauthAdminIds: [],
+    uiLocalLogin: false,
     ...overrides,
   };
 }
@@ -47,11 +50,12 @@ function app(
   refreshRunner?: RefreshRunner,
   providerStore?: ProviderCredentialStore,
   modelDiscovery?: ModelDiscovery,
+  oauthFetch?: typeof fetch,
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
   return {
-    app: createApp({ config, db, fetchImpl, askRunner, refreshRunner, providerStore, modelDiscovery }),
+    app: createApp({ config, db, fetchImpl, oauthFetch, askRunner, refreshRunner, providerStore, modelDiscovery }),
     config,
     db,
   };
@@ -1304,5 +1308,106 @@ describe("provider keys on /config", () => {
     });
     expect(remove.status).toBe(302);
     expect(JSON.parse(readFileSync(authPath, "utf8")).groq).toBeUndefined();
+  });
+});
+
+describe("github oauth login", () => {
+  const oauthCfg = {
+    oauthClientId: "gh-client-id",
+    oauthClientSecret: "gh-client-secret",
+    oauthAdminIds: [42],
+    publicUrl: "http://eru.test",
+  };
+  const oauthFetchStub = (userId = 42, login = "octo-cat"): typeof fetch =>
+    (async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith("https://github.com/login/oauth/access_token")) {
+        return new Response(JSON.stringify({ access_token: "tok-1" }), { status: 200 });
+      }
+      if (url === "https://api.github.com/user") {
+        return new Response(
+          JSON.stringify({ id: userId, login, avatar_url: "https://avatars.test/u.png" }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+  it("redirects to GitHub, exchanges the code, and issues a session with the identity", async () => {
+    const { app: instance } = app(oauthCfg, undefined, undefined, undefined, undefined, undefined, oauthFetchStub());
+    const start = await instance.request("/login/github?next=/config", { redirect: "manual" });
+    expect(start.status).toBe(302);
+    const loc = start.headers.get("location") ?? "";
+    expect(loc).toContain("https://github.com/login/oauth/authorize");
+    expect(loc).toContain("client_id=gh-client-id");
+    expect(loc).toContain(encodeURIComponent("http://eru.test/login/github/callback"));
+    const state = new URL(loc).searchParams.get("state") ?? "";
+    expect(state).not.toBe("");
+
+    const cb = await instance.request(`/login/github/callback?state=${state}&code=abc`, { redirect: "manual" });
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/config");
+    const cookie = (cb.headers.get("set-cookie") ?? "").split(";")[0];
+    expect(cookie).toContain("eru_session=");
+
+    const home = await instance.request("/", { headers: { cookie } });
+    expect(home.status).toBe(200);
+    expect(await home.text()).toContain("octo-cat");
+  });
+
+  it("denies non-allowlisted accounts and rejects replayed states", async () => {
+    const { app: deniedApp } = app(oauthCfg, undefined, undefined, undefined, undefined, undefined, oauthFetchStub(7, "mallory"));
+    const s0 = await deniedApp.request("/login/github", { redirect: "manual" });
+    const state0 = new URL(s0.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const denied = await deniedApp.request(`/login/github/callback?state=${state0}&code=abc`, { redirect: "manual" });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("not an operator");
+
+    const { app: okApp } = app(oauthCfg, undefined, undefined, undefined, undefined, undefined, oauthFetchStub());
+    const s1 = await okApp.request("/login/github", { redirect: "manual" });
+    const state1 = new URL(s1.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const ok = await okApp.request(`/login/github/callback?state=${state1}&code=abc`, { redirect: "manual" });
+    expect(ok.status).toBe(302);
+    const replay = await okApp.request(`/login/github/callback?state=${state1}&code=abc`, { redirect: "manual" });
+    expect(replay.status).toBe(403);
+  });
+
+  it("drops the session when the id leaves the allowlist", async () => {
+    const { app: instance } = app(oauthCfg, undefined, undefined, undefined, undefined, undefined, oauthFetchStub());
+    const s = await instance.request("/login/github", { redirect: "manual" });
+    const state = new URL(s.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const cb = await instance.request(`/login/github/callback?state=${state}&code=abc`, { redirect: "manual" });
+    const cookie = (cb.headers.get("set-cookie") ?? "").split(";")[0];
+    expect((await instance.request("/", { headers: { cookie } })).status).toBe(200);
+
+    const { app: shrunk } = app({ ...oauthCfg, oauthAdminIds: [99] }, undefined, undefined, undefined, undefined, undefined, oauthFetchStub());
+    const res = await shrunk.request("/", { headers: { cookie }, redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/login");
+  });
+
+  it("hides the password form under OAuth unless ERU_UI_LOCAL_LOGIN is on", async () => {
+    const { app: strict } = app(oauthCfg);
+    const page = await strict.request("/login");
+    const text = await page.text();
+    expect(text).toContain("Sign in with GitHub");
+    expect(text).not.toContain('name="password"');
+    const refused = await login(strict);
+    expect(refused.status).toBe(401);
+
+    const { app: local } = app({ ...oauthCfg, uiLocalLogin: true });
+    const page2 = await local.request("/login");
+    const text2 = await page2.text();
+    expect(text2).toContain("Sign in with GitHub");
+    expect(text2).toContain('name="password"');
+    const res = await login(local);
+    expect(res.status).toBe(302);
+  });
+
+  it("keeps the gate closed when OAuth is not configured", async () => {
+    const { app: instance } = app();
+    const res = await instance.request("/login/github", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/login");
   });
 });

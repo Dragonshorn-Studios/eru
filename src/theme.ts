@@ -542,6 +542,29 @@ a:hover { color: var(--ink); }
   padding: 0.8rem 1.2rem;
   border-radius: 999px;
 }
+a.enter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  text-decoration: none;
+}
+.github-enter { background: var(--ink); }
+.gate-or {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0.9rem 0;
+  color: color-mix(in srgb, var(--ink) 45%, white);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+.gate-or::before,
+.gate-or::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+}
 .pill-link { text-decoration: none; }
 .pill-add {
   display: inline-flex;
