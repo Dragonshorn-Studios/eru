@@ -119,10 +119,20 @@ export function createOpenCodeServer(opts: OpenCodeServeOptions): OpenCodeServe 
     });
     spawned.once("error", (err) => {
       log(`spawn failed: ${err.message}`);
-      child = null;
+      if (child === spawned) child = null;
     });
-    spawned.once("exit", (code) => onExit(code));
-    await waitHealthy();
+    spawned.once("exit", (code) => {
+      if (child === spawned) onExit(code);
+    });
+    try {
+      await waitHealthy();
+    } catch (err) {
+      // Detach before killing so the exit handler does not "restart" a
+      // server that ensure() is about to report as failed.
+      if (child === spawned) child = null;
+      spawned.kill("SIGTERM");
+      throw err;
+    }
     log(`opencode serve up on http://${hostname}:${port}`);
   }
 

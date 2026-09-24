@@ -3,6 +3,7 @@ import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
 import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
+import { ASK_AGENT } from "./askthreads.js";
 import { THEME_CSS } from "./theme.js";
 import type { ProviderCredentialStatus } from "./providers.js";
 import { escapeHtml } from "./util.js";
@@ -696,7 +697,7 @@ export function refreshResultFragment(notice: string): string {
 export function askPage(model: ChromeModel): string {
   const bootstrap = JSON.stringify({
     csrf: model.csrf,
-    agent: "eru-ask",
+    agent: ASK_AGENT,
     maxQuestion: ASK_MAX_QUESTION,
     apiBase: "/ask",
     slugs: model.pages.map((p) => p.slug),
