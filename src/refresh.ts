@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { OpenCodeOptions } from "./opencode.js";
+import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 
 const execFileP = promisify(execFile);
 
@@ -49,34 +50,37 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // options can otherwise swallow a trailing positional (maomao learned
       // this with --file).
       args.push("--", refreshPrompt(repoLabel, ref));
-      const { stdout } = await execFileP(opts.bin, args, {
+      console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${opts.timeoutMs}ms)`);
+      const child = await runChild(opts.bin, args, {
         cwd: workdir,
-        timeout: opts.timeoutMs,
+        env: opencodeChildEnv(),
+        timeoutMs: opts.timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });
-      const pages = parseMapPages(stdout);
+      console.log(`refresh ${repoLabel} @${ref}: exit=${child.code} in ${Math.round(child.durationMs / 1000)}s`);
+      if (child.timedOut) {
+        const detail = `timed out after ${opts.timeoutMs}ms`;
+        console.log(`refresh ${repoLabel}: ${detail}`, outputTail(child.stderr, child.stdout));
+        return { ok: false, error: "failed", detail };
+      }
+      if (child.code !== 0) {
+        const detail = outputTail(child.stderr, child.stdout);
+        console.log(`refresh ${repoLabel}: OpenCode exited ${child.code} —`, detail || "(no output)");
+        return { ok: false, error: "failed", detail };
+      }
+      const pages = parseMapPages(child.stdout);
       if (!pages || pages.length === 0) {
-        const detail = stdout.trim().replace(/\s+/g, " ").slice(-400);
-        console.log("refresh runner produced no map:", detail || "(empty output)");
+        const detail = outputTail(child.stdout);
+        console.log(`refresh ${repoLabel}: OpenCode returned no map —`, detail || "(empty output)");
         return { ok: false, error: "nomap", detail };
       }
       return { ok: true, pages };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
-      const detail = childErrorDetail(err);
-      console.log("refresh runner failed:", detail || (err instanceof Error ? err.message : err));
-      return { ok: false, error: "failed", detail };
+      console.log(`refresh ${repoLabel}: runner error —`, err instanceof Error ? err.message : err);
+      return { ok: false, error: "failed", detail: "" };
     }
   };
-}
-
-// execFile failures carry the child's stdout/stderr — the tail of those is the
-// real reason OpenCode died (bad model, missing provider key), while err.message
-// is only the command line. Compact it for logs and the operator notice.
-function childErrorDetail(err: unknown): string {
-  const e = err as { stderr?: unknown; stdout?: unknown };
-  const text = [e.stderr, e.stdout].find((s): s is string => typeof s === "string" && s.trim().length > 0) ?? "";
-  return text.trim().replace(/\s+/g, " ").slice(-400);
 }
 
 export async function extractTarball(data: Buffer, destDir: string): Promise<void> {

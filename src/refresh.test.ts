@@ -98,4 +98,25 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     expect(garbage).toMatchObject({ ok: false, error: "nomap" });
     expect(garbage.ok === false && "detail" in garbage && garbage.detail!.length > 0).toBe(true);
   });
+
+  it("ends stdin so opencode-style children do not block on EOF", async () => {
+    // `opencode run` reads stdin when it is not a TTY; this stub does the same.
+    // With stdin left open it would hang until the timeout — here it answers.
+    const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
+    const stub = join(workdir, "stub.sh");
+    await writeFile(stub, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '[{\"slug\":\"a\",\"title\":\"t\",\"body\":\"b\",\"sortOrder\":0}]'\n");
+    await chmod(stub, 0o755);
+    const result = await createMapRefresher({ bin: stub, timeoutMs: 10_000 })(workdir, "o/r", "main");
+    expect(result).toEqual({ ok: true, pages: [{ slug: "a", title: "t", body: "b", sortOrder: 0 }] });
+  });
+
+  it("fails with a timed-out detail when the child outlives its budget", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
+    const stub = join(workdir, "stub.sh");
+    await writeFile(stub, "#!/bin/sh\nsleep 30\n");
+    await chmod(stub, 0o755);
+    const result = await createMapRefresher({ bin: stub, timeoutMs: 100 })(workdir, "o/r", "main");
+    expect(result).toMatchObject({ ok: false, error: "failed" });
+    expect(result.ok === false && result.detail?.includes("timed out")).toBe(true);
+  });
 });

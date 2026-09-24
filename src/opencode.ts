@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-
-const execFileP = promisify(execFile);
+import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 
 export const ASK_MAX_QUESTION = 2000;
 const MAX_OUTPUT = 4 * 1024 * 1024;
@@ -56,30 +53,33 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       // options can otherwise swallow a trailing positional (maomao learned
       // this with --file).
       args.push("--", prompt(repoLabel, question));
-      const { stdout } = await execFileP(opts.bin, args, {
+      console.log(`ask ${repoLabel}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${opts.timeoutMs}ms)`);
+      const child = await runChild(opts.bin, args, {
         cwd: workdir,
-        timeout: opts.timeoutMs,
+        env: opencodeChildEnv(),
+        timeoutMs: opts.timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });
-      return { ok: true, answer: stdout.trim() };
+      console.log(`ask ${repoLabel}: exit=${child.code} in ${Math.round(child.durationMs / 1000)}s`);
+      if (child.timedOut) {
+        const detail = `timed out after ${opts.timeoutMs}ms`;
+        console.log(`ask ${repoLabel}: ${detail}`, outputTail(child.stderr, child.stdout));
+        return { ok: false, error: "failed", detail };
+      }
+      if (child.code !== 0) {
+        const detail = outputTail(child.stderr, child.stdout);
+        console.log(`ask ${repoLabel}: OpenCode exited ${child.code} —`, detail || "(no output)");
+        return { ok: false, error: "failed", detail };
+      }
+      return { ok: true, answer: child.stdout.trim() };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
-      const detail = childErrorDetail(err);
-      console.log("ask runner failed:", detail || (err instanceof Error ? err.message : err));
-      return { ok: false, error: "failed", detail };
+      console.log(`ask ${repoLabel}: runner error —`, err instanceof Error ? err.message : err);
+      return { ok: false, error: "failed", detail: "" };
     } finally {
       await rm(workdir, { recursive: true, force: true }).catch(() => {});
     }
   };
-}
-
-// execFile failures carry the child's stdout/stderr — the tail of those is the
-// real reason OpenCode died (bad model, missing provider key), while err.message
-// is only the command line. Compact it for logs and the operator notice.
-function childErrorDetail(err: unknown): string {
-  const e = err as { stderr?: unknown; stdout?: unknown };
-  const text = [e.stderr, e.stdout].find((s): s is string => typeof s === "string" && s.trim().length > 0) ?? "";
-  return text.trim().replace(/\s+/g, " ").slice(-400);
 }
 
 function pageFile(slug: string): string {
@@ -127,13 +127,15 @@ export function createModelDiscovery(opts: Pick<OpenCodeOptions, "bin" | "timeou
       if (!inflight) {
         inflight = (async () => {
           try {
-            const { stdout } = await execFileP(opts.bin, ["models"], {
-              timeout: Math.min(opts.timeoutMs, 30_000),
+            const child = await runChild(opts.bin, ["models"], {
+              env: opencodeChildEnv(),
+              timeoutMs: Math.min(opts.timeoutMs, 30_000),
               maxBuffer: MAX_OUTPUT,
             });
+            if (child.code !== 0) throw new Error(outputTail(child.stderr, child.stdout) || `exit ${child.code}`);
             const models = [
               ...new Set(
-                stdout
+                child.stdout
                   .split("\n")
                   .map((line) => line.trim().split(/\s+/)[0])
                   .filter((token) => MODEL_NAME_RE.test(token)),
