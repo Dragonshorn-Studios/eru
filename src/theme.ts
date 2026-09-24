@@ -202,7 +202,7 @@ a:hover { color: var(--ink); }
 
 .stage {
   display: grid;
-  grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.6fr) minmax(240px, 0.95fr);
+  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 2.4fr);
   gap: 1.2rem;
   padding: 1rem 2.4rem 2rem;
   flex: 1;
@@ -281,11 +281,53 @@ a:hover { color: var(--ink); }
   font-size: 0.95rem;
 }
 .page-body {
-  white-space: pre-wrap;
   line-height: 1.65;
   font-size: 0.95rem;
   color: color-mix(in srgb, var(--ink) 85%, white);
 }
+.page-body > :first-child { margin-top: 0; }
+.page-body > :last-child { margin-bottom: 0; }
+.page-body h1, .page-body h2, .page-body h3, .page-body h4 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  margin: 1.2rem 0 0.5rem;
+  line-height: 1.3;
+}
+.page-body h1 { font-size: 1.45rem; }
+.page-body h2 { font-size: 1.3rem; }
+.page-body h3 { font-size: 1.12rem; }
+.page-body h4 { font-size: 1rem; }
+.page-body p, .page-body ul, .page-body ol, .page-body blockquote, .page-body pre, .page-body table { margin: 0 0 0.9rem; }
+.page-body ul, .page-body ol { padding-left: 1.4rem; }
+.page-body li { margin-bottom: 0.3rem; }
+.page-body blockquote {
+  border-left: 3px solid color-mix(in srgb, var(--moss) 55%, white);
+  padding: 0.2rem 0 0.2rem 0.9rem;
+  color: color-mix(in srgb, var(--ink) 70%, white);
+}
+.page-body code {
+  font-family: var(--font-mono);
+  background: color-mix(in srgb, var(--mint) 35%, var(--cream));
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.35rem;
+  font-size: 0.88em;
+}
+.page-body pre {
+  background: color-mix(in srgb, var(--lavender) 32%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 60%, var(--lavender));
+  border-radius: 0.7rem;
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+}
+.page-body pre code { background: none; padding: 0; }
+.page-body a {
+  color: color-mix(in srgb, var(--ink) 70%, var(--moss));
+  text-decoration-color: color-mix(in srgb, var(--moss) 55%, transparent);
+}
+.page-body hr { border: 0; border-top: 1px solid color-mix(in srgb, var(--moss) 40%, white); margin: 1.2rem 0; }
+.page-body table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+.page-body th, .page-body td { border: 1px solid color-mix(in srgb, var(--moss) 40%, white); padding: 0.35rem 0.6rem; text-align: left; }
+.page-body th { background: color-mix(in srgb, var(--mint) 30%, var(--cream)); font-weight: 600; }
 .empty-hint {
   text-align: center;
   font-size: 0.85rem;
@@ -408,8 +450,70 @@ a:hover { color: var(--ink); }
 .ask-tool {
   font-family: var(--font-mono);
   font-size: 0.78rem;
+  margin: 0.5rem 0;
+  border: 1px solid color-mix(in srgb, var(--moss) 35%, white);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--mint) 22%, var(--cream));
+  overflow: hidden;
+}
+.ask-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  color: color-mix(in srgb, var(--ink) 75%, white);
+}
+.ask-tool-head::-webkit-details-marker { display: none; }
+.ask-tool-head::after {
+  content: "▸";
+  margin-left: auto;
   color: var(--moss);
-  margin: 0.4rem 0;
+  transition: transform 0.15s ease;
+}
+.ask-tool[open] .ask-tool-head::after { transform: rotate(90deg); }
+.ask-tool-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--moss);
+  flex-shrink: 0;
+}
+.ask-tool.running .ask-tool-dot { background: color-mix(in srgb, var(--lavender) 60%, var(--moss)); animation: ask-pulse 1.1s ease-in-out infinite; }
+.ask-tool.failed .ask-tool-dot { background: #b3545e; }
+@keyframes ask-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.ask-tool-name { font-weight: 600; color: color-mix(in srgb, var(--ink) 80%, var(--moss)); }
+.ask-tool-target {
+  color: color-mix(in srgb, var(--ink) 55%, white);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.ask-tool-state { color: var(--moss); flex-shrink: 0; }
+.ask-tool-detail {
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  border-top: 1px solid color-mix(in srgb, var(--moss) 25%, white);
+  background: color-mix(in srgb, var(--lavender) 22%, var(--cream));
+  font-size: 0.74rem;
+  line-height: 1.5;
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: color-mix(in srgb, var(--ink) 70%, white);
+}
+.ask-cite {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: color-mix(in srgb, var(--mint) 35%, var(--cream));
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.35rem;
+  color: color-mix(in srgb, var(--ink) 70%, var(--moss));
+  text-decoration-color: color-mix(in srgb, var(--moss) 55%, transparent);
 }
 .ask-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
 .ask-action {

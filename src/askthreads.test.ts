@@ -61,6 +61,12 @@ describe("materializeWorkspace", () => {
     const agentsMd = await readFile(join(dir, "AGENTS.md"), "utf8");
     expect(agentsMd).toContain("./map");
     expect(agentsMd).toContain("Never repeat environment variables");
+
+    // The .git skeleton roots the OpenCode project at the workspace so it
+    // never walks up into the surrounding checkout.
+    expect(await readFile(join(dir, ".git", "HEAD"), "utf8")).toContain("refs/heads/main");
+    expect(existsSync(join(dir, ".git", "objects"))).toBe(true);
+    expect(existsSync(join(dir, ".git", "refs"))).toBe(true);
   });
 });
 
@@ -94,7 +100,20 @@ describe("ensureWorkspace / sweepWorkspaces", () => {
     // current map and updates the stored ref so it isn't marked stale.
     const dir = await ensureWorkspace(db, workdir, thread, AT);
     expect(existsSync(join(dir, "map", "arch.md"))).toBe(true);
+    expect(existsSync(join(dir, ".git", "HEAD"))).toBe(true);
     expect(getThread(db, thread.id)?.mappedRef).toBe("v2");
+  });
+
+  it("backfills the project-root marker on workspaces that predate it", async () => {
+    const db = openDb(":memory:");
+    const repoId = seedRepo(db);
+    const thread = insertThread(db, repoId, "main", AT);
+    const workdir = await mkdtemp(join(tmpdir(), "eru-ask-ws-"));
+    const dir = threadWorkspace(workdir, thread.id);
+    await mkdir(dir, { recursive: true });
+
+    await ensureWorkspace(db, workdir, thread, AT);
+    expect(existsSync(join(dir, ".git", "HEAD"))).toBe(true);
   });
 
   it("sweeps orphan workspaces but keeps row-backed ones", async () => {

@@ -47,9 +47,16 @@ interface AskStatus {
 const boot = window.__ERU_ASK__ ?? { csrf: "", agent: "eru-ask", maxQuestion: 2000, apiBase: "/ask", slugs: [] };
 const KNOWN_SLUGS = new Set(boot.slugs);
 
+const API_TIMEOUT_MS = 25_000;
+
 async function api(path: string, init?: RequestInit): Promise<Response> {
+  // Bounded so a stalled request surfaces a banner instead of leaving the
+  // island on "Waking up…" forever.
+  const signals: AbortSignal[] = [AbortSignal.timeout(API_TIMEOUT_MS)];
+  if (init?.signal) signals.push(init.signal);
   const res = await fetch(`${boot.apiBase}${path}`, {
     ...init,
+    signal: AbortSignal.any(signals),
     headers: { accept: "application/json", "x-csrf-token": boot.csrf, ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
@@ -89,11 +96,63 @@ function CiteLink(props: { href?: string; children?: React.ReactNode }) {
   );
 }
 
-const AskText = () => <MarkdownTextPrimitive className="ask-md" smooth components={{ a: CiteLink }} />;
+const MAP_CITE_RE = /^(?:\.\/)?map\/([A-Za-z0-9][A-Za-z0-9._-]*)\.md$/;
 
-const ToolLine = ({ toolName }: { toolName?: string }) => (
-  <p className="ask-tool">{toolName ? `reading the map (${toolName})` : "reading the map…"}</p>
+// The agent cites map pages as `map/<slug>.md` code spans; when the slug is a
+// known Brief page they should behave like the links they look like.
+function CiteCode(props: { children?: React.ReactNode; className?: string }) {
+  const text = typeof props.children === "string" ? props.children : "";
+  const m = MAP_CITE_RE.exec(text.trim());
+  if (m && KNOWN_SLUGS.has(m[1])) {
+    return <a className="ask-cite" href={`/brief/${encodeURIComponent(m[1])}`}>{text}</a>;
+  }
+  return <code className={props.className}>{props.children}</code>;
+}
+
+const AskText = () => (
+  <MarkdownTextPrimitive className="ask-md" smooth components={{ a: CiteLink, code: CiteCode }} />
 );
+
+const TOOL_LABELS: Record<string, string> = { read: "read", glob: "glob", grep: "grep" };
+
+function toolTarget(args: unknown): string {
+  if (typeof args !== "object" || args === null) return "";
+  const a = args as Record<string, unknown>;
+  const target = a.filePath ?? a.filepath ?? a.path ?? a.pattern ?? a.query ?? a.include ?? "";
+  return typeof target === "string" ? target : "";
+}
+
+interface ToolPartProps {
+  toolName?: string;
+  args?: unknown;
+  argsText?: string;
+  result?: unknown;
+  status?: { type?: string };
+}
+
+// Token-styled tool card: name + what it touched, expandable for the raw
+// args/result. The workspace only allows read/glob/grep on the map.
+const ToolCard = ({ toolName, args, argsText, result, status }: ToolPartProps) => {
+  const running = status?.type === "running";
+  const failed = status?.type === "incomplete";
+  const name = TOOL_LABELS[toolName ?? ""] ?? toolName ?? "tool";
+  const target = toolTarget(args);
+  const detail = [argsText, typeof result === "string" ? result : result ? JSON.stringify(result, null, 2) : ""]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+  return (
+    <details className={`ask-tool${running ? " running" : ""}${failed ? " failed" : ""}`}>
+      <summary className="ask-tool-head">
+        <span className="ask-tool-dot" aria-hidden="true" />
+        <span className="ask-tool-name">{name}</span>
+        {target ? <span className="ask-tool-target">{target}</span> : null}
+        <span className="ask-tool-state">{running ? "reading…" : failed ? "stopped" : "done"}</span>
+      </summary>
+      {detail ? <pre className="ask-tool-detail">{detail}</pre> : null}
+    </details>
+  );
+};
 
 const AskMessage = () => (
   <MessagePrimitive.Root className="ask-msg">
@@ -104,7 +163,7 @@ const AskMessage = () => (
     </MessagePrimitive.If>
     <MessagePrimitive.If assistant>
       <div className="ask-bubble">
-        <MessagePrimitive.Parts components={{ Text: AskText, tools: { Fallback: ToolLine } }} />
+        <MessagePrimitive.Parts components={{ Text: AskText, tools: { Fallback: ToolCard } }} />
         <MessagePrimitive.Error>
           <p className="ask-msg-error">Eru hit a snag on that turn — you can retry below.</p>
         </MessagePrimitive.Error>

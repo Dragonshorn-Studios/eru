@@ -25,6 +25,7 @@
     "better-sqlite3": "^12.4.1",
     "hono": "^4.10.3",
     "htmx.org": "^2.0.4",
+    "marked": "18.0.13",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
