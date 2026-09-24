@@ -40,6 +40,7 @@ import { join as joinPath } from "node:path";
 import {
   deleteForgeCredential,
   deleteSetting,
+  deleteStalePages,
   getForgeCredential,
   getPage,
   getPrimaryRepo,
@@ -1010,6 +1011,7 @@ async function refreshNotice(
       for (const page of result.pages) {
         upsertPage(db, repo.id, { ...page, mappedRef: ref }, at);
       }
+      deleteStalePages(db, repo.id, result.pages.map((p) => p.slug));
       setLastMapped(db, repo.id, ref, at);
     })();
     console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages in ${Math.round((now() - started) / 1000)}s`);

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +87,9 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
     const result = await createMapRefresher({ bin: script, timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(result).toEqual({ ok: true, pages: [{ slug: "arch", title: "P:deny", body: "b", sortOrder: 0 }] });
+    // The checkout gets a .git marker so OpenCode roots its project here
+    // instead of walking up to a surrounding repository.
+    expect(existsSync(join(workdir, ".git", "HEAD"))).toBe(true);
   });
 
   it("fails closed on missing binary, non-zero exit, and garbage output", async () => {

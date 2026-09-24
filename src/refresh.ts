@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import { markWorkspaceRoot } from "./util.js";
 
 const execFileP = promisify(execFile);
 
@@ -43,6 +44,9 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
           permission: { "*": "deny", read: "allow", glob: "allow", grep: "allow" },
         }),
       );
+      // The tarball has no .git; OpenCode would otherwise root its project at
+      // the nearest .git ancestor of the temp dir and map that repo instead.
+      await markWorkspaceRoot(workdir);
       const args = ["run", "--format", "default"];
       const runModel = model ?? opts.model;
       if (runModel) args.push("-m", runModel);

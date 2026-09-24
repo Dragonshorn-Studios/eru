@@ -710,6 +710,7 @@ describe("refresh map", () => {
     };
     const instance = app({}, fetchImpl, undefined, runner);
     await seed(instance, [], "tok");
+    upsertPage(instance.db, getPrimaryRepo(instance.db)!.id, { slug: "stale", title: "Old", body: "gone", sortOrder: 9 }, "t");
     const res = await refreshPost(instance);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Mapped @main — 1 page.");
@@ -717,6 +718,7 @@ describe("refresh map", () => {
     expect(sawCheckout).toBe(true);
     const repo = getPrimaryRepo(instance.db)!;
     expect(repo.lastMappedRef).toBe("main");
+    // The refresh replaces the map: the pre-existing stale slug is removed.
     expect(listPages(instance.db, repo.id).map((p) => p.slug)).toEqual(["arch"]);
 
     const cookie = await seed(instance, []);

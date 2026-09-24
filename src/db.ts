@@ -317,3 +317,11 @@ export function upsertPage(
     .get(repoId, page.slug, page.title, page.body, page.sortOrder, page.mappedRef ?? null, at) as { id: number };
   return row.id;
 }
+
+// A refresh replaces the map: pages the new scan did not produce are stale.
+// keepSlugs is never empty on a successful refresh, but never wipe the map.
+export function deleteStalePages(db: SqliteDb, repoId: number, keepSlugs: string[]): void {
+  if (keepSlugs.length === 0) return;
+  const placeholders = keepSlugs.map(() => "?").join(",");
+  db.prepare(`DELETE FROM pages WHERE repo_id = ? AND slug NOT IN (${placeholders})`).run(repoId, ...keepSlugs);
+}
