@@ -19,8 +19,14 @@ export type AskRunner = (question: string, pages: AskPage[], repoLabel: string, 
 
 export interface OpenCodeOptions {
   bin: string;
-  timeoutMs: number;
+  // A number for fixed timeouts, or a getter when the timeout can be
+  // reconfigured at runtime (the /config page resolves it per call).
+  timeoutMs: number | (() => number);
   model?: string;
+}
+
+export function opencodeTimeout(opts: Pick<OpenCodeOptions, "timeoutMs">): number {
+  return typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
 }
 
 // Ask runs in a throwaway directory: the map is materialized as plain files and
@@ -53,16 +59,17 @@ export function createOpenCodeRunner(opts: OpenCodeOptions): AskRunner {
       // options can otherwise swallow a trailing positional (maomao learned
       // this with --file).
       args.push("--", prompt(repoLabel, question));
-      console.log(`ask ${repoLabel}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${opts.timeoutMs}ms)`);
+      const timeoutMs = opencodeTimeout(opts);
+      console.log(`ask ${repoLabel}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${timeoutMs}ms)`);
       const child = await runChild(opts.bin, args, {
         cwd: workdir,
         env: opencodeChildEnv(),
-        timeoutMs: opts.timeoutMs,
+        timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });
       console.log(`ask ${repoLabel}: exit=${child.code} in ${Math.round(child.durationMs / 1000)}s`);
       if (child.timedOut) {
-        const detail = `timed out after ${opts.timeoutMs}ms`;
+        const detail = `timed out after ${timeoutMs}ms`;
         console.log(`ask ${repoLabel}: ${detail}`, outputTail(child.stderr, child.stdout));
         return { ok: false, error: "failed", detail };
       }
@@ -129,7 +136,7 @@ export function createModelDiscovery(opts: Pick<OpenCodeOptions, "bin" | "timeou
           try {
             const child = await runChild(opts.bin, ["models"], {
               env: opencodeChildEnv(),
-              timeoutMs: Math.min(opts.timeoutMs, 30_000),
+              timeoutMs: Math.min(opencodeTimeout(opts), 30_000),
               maxBuffer: MAX_OUTPUT,
             });
             if (child.code !== 0) throw new Error(outputTail(child.stderr, child.stdout) || `exit ${child.code}`);

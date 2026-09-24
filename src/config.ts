@@ -9,6 +9,8 @@ export const DEFAULT_LOGIN_LIMIT = 5;
 export const DEFAULT_LOGIN_WINDOW_MS = 60_000;
 export const DEFAULT_OPENCODE_BIN = "opencode";
 export const DEFAULT_OPENCODE_TIMEOUT_MS = 120_000;
+export const OPENCODE_TIMEOUT_MIN_MS = 1_000;
+export const OPENCODE_TIMEOUT_MAX_MS = 600_000;
 
 export interface Config {
   host: string;
@@ -67,7 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const openCodeBin = requiredOrDefault(env, "ERU_OPENCODE_BIN", DEFAULT_OPENCODE_BIN);
   const openCodeTimeoutMs = parseInteger(env.ERU_OPENCODE_TIMEOUT_MS, DEFAULT_OPENCODE_TIMEOUT_MS);
-  if (!Number.isInteger(openCodeTimeoutMs) || openCodeTimeoutMs < 1_000 || openCodeTimeoutMs > 600_000) {
+  if (!Number.isInteger(openCodeTimeoutMs) || openCodeTimeoutMs < OPENCODE_TIMEOUT_MIN_MS || openCodeTimeoutMs > OPENCODE_TIMEOUT_MAX_MS) {
     throw new Error("eru: ERU_OPENCODE_TIMEOUT_MS is invalid");
   }
   const openCodeModel = env.ERU_OPENCODE_MODEL?.trim() || undefined;

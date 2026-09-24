@@ -894,6 +894,31 @@ describe("config page", () => {
     expect(page).toContain("OpenCode default");
   });
 
+  it("saves, validates, and clears the OpenCode timeout", async () => {
+    const instance = app({ openCodeTimeoutMs: 45_000 });
+    const { cookie } = await authed(instance);
+    const initial = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(initial).toContain('name="timeout_ms"');
+    expect(initial).toContain("in effect: 45000 ms");
+    expect(initial).toContain("in effect from <code>ERU_OPENCODE_TIMEOUT_MS</code>");
+
+    const bad = await post(instance, "/config/models", { ask_model: "", map_model: "", timeout_ms: "500" });
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain("between 1000 and 600000");
+
+    const ok = await post(instance, "/config/models", { ask_model: "", map_model: "", timeout_ms: "300000" });
+    expect(ok.status).toBe(302);
+    const saved = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(saved).toContain("in effect: 300000 ms");
+    expect(saved).toContain('name="timeout_ms" inputmode="numeric" maxlength="6" value="300000"');
+    expect(saved).toContain("overrides <code>ERU_OPENCODE_TIMEOUT_MS</code>");
+
+    await post(instance, "/config/models", { ask_model: "", map_model: "", timeout_ms: "" });
+    const cleared = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(cleared).toContain("in effect: 45000 ms");
+    expect(cleared).toContain("in effect from <code>ERU_OPENCODE_TIMEOUT_MS</code>");
+  });
+
   it("refreshes the discovered model list", async () => {
     let refreshed = 0;
     const discovery = {

@@ -29,7 +29,12 @@ import {
   oauthAuthorizeUrl,
   oauthEnabled,
 } from "./oauth.js";
-import type { Config } from "./config.js";
+import {
+  DEFAULT_OPENCODE_TIMEOUT_MS,
+  OPENCODE_TIMEOUT_MAX_MS,
+  OPENCODE_TIMEOUT_MIN_MS,
+  type Config,
+} from "./config.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -120,12 +125,12 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const ask =
     opts.askRunner ??
-    createOpenCodeRunner({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
+    createOpenCodeRunner({ bin: config.openCodeBin, timeoutMs: () => resolveTimeout(config, db).value, model: config.openCodeModel });
   const refresh =
     opts.refreshRunner ??
-    createMapRefresher({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs, model: config.openCodeModel });
+    createMapRefresher({ bin: config.openCodeBin, timeoutMs: () => resolveTimeout(config, db).value, model: config.openCodeModel });
   const modelDiscovery =
-    opts.modelDiscovery ?? createModelDiscovery({ bin: config.openCodeBin, timeoutMs: config.openCodeTimeoutMs });
+    opts.modelDiscovery ?? createModelDiscovery({ bin: config.openCodeBin, timeoutMs: () => resolveTimeout(config, db).value });
   void modelDiscovery.refresh();
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
   const mapping = opts.mappingTracker ?? createMappingTracker();
@@ -477,12 +482,22 @@ export function createApp(opts: AppOptions): Hono<Env> {
         400,
       );
     }
+    const timeoutRaw = typeof body.timeout_ms === "string" ? body.timeout_ms.trim() : "";
+    if (timeoutRaw && parseOpenCodeTimeout(timeoutRaw) === undefined) {
+      return html(
+        c,
+        configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), "Timeout is milliseconds — between 1000 and 600000."),
+        400,
+      );
+    }
     const at = new Date(now()).toISOString();
     db.transaction(() => {
       if (askModel) setSetting(db, SETTING_ASK_MODEL, askModel, at);
       else deleteSetting(db, SETTING_ASK_MODEL);
       if (mapModel) setSetting(db, SETTING_MAP_MODEL, mapModel, at);
       else deleteSetting(db, SETTING_MAP_MODEL);
+      if (timeoutRaw) setSetting(db, SETTING_OPENCODE_TIMEOUT, timeoutRaw, at);
+      else deleteSetting(db, SETTING_OPENCODE_TIMEOUT);
     })();
     return c.redirect("/config");
   });
@@ -575,6 +590,22 @@ const SETTING_APP_KEY = "github_app.private_key";
 const SETTING_APP_INSTALL = "github_app.installation_id";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
+const SETTING_OPENCODE_TIMEOUT = "opencode.timeout_ms";
+
+export function parseOpenCodeTimeout(raw: string): number | undefined {
+  if (!/^\d+$/.test(raw)) return undefined;
+  const ms = Number(raw);
+  return ms >= OPENCODE_TIMEOUT_MIN_MS && ms <= OPENCODE_TIMEOUT_MAX_MS ? ms : undefined;
+}
+
+// Saved setting > env > default — the same precedence as the model fields.
+function resolveTimeout(config: Config, db: SqliteDb): { value: number; source: ModelSource; overriddenEnv?: string } {
+  const envSet = config.openCodeTimeoutMs !== DEFAULT_OPENCODE_TIMEOUT_MS;
+  const stored = getSetting(db, SETTING_OPENCODE_TIMEOUT);
+  const parsed = stored ? parseOpenCodeTimeout(stored) : undefined;
+  if (parsed) return { value: parsed, source: "stored", overriddenEnv: envSet ? "ERU_OPENCODE_TIMEOUT_MS" : undefined };
+  return { value: config.openCodeTimeoutMs, source: envSet ? "env" : "default" };
+}
 
 // Who the topbar pill shows: saved login > env login > a plain "operator".
 function resolveUser(config: Config, db: SqliteDb): { name: string; source: ModelSource; overriddenEnv?: string } {
@@ -705,9 +736,18 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
   const app = resolveGithubApp(config, db);
   const storedAppId = getSetting(db, SETTING_APP_ID) ?? "";
   const storedInstall = getSetting(db, SETTING_APP_INSTALL) ?? "";
+  const timeout = resolveTimeout(config, db);
   return {
     bin: config.openCodeBin,
-    timeoutMs: config.openCodeTimeoutMs,
+    timeout: {
+      label: "OpenCode timeout",
+      field: "timeout_ms",
+      envKey: "ERU_OPENCODE_TIMEOUT_MS",
+      effective: `${timeout.value} ms`,
+      source: timeout.source,
+      stored: getSetting(db, SETTING_OPENCODE_TIMEOUT) ?? "",
+      overriddenEnv: timeout.overriddenEnv,
+    },
     app: {
       appId: app?.creds.appId ?? "",
       installationId: app?.creds.installationId ?? "",
@@ -762,9 +802,12 @@ async function refreshNotice(
   githubAppFactory: () => GithubAppClient | null,
   repo: MappedRepo,
 ): Promise<{ ok: boolean; notice: string }> {
+  const started = now();
+  const label = `${repo.owner}/${repo.name}`;
   const resolved = await repoToken(db, config, fetchImpl, githubAppFactory, repo);
   if (!resolved.ok) return { ok: false, notice: resolved.notice };
   const token = resolved.token;
+  console.log(`refresh ${label}: forge token resolved (${token ? "credential" : "anonymous"})`);
 
   // Always re-map the default branch: the one recorded at connect, else
   // main (master) for repos connected before it was stored.
@@ -773,18 +816,19 @@ async function refreshNotice(
   let tarball: TarballResult | undefined;
   for (const candidate of candidates) {
     if (!isValidMapRef(candidate)) return { ok: false, notice: "The stored default branch does not look like a ref." };
+    console.log(`refresh ${label} @${candidate}: fetching checkout tarball`);
     tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
     if (tarball.ok) {
+      console.log(`refresh ${label} @${candidate}: tarball ok — ${Math.round(tarball.data.length / 1024)} KiB`);
       ref = candidate;
       break;
     }
+    console.log(`refresh ${label} @${candidate}: tarball refused — ${tarball.error}`);
     if (tarball.error !== "notfound") {
-      console.log(`refresh refused: ${tarball.error}`);
       return { ok: false, notice: REFRESH_TARBALL_ERRORS[tarball.error] };
     }
   }
   if (!tarball || !tarball.ok) {
-    console.log("refresh refused: notfound");
     return { ok: false, notice: REFRESH_TARBALL_ERRORS.notfound };
   }
 
@@ -792,9 +836,10 @@ async function refreshNotice(
   try {
     await extractTarball(tarball.data, workdir);
   } catch {
-    console.log("refresh failed: could not unpack the checkout");
+    console.log(`refresh ${label} @${ref}: could not unpack the checkout`);
     return { ok: false, notice: "Could not unpack the checkout — refresh failed." };
   }
+  console.log(`refresh ${label} @${ref}: checkout extracted — starting OpenCode`);
 
   try {
     const result = await refresh(
@@ -821,7 +866,7 @@ async function refreshNotice(
       }
       setLastMapped(db, repo.id, ref, at);
     })();
-    console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages`);
+    console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages in ${Math.round((now() - started) / 1000)}s`);
     return { ok: true, notice: `Mapped @${ref} — ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.` };
   } finally {
     await rm(workdir, { recursive: true, force: true }).catch(() => {});
