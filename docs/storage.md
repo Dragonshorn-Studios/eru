@@ -28,7 +28,8 @@ Repositories, map pages, saved `/config` settings, encrypted credentials, and pr
 ## What rotates
 
 - Session cookies rotate with `ERU_UI_SESSION_SECRET` — all logins invalidate.
-- Ask/Refresh scratch workspaces live in a throwaway temp dir per run and are deleted afterward.
+- Refresh scratch workspaces live in a throwaway temp dir per run and are deleted afterward.
+- Ask thread workspaces persist under `ERU_ASK_WORKDIR` (default `<sqlite dir>/ask`, on the volume): each holds a `map/` snapshot plus a deny-by-default `opencode.json` so a reload can resume the session. They're re-materializable caches — orphaned directories are swept at boot and missing ones rebuild from the current map on next access.
 - The app's `/tmp` is a tmpfs in Compose — nothing persists there.
 
 ## Cleanup

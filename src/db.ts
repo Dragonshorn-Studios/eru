@@ -105,7 +105,29 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    name: "0006_ask_threads.sql",
+    apply(db) {
+      db.exec(ASK_THREADS_SQL);
+    },
+  },
 ];
+
+// Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
+// its map-only workspace live under the ask workdir keyed by thread id; only
+// the metadata needed to reconnect is persisted here.
+const ASK_THREADS_SQL = `
+CREATE TABLE IF NOT EXISTS ask_threads (
+  id TEXT PRIMARY KEY,
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  session_id TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  mapped_ref TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ask_threads_repo_idx ON ask_threads (repo_id, updated_at DESC);
+`;
 
 export function openDb(path: string): SqliteDb {
   if (path !== ":memory:") {

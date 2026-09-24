@@ -35,11 +35,12 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_PORT` | `3000` | Container port (and host port in Compose) |
 | `ERU_SQLITE_PATH` | `./data/eru.sqlite` | SQLite file location |
 | `ERU_UI_USER` | — | GitHub login for the top-bar pill + avatar (also settable on `/config`) |
-| `ERU_OPENCODE_BIN` | `opencode` | Path to the OpenCode CLI; Compose defaults to `/opt/opencode/.opencode/bin/opencode` |
+| `ERU_OPENCODE_BIN` | `opencode` | Path to the OpenCode CLI; Compose defaults to `/opt/opencode/.opencode/bin/opencode`. Ask also spawns a supervised `opencode serve` on loopback (random port + per-boot basic-auth password, proxied at `/ask/oc/*`) — it never opens a second listening port |
 | `ERU_OPENCODE_TIMEOUT_MS` | `120000` | Timeout for OpenCode invocations (also settable on `/config`) |
 | `ERU_OPENCODE_ASK_MODEL` | — | `provider/model` for Ask |
 | `ERU_OPENCODE_MAP_MODEL` | — | `provider/model` for map generation |
 | `ERU_OPENCODE_MODEL` | — | Both purposes (lowest precedence) |
+| `ERU_ASK_WORKDIR` | `<sqlite dir>/ask` | Root for per-thread Ask workspaces (`map/` snapshot + deny config). Persists on the `eru-data` volume by default; point it elsewhere to relocate or to wipe on boot |
 | `ERU_GITHUB_APP_ID` | — | GitHub App ID |
 | `ERU_GITHUB_APP_PRIVATE_KEY` / `ERU_GITHUB_APP_PRIVATE_KEY_FILE` | — | App private key, inline or file path |
 | `ERU_GITHUB_APP_INSTALLATION_ID` | — | Installation ID (auto-detected when omitted) |

@@ -8,22 +8,32 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs && node scripts/build-ask.mjs",
+    "build:ask": "node scripts/build-ask.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.ask.json"
   },
   "dependencies": {
+    "@assistant-ui/react": "0.15.19",
+    "@assistant-ui/react-markdown": "0.14.15",
+    "@assistant-ui/react-opencode": "0.2.23",
     "@hono/node-server": "^1.19.6",
+    "@opencode-ai/sdk": "1.18.31",
     "better-sqlite3": "^12.4.1",
     "hono": "^4.10.3",
-    "htmx.org": "^2.0.4"
+    "htmx.org": "^2.0.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.18.8",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
     "tsx": "^4.20.6",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

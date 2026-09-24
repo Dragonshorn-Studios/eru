@@ -29,6 +29,8 @@ export interface Config {
   loginWindowMs: number;
   openCodeBin: string;
   openCodeTimeoutMs: number;
+  /** Ask thread workspaces root; empty = <sqlite dir>/ask. */
+  askWorkdir?: string;
   openCodeModel?: string;
   openCodeAskModel?: string;
   openCodeMapModel?: string;
@@ -81,6 +83,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const openCodeModel = env.ERU_OPENCODE_MODEL?.trim() || undefined;
   const openCodeAskModel = env.ERU_OPENCODE_ASK_MODEL?.trim() || undefined;
   const openCodeMapModel = env.ERU_OPENCODE_MAP_MODEL?.trim() || undefined;
+  const askWorkdir = env.ERU_ASK_WORKDIR?.trim() || undefined;
 
   const githubAppId = optionalDigits(env, "ERU_GITHUB_APP_ID");
   const githubAppPrivateKey = loadAppPrivateKey(env);
@@ -126,6 +129,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     loginWindowMs: DEFAULT_LOGIN_WINDOW_MS,
     openCodeBin,
     openCodeTimeoutMs,
+    askWorkdir,
     openCodeModel,
     openCodeAskModel,
     openCodeMapModel,

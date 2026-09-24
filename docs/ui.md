@@ -1,6 +1,6 @@
 # The operator UI
 
-Server-rendered HTML + HTMX, locked pastel tokens (cream, lavender, pink, mint, moss, rose), serif titles, sans body, mono paths. Every page except `/health` and `/login` sits behind the operator session cookie.
+Server-rendered HTML + HTMX, locked pastel tokens (cream, lavender, pink, mint, moss, rose), serif titles, sans body, mono paths. Every page except `/health` and `/login` sits behind the operator session cookie. `/ask` mounts the one exception: a React island (assistant-ui, bundled by esbuild into `dist/assets/ask.js`) inside the same shell — see The Ask tab.
 
 ## `/login`
 
@@ -24,7 +24,11 @@ One map page from SQLite — title, body, and its spot in the TOC. Bodies are mo
 
 ## The Ask tab
 
-Same shell, tab switched: a question box on the left, the answer on the right. The answer cites map paths and is rendered as escaped text — model output is never trusted as HTML.
+Same shell, tab switched — but the stage is a full-page assistant-ui thread. A left rail lists that repo's threads (**+ New thread**, delete, `stale map` badge when the map moved past the snapshot the thread was built from); the main column is the streaming conversation with a composer (Enter sends, **Stop** cancels, failed turns keep a **retry** action).
+
+Under the hood each thread owns an isolated workspace under `ERU_ASK_WORKDIR` (default `<sqlite dir>/ask`): a `map/<slug>.md` snapshot of the durable map plus a deny-by-default `opencode.json` (read/glob/grep only — no bash, no edits, no checkout). The browser never talks to OpenCode directly: the island calls same-origin `/ask/oc/<threadId>/*`, and Eru's proxy injects the loopback basic-auth and workspace `directory=` server-side, allowlisting only the endpoints the adapter uses (session, event stream, permission/question replies).
+
+Threads persist across reloads — the OpenCode session id is recorded on the thread row and the conversation resumes where it left off. Answers render as markdown with map citations (`map/<slug>.md`) rewritten to `/brief/<slug>` links; citations to pages that do not exist stay plain text. Model output is never trusted as HTML.
 
 ## `/connect`
 

@@ -3,6 +3,7 @@ import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
 import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
+import { ASK_AGENT } from "./askthreads.js";
 import { THEME_CSS } from "./theme.js";
 import type { ProviderCredentialStatus } from "./providers.js";
 import { escapeHtml } from "./util.js";
@@ -30,7 +31,6 @@ export interface ChromeModel {
   page: MapPage | null;
   /** A map refresh is in flight for the selected repo (survives navigation). */
   mapping?: boolean;
-  askNotice?: string;
   refreshNotice?: string;
 }
 
@@ -564,9 +564,6 @@ export function appPage(model: ChromeModel): string {
   const refreshNotice = model.refreshNotice
     ? `<p class="refresh-result" id="refresh-result">${escapeHtml(model.refreshNotice)}</p>`
     : `<p class="refresh-result" id="refresh-result" hidden></p>`;
-  const askNotice = model.askNotice
-    ? `<p class="ask-answer" id="ask-result">${escapeHtml(model.askNotice)}</p>`
-    : `<p class="ask-answer" id="ask-result" hidden></p>`;
 
   return layout(
     "Eru",
@@ -593,16 +590,6 @@ export function appPage(model: ChromeModel): string {
       <article class="card" aria-label="Page">
         ${pageArticle(model)}
       </article>
-      <section class="card" aria-label="Ask">
-        <h2>Ask</h2>
-        <form class="ask-form" method="post" action="/ask" hx-post="/ask" hx-target="#ask-result" hx-swap="outerHTML">
-          ${csrfInput(model.csrf)}
-          <label class="sr-only" for="q">What do you want to know?</label>
-          <input id="q" type="text" name="q" placeholder="What do you want to know?" autocomplete="off" maxlength="${ASK_MAX_QUESTION}"/>
-          <button class="ask-eru" type="submit">Ask Eru</button>
-        </form>
-        ${askNotice}
-      </section>
       <section class="mapping-pane"${model.mapping ? "" : " hidden"} aria-live="polite" aria-label="Refresh in progress">
         <div class="mapping-fx" aria-hidden="true">
           <svg class="fx-strands fx-left" viewBox="0 0 220 900" preserveAspectRatio="none">
@@ -700,10 +687,43 @@ export function themeCss(): string {
   return THEME_CSS;
 }
 
-export function askResultFragment(notice: string): string {
-  return `<p class="ask-answer" id="ask-result">${escapeHtml(notice)}</p>`;
-}
-
 export function refreshResultFragment(notice: string): string {
   return `<p class="refresh-result" id="refresh-result">${escapeHtml(notice)}</p>`;
+}
+
+// The Ask page is the one place Eru mounts a client island: the assistant-ui
+// thread talks to the loopback OpenCode server through /ask/oc/*, so the
+// island never holds a credential. Everything else stays SSR + HTMX.
+export function askPage(model: ChromeModel): string {
+  const bootstrap = JSON.stringify({
+    csrf: model.csrf,
+    agent: ASK_AGENT,
+    maxQuestion: ASK_MAX_QUESTION,
+    apiBase: "/ask",
+    slugs: model.pages.map((p) => p.slug),
+  }).replace(/</g, "\\u003c");
+  return layout(
+    "Eru · Ask",
+    `<body class="ask-body">
+  <a class="skip" href="#ask-root">Skip to Ask</a>
+  <div class="shell">
+    ${topbar(model)}
+    ${masthead(model)}
+    <main id="main" class="stage ask-stage">
+      <section class="card ask-island" aria-label="Ask">
+        <div id="ask-root">${askFallback(model)}</div>
+      </section>
+    </main>
+    ${foot(model)}
+  </div>
+  <script>window.__ERU_ASK__ = ${bootstrap};</script>
+  <script type="module" src="/assets/ask.js"></script>
+</body>`,
+  );
+}
+
+function askFallback(model: ChromeModel): string {
+  if (!model.repo) return `<p class="ask-empty">Connect a repo before asking.</p>`;
+  if (model.pages.length === 0) return `<p class="ask-empty">The map has no pages yet — refresh the map first.</p>`;
+  return `<p class="ask-empty">Waking up the Ask thread…</p>`;
 }

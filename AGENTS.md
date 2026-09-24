@@ -17,7 +17,7 @@ Never call it Eruka. Never merge into Maomao. Never DeepWiki.com SaaS.
 ## Stack locks
 
 - Language: **Node.js >= 22** + **TypeScript**. Python is Belldandy; Go is Alyssa; this repo is Node.
-- HTTP: **Hono** on `@hono/node-server`. UI is server-rendered HTML + **HTMX** + **CSS variables** + **hand CSS** (no Tailwind pipeline). No React SPA for chrome, no DaisyUI, Bootstrap, or Material.
+- HTTP: **Hono** on `@hono/node-server`. UI is server-rendered HTML + **HTMX** + **CSS variables** + **hand CSS** (no Tailwind pipeline). No React SPA for chrome, no DaisyUI, Bootstrap, or Material. **One island exception:** `/ask` mounts a React + assistant-ui client (`src/ask/`, bundled by `scripts/build-ask.mjs` with exact-pinned deps) inside the SSR shell — it is not an SPA, holds no credentials, and talks only to same-origin `/ask/api/*` + `/ask/oc/*`. Everything else stays server-rendered.
 - Data: **SQLite** via `better-sqlite3`. Pages and repos persist here. Compose for the app. **MIT**.
 - Mapping: **OpenCode** with deny `bash` / `edit` / `write` / `webfetch`. Model output is untrusted.
 - Chrome tokens (locked): cream `#F7F5F0`, lavender `#E9E4F7`, pink `#FBE9EC`, ink `#1B1A18`, mint `#CDE8DF`, moss `#A8B99A`, rose `#FADADD`. Serif titles, sans body, mono paths. Soft radius. Pastel glow. No vine/hair chrome, no character art, no purple SaaS.
@@ -33,7 +33,7 @@ Never call it Eruka. Never merge into Maomao. Never DeepWiki.com SaaS.
 
 ## How to work
 
-- Extend `src/`. Chrome HTML lives in `src/ui.ts`. Auth lives in `src/auth.ts`. SQLite lives in `src/db.ts`.
+- Extend `src/`. Chrome HTML lives in `src/ui.ts`. Auth lives in `src/auth.ts`. SQLite lives in `src/db.ts`. Ask internals live in `src/askthreads.ts` (threads + workspaces), `src/askserver.ts` (supervised `opencode serve`), `src/askproxy.ts` (loopback proxy), and the island in `src/ask/`.
 - One PR, one ticketed slice. Do not invent a second auth scheme or a second datastore.
 - Run `npm test` and `npm run typecheck`. CI is GitHub Actions on a self-hosted runner; see [CONTRIBUTING.md](CONTRIBUTING.md#ci).
 - Read **eru-shape** when changing architecture, stack, chrome, or opening a new slice. Read **eru-security** when touching auth, sessions, secrets, CSRF, OpenCode permissions, or forge tokens.

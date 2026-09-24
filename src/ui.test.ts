@@ -15,7 +15,7 @@ describe("chrome copy", () => {
     expect(html).toContain("Brief");
     expect(html).toContain("Ask");
     expect(html).toContain("last mapped @main");
-    expect(html).toContain("hx-post=\"/ask\"");
+    expect(html).toContain('href="/ask"');
     expect(html).toContain("not a checkout job, not DeepWiki.com");
     expect(html).toContain('class="tab" href="/" aria-current="page">Brief');
     expect(html).toContain('class="tab" href="/ask">Ask');

@@ -22,7 +22,9 @@ import { decryptForgeToken, encryptForgeToken, forgeKeySecrets } from "./forge.j
 import { ProviderCredentialStore } from "./providers.js";
 import { createApp } from "./server.js";
 import { TOKENS } from "./theme.js";
-import type { AskRunner, ModelDiscovery } from "./opencode.js";
+import { insertThread } from "./askthreads.js";
+import type { ModelDiscovery } from "./opencode.js";
+import type { OpenCodeServe } from "./askserver.js";
 import type { RefreshRunner } from "./refresh.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
@@ -43,10 +45,19 @@ function gatedConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
+function stubServe(url: string | null = "http://127.0.0.1:4199"): OpenCodeServe {
+  return {
+    url: () => url,
+    password: () => "oc-test-password",
+    ensure: async () => {},
+    stop: async () => {},
+  };
+}
+
 function app(
   overrides: Partial<Config> = {},
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>,
-  askRunner?: AskRunner,
+  openCodeServe?: OpenCodeServe,
   refreshRunner?: RefreshRunner,
   providerStore?: ProviderCredentialStore,
   modelDiscovery?: ModelDiscovery,
@@ -54,10 +65,22 @@ function app(
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
+  const askWorkdir = mkdtempSync(join(tmpdir(), "eru-ask-test-"));
   return {
-    app: createApp({ config, db, fetchImpl, oauthFetch, askRunner, refreshRunner, providerStore, modelDiscovery }),
+    app: createApp({
+      config,
+      db,
+      fetchImpl,
+      oauthFetch,
+      openCodeServe: openCodeServe ?? stubServe(null),
+      askWorkdir,
+      refreshRunner,
+      providerStore,
+      modelDiscovery,
+    }),
     config,
     db,
+    askWorkdir,
   };
 }
 
@@ -129,10 +152,9 @@ describe("operator gate", () => {
 
   it("refuses unauthenticated mutating routes", async () => {
     const { app: instance } = app();
-    const res = await instance.request("/ask", {
+    const res = await instance.request("/ask/api/threads", {
       method: "POST",
-      body: new URLSearchParams({ q: "hi" }),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/json" },
     });
     expect(res.status).toBe(401);
     expect(res.headers.get("www-authenticate")).toBeNull();
@@ -173,32 +195,26 @@ describe("operator gate", () => {
     const { app: instance } = app();
     const loggedIn = await login(instance);
     const cookie = `${SESSION_COOKIE}=${cookieValue(cookieLine(loggedIn))}`;
-    const res = await instance.request("/ask", {
+    const res = await instance.request("/ask/api/threads", {
       method: "POST",
-      body: new URLSearchParams({ q: "hi" }),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      headers: { "Content-Type": "application/json", Cookie: cookie },
     });
     expect(res.status).toBe(403);
   });
 
-  it("accepts Ask with CSRF and HTMX", async () => {
+  it("renders the /ask island page with bootstrap after login", async () => {
     const { app: instance, config } = app();
     const loggedIn = await login(instance);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(config.sessionSecret, token)!;
-    const res = await instance.request("/ask", {
-      method: "POST",
-      body: new URLSearchParams({ q: "What is this?", [CSRF_FIELD]: session.csrf }),
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: `${SESSION_COOKIE}=${token}`,
-        "HX-Request": "true",
-      },
-    });
+    const res = await instance.request("/ask", { headers: { Cookie: `${SESSION_COOKIE}=${token}` } });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain("Connect a repo before asking.");
-    expect(body).toContain('id="ask-result"');
+    expect(body).toContain('id="ask-root"');
+    expect(body).toContain("/assets/ask.js");
+    expect(body).toContain("window.__ERU_ASK__");
+    expect(body).toContain(session!.csrf.replace(/</g, "\\u003c"));
+    expect(body).not.toContain('class="ask-form"');
   });
 
   it("throttles login bursts", async () => {
@@ -488,76 +504,171 @@ describe("durable Brief pages", () => {
   });
 });
 
-describe("ask OpenCode", () => {
-  async function ask(instance: ReturnType<typeof app>, q: string, htmx = true) {
+describe("ask threads and proxy", () => {
+  async function authed(instance: ReturnType<typeof app>) {
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(instance.config.sessionSecret, token)!;
-    return instance.app.request("/ask", {
-      method: "POST",
-      body: new URLSearchParams({ q, [CSRF_FIELD]: session.csrf }),
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: `${SESSION_COOKIE}=${token}`,
-        ...(htmx ? { "HX-Request": "true" } : {}),
-      },
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  function api(instance: ReturnType<typeof app>, auth: { cookie: string; csrf: string }, path: string, init: RequestInit = {}) {
+    return instance.app.request(path, {
+      ...init,
+      headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf, ...(init.headers ?? {}) },
     });
   }
 
-  it("answers via the runner with pages and repo label, escaped", async () => {
-    let seen: { q: string; slugs: string[]; label: string } | undefined;
-    const runner: AskRunner = async (q, pages, label) => {
-      seen = { q, slugs: pages.map((p) => p.slug), label };
-      return { ok: true, answer: "See map/arch.md\n<script>alert(1)</script>" };
+  it("fails closed without a repo, without pages, and without a running serve", async () => {
+    const bare = app();
+    const auth = await authed(bare);
+    const res = await api(bare, auth, "/ask/api/threads", { method: "POST" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Connect a repo") });
+
+    const noPages = app();
+    const auth2 = await authed(noPages);
+    await seed(noPages, []);
+    // seed() above logs in a fresh session; reuse the repo-only state.
+    const res2 = await api(noPages, auth2, "/ask/api/threads", { method: "POST" });
+    expect(res2.status).toBe(409);
+
+    const down = app({}, undefined, stubServe(null));
+    const auth3 = await authed(down);
+    await seed(down, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    const res3 = await api(down, auth3, "/ask/api/threads", { method: "POST" });
+    expect(res3.status).toBe(503);
+  });
+
+  it("creates, lists, updates and deletes threads scoped to the repo", async () => {
+    let seen: { url: string; auth: string | null } | undefined;
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      seen = { url, auth: new Headers(init.headers).get("authorization") };
+      return new Response(JSON.stringify({ id: "ses-1", title: "Ask" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     };
-    const instance = app({}, undefined, runner);
-    await seed(instance, [{ slug: "arch", title: "Arch", body: "bodies", sortOrder: 0 }]);
-    const res = await ask(instance, "how is auth?");
+    const instance = app({}, fetchImpl, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
+
+    const created = await api(instance, auth, "/ask/api/threads", { method: "POST" });
+    expect(created.status).toBe(201);
+    const { thread } = (await created.json()) as { thread: { id: string; sessionId: string | null; stale: boolean } };
+    expect(thread.sessionId).toBe("ses-1");
+    expect(thread.stale).toBe(false);
+    // The upstream session create carried the loopback basic auth and the
+    // per-thread workspace directory — never client input.
+    expect(seen?.auth).toBe(`Basic ${Buffer.from("opencode:oc-test-password").toString("base64")}`);
+    expect(seen?.url).toContain("/session");
+    expect(seen?.url).toContain(`directory=${encodeURIComponent(join(instance.askWorkdir, thread.id))}`);
+
+    const list = await api(instance, auth, "/ask/api/threads");
+    const { threads } = (await list.json()) as { threads: { id: string; stale: boolean }[] };
+    expect(threads.map((t) => t.id)).toEqual([thread.id]);
+
+    // A remap makes the thread stale.
+    setLastMapped(instance.db, getPrimaryRepo(instance.db)!.id, "abc1234", "2026-01-02T00:00:00Z");
+    const { threads: after } = (await (await api(instance, auth, "/ask/api/threads")).json()) as {
+      threads: { stale: boolean }[];
+    };
+    expect(after[0].stale).toBe(true);
+
+    const del = await api(instance, auth, `/ask/api/threads/${thread.id}`, { method: "DELETE" });
+    expect(del.status).toBe(204);
+    const remaining = (await (await api(instance, auth, "/ask/api/threads")).json()) as { threads: unknown[] };
+    expect(remaining.threads).toEqual([]);
+  });
+
+  it("scopes threads and proxy traffic to the selected repo", async () => {
+    const instance = app({}, undefined, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    // Older connected_at keeps acme/box the selected repo.
+    const otherRepo = upsertConnectedRepo(
+      instance.db,
+      { forge: "github", owner: "acme", name: "other" },
+      "2020-01-01T00:00:00Z",
+    );
+    const foreign = insertThread(instance.db, otherRepo, "main", "t");
+
+    // A thread owned by another repo is invisible here: same 404 either way.
+    const res = await api(instance, auth, `/ask/api/threads/${foreign.id}`);
+    expect(res.status).toBe(404);
+    const proxied = await api(instance, auth, `/ask/oc/${foreign.id}/session`);
+    expect(proxied.status).toBe(404);
+  });
+
+  it("proxies only the adapter's allowlist and injects directory + auth server-side", async () => {
+    const calls: { url: string; method: string; auth: string | null; cookie: string | null; body: string }[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      calls.push({
+        url,
+        method: init.method ?? "GET",
+        auth: headers.get("authorization"),
+        cookie: headers.get("cookie"),
+        body: init.body ? Buffer.from(init.body as ArrayBuffer).toString("utf8") : "",
+      });
+      return new Response("ok", { status: 200, headers: { "content-type": "application/json", "set-cookie": "evil=1" } });
+    };
+    const instance = app({}, fetchImpl, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
+    const { thread } = (await (await api(instance, auth, "/ask/api/threads", { method: "POST" })).json()) as {
+      thread: { id: string };
+    };
+    calls.length = 0;
+
+    // Allowlisted session call: directory injected server-side, cookie never
+    // forwarded, client-supplied directory stripped.
+    const res = await api(instance, auth, `/ask/oc/${thread.id}/session?directory=/etc&x=1`, {
+      headers: { cookie: "smuggled=1", authorization: "Basic fake" },
+    });
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("See map/arch.md");
-    expect(body).toContain("&lt;script&gt;");
-    expect(body).not.toContain("<script>");
-    expect(seen).toEqual({ q: "how is auth?", slugs: ["arch"], label: "acme/box" });
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(calls).toHaveLength(1);
+    const target = new URL(calls[0].url);
+    expect(target.pathname).toBe("/session");
+    expect(target.searchParams.get("directory")).toBe(join(instance.askWorkdir, thread.id));
+    expect(target.searchParams.get("x")).toBe("1");
+    expect(calls[0].cookie).toBeNull();
+    expect(calls[0].auth).toBe(`Basic ${Buffer.from("opencode:oc-test-password").toString("base64")}`);
+
+    // POST bodies flow through the CSRF middleware untouched.
+    const post = await api(instance, auth, `/ask/oc/${thread.id}/session/ses-1/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parts: [{ type: "text", text: "hi" }] }),
+    });
+    expect(post.status).toBe(200);
+    expect(calls[1].method).toBe("POST");
+    expect(calls[1].body).toBe('{"parts":[{"type":"text","text":"hi"}]}');
   });
 
-  it("renders the answer into the full page without HTMX", async () => {
-    const instance = app({}, undefined, async () => ({ ok: true, answer: "plain answer" }));
+  it("refuses non-allowlisted upstream endpoints and missing auth on proxy calls", async () => {
+    const instance = app({}, undefined, stubServe());
+    const auth = await authed(instance);
     await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
-    const res = await ask(instance, "q", false);
-    const body = await res.text();
-    expect(body).toContain("plain answer");
-    expect(body).toContain('class="ask-answer"');
-  });
-
-  it("refuses empty and oversized questions before touching OpenCode", async () => {
-    let called = false;
-    const runner: AskRunner = async () => {
-      called = true;
-      return { ok: true, answer: "x" };
+    const { thread } = (await (await api(instance, auth, "/ask/api/threads", { method: "POST" })).json()) as {
+      thread: { id: string };
     };
-    const instance = app({}, undefined, runner);
-    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
-    expect(await (await ask(instance, "   ")).text()).toContain("Ask something first.");
-    expect(await (await ask(instance, "x".repeat(2001))).text()).toContain("under 2000 characters");
-    expect(called).toBe(false);
-  });
-
-  it("fails closed without a repo or without map pages", async () => {
-    const instance = app();
-    expect(await (await ask(instance, "q")).text()).toContain("Connect a repo before asking.");
-    await seed(instance, []);
-    expect(await (await ask(instance, "q")).text()).toContain("no pages yet");
-  });
-
-  it("surfaces unconfigured and failed OpenCode honestly", async () => {
-    const unconfigured = app({}, undefined, async () => ({ ok: false, error: "unconfigured" as const }));
-    await seed(unconfigured, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
-    expect(await (await ask(unconfigured, "q")).text()).toContain("not configured");
-
-    const failed = app({}, undefined, async () => ({ ok: false, error: "failed" as const }));
-    await seed(failed, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
-    expect(await (await ask(failed, "q")).text()).toContain("could not answer");
+    for (const bad of ["/file/content", "/pty", "/config", "/session/../../etc", "/path", "/project"]) {
+      const res = await api(instance, auth, `/ask/oc/${thread.id}${bad}`);
+      expect(res.status).toBe(404);
+    }
+    // No cookie at all → bounced by the global auth middleware first.
+    const res = await instance.app.request(`/ask/oc/${thread.id}/session`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/login");
+    // Cookie without CSRF on a mutating proxy call → 403.
+    const post = await instance.app.request(`/ask/oc/${thread.id}/session/ses-1/message`, {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(post.status).toBe(403);
   });
 });
 
@@ -815,18 +926,13 @@ describe("config page", () => {
     expect(saved).toContain('value="custom/thing" selected>custom/thing · saved');
   });
 
-  it("saves models to settings and passes them to the runners", async () => {
-    let askModel: string | undefined;
+  it("saves models to settings and resolves them for ask and refresh", async () => {
     let mapModel: string | undefined;
-    const askRunner: AskRunner = async (_q, _p, _l, model) => {
-      askModel = model;
-      return { ok: true, answer: "ok" };
-    };
     const refreshRunner: RefreshRunner = async (_w, _l, _r, model) => {
       mapModel = model;
       return { ok: false, error: "nomap" };
     };
-    const instance = app({}, async () => new Response(new Uint8Array(await fakeTarball())), askRunner, refreshRunner);
+    const instance = app({}, async () => new Response(new Uint8Array(await fakeTarball())), stubServe(), refreshRunner);
     await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }], "tok");
 
     const res = await post(instance, "/config/models", {
@@ -838,12 +944,10 @@ describe("config page", () => {
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
     const session = verifySession(instance.config.sessionSecret, token)!;
-    await instance.app.request("/ask", {
-      method: "POST",
-      body: new URLSearchParams({ q: "hi", [CSRF_FIELD]: session.csrf }),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
+    const status = await instance.app.request("/ask/api/status", {
+      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
     });
-    expect(askModel).toBe("anthropic/claude-haiku");
+    expect(((await status.json()) as { model: string | null }).model).toBe("anthropic/claude-haiku");
 
     await instance.app.request("/refresh", {
       method: "POST",
@@ -861,23 +965,15 @@ describe("config page", () => {
   });
 
   it("saved model beats the env override and is marked as overriding", async () => {
-    let askModel: string | undefined;
-    const askRunner: AskRunner = async (_q, _p, _l, model) => {
-      askModel = model;
-      return { ok: true, answer: "ok" };
-    };
-    const instance = app({ openCodeAskModel: "env/fallback" }, undefined, askRunner);
+    const instance = app({ openCodeAskModel: "env/fallback" }, undefined, stubServe());
     await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
     await post(instance, "/config/models", { ask_model: "stored/wins", map_model: "" });
     const loggedIn = await login(instance.app);
     const token = cookieValue(cookieLine(loggedIn));
-    const session = verifySession(instance.config.sessionSecret, token)!;
-    await instance.app.request("/ask", {
-      method: "POST",
-      body: new URLSearchParams({ q: "hi", [CSRF_FIELD]: session.csrf }),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `${SESSION_COOKIE}=${token}` },
+    const status = await instance.app.request("/ask/api/status", {
+      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
     });
-    expect(askModel).toBe("stored/wins");
+    expect(((await status.json()) as { model: string | null }).model).toBe("stored/wins");
 
     const { cookie } = await authed(instance);
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
@@ -927,9 +1023,7 @@ describe("config page", () => {
         refreshed++;
       },
     };
-    const config = gatedConfig();
-    const db = openDb(":memory:");
-    const instance = { app: createApp({ config, db, modelDiscovery: discovery }), config, db };
+    const instance = app({}, undefined, undefined, undefined, undefined, discovery);
     expect(refreshed).toBe(1); // boot refresh
     const res = await post(instance, "/config/models/refresh", {});
     expect(res.status).toBe(302);
