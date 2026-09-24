@@ -73,8 +73,11 @@ export function createOpenCodeServer(opts: OpenCodeServeOptions): OpenCodeServe 
     let lastErr = "";
     while (Date.now() < deadline) {
       try {
+        // Per-request cap: a socket that accepts but never answers must not
+        // stall the health loop past its deadline.
         const res = await fetchImpl(`http://${hostname}:${port}${HEALTH_PATH}`, {
           headers: { authorization: basic() },
+          signal: AbortSignal.timeout(2_000),
         });
         if (res.ok) return;
         lastErr = `health ${res.status}`;

@@ -4,6 +4,7 @@ import type { MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { ASK_AGENT } from "./askthreads.js";
+import { renderMarkdown } from "./markdown.js";
 import { THEME_CSS } from "./theme.js";
 import type { ProviderCredentialStatus } from "./providers.js";
 import { escapeHtml } from "./util.js";
@@ -557,7 +558,7 @@ function pageArticle(model: ChromeModel): string {
   const mapped = page.mappedRef ? `<p class="path">mapped @${escapeHtml(page.mappedRef)}</p>` : "";
   return `<h2 class="page-title">${escapeHtml(page.title)}</h2>
         ${mapped}
-        <div class="page-body">${escapeHtml(page.body)}</div>`;
+        <div class="page-body">${renderMarkdown(page.body)}</div>`;
 }
 
 export function appPage(model: ChromeModel): string {

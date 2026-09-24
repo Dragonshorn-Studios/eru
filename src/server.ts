@@ -1021,16 +1021,20 @@ async function refreshNotice(
 
 // Authenticated fetch to the loopback OpenCode server: Eru is the only
 // client, and the per-boot password never reaches the browser.
+const OC_FETCH_TIMEOUT_MS = 15_000;
+
 function ocFetch(
   serve: OpenCodeServe,
   path: string,
-  opts: { method?: string; directory?: string; body?: unknown } = {},
+  opts: { method?: string; directory?: string; body?: unknown; timeoutMs?: number } = {},
   fetchImpl: FetchLike = fetch,
 ): Promise<Response> {
   const upstream = serve.url();
   if (!upstream) return Promise.reject(new Error("opencode serve is down"));
   const target = new URL(`${upstream}${path}`);
   if (opts.directory) target.searchParams.set("directory", opts.directory);
+  // Always bounded: an upstream that accepts the socket but stalls would
+  // otherwise hang the owning request (and the island's boot) forever.
   return fetchImpl(target.toString(), {
     method: opts.method ?? "GET",
     headers: {
@@ -1038,6 +1042,7 @@ function ocFetch(
       ...(opts.body ? { "content-type": "application/json" } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
+    signal: AbortSignal.timeout(opts.timeoutMs ?? OC_FETCH_TIMEOUT_MS),
   });
 }
 
