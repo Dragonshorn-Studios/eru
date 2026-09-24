@@ -299,9 +299,13 @@ a:hover { color: var(--ink); }
   font-size: 0.88em;
 }
 
-.ask-stage { grid-template-columns: 1fr; }
-.ask-island { padding: 0; display: flex; min-height: 34rem; overflow: hidden; }
-.ask-app { display: flex; width: 100%; flex: 1; }
+.ask-stage { grid-template-columns: 1fr; min-height: 0; }
+/* On /ask the shell is exactly one viewport: the island fills the card, the
+   message pane scrolls inside it, and the composer stays pinned. */
+.ask-body .shell { height: 100dvh; overflow: hidden; }
+.ask-body .stage { min-height: 0; }
+.ask-island { padding: 0; display: flex; min-height: 0; overflow: hidden; }
+.ask-app { display: flex; width: 100%; flex: 1; min-height: 0; }
 .ask-rail {
   width: 15rem;
   flex-shrink: 0;
@@ -325,7 +329,7 @@ a:hover { color: var(--ink); }
 .ask-btn:hover { background: color-mix(in srgb, var(--lavender) 95%, white); }
 .ask-btn:disabled { opacity: 0.5; cursor: default; }
 .ask-new { width: 100%; letter-spacing: 0.06em; }
-.ask-threads { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
+.ask-threads { list-style: none; margin: 0; padding: 0; flex: 1; min-height: 0; overflow-y: auto; }
 .ask-threads li { display: flex; align-items: center; gap: 0.25rem; }
 .ask-thread-row {
   flex: 1;
@@ -365,9 +369,10 @@ a:hover { color: var(--ink); }
   border-radius: 0.4rem;
 }
 .ask-thread-del:hover { color: var(--ink); background: color-mix(in srgb, var(--rose) 45%, transparent); }
-.ask-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ask-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .ask-thread { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.ask-viewport { flex: 1; overflow-y: auto; padding: 1.4rem 1.6rem; position: relative; }
+.ask-viewport { flex: 1; min-height: 0; overflow-y: auto; padding: 1.4rem 1.6rem; position: relative; }
+.ask-msgs { width: 100%; max-width: 44rem; margin-inline: auto; }
 .ask-msg { margin-bottom: 1.1rem; }
 .ask-bubble {
   background: color-mix(in srgb, white 62%, var(--cream));
@@ -419,11 +424,17 @@ a:hover { color: var(--ink); }
 .ask-action:hover { color: var(--ink); background: color-mix(in srgb, var(--lavender) 40%, transparent); }
 .ask-msg-error { color: color-mix(in srgb, var(--ink) 60%, #b3545e); font-size: 0.85rem; margin: 0.5rem 0 0; }
 .ask-composer {
+  flex-shrink: 0;
+  padding: 0.9rem 1.2rem;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.ask-composer-row {
   display: flex;
   align-items: flex-end;
   gap: 0.6rem;
-  padding: 0.9rem 1.2rem;
-  border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  width: 100%;
+  max-width: 44rem;
+  margin-inline: auto;
 }
 .ask-input {
   flex: 1;

@@ -149,28 +149,32 @@ function Conversation({ thread, model, onSession, onError }: { thread: ThreadVie
     <AssistantRuntimeProvider runtime={runtime}>
       <ThreadPrimitive.Root className="ask-thread">
         <ThreadPrimitive.Viewport className="ask-viewport" autoScroll>
-          <ThreadPrimitive.Empty>
-            <p className="ask-empty">Ask anything about this map — pages cite themselves.</p>
-          </ThreadPrimitive.Empty>
-          <ThreadPrimitive.Messages components={{ Message: AskMessage }} />
+          <div className="ask-msgs">
+            <ThreadPrimitive.Empty>
+              <p className="ask-empty">Ask anything about this map — pages cite themselves.</p>
+            </ThreadPrimitive.Empty>
+            <ThreadPrimitive.Messages components={{ Message: AskMessage }} />
+          </div>
           <ThreadPrimitive.ScrollToBottom className="ask-scroll" aria-label="Scroll to latest">
             ↓
           </ThreadPrimitive.ScrollToBottom>
         </ThreadPrimitive.Viewport>
         <ComposerPrimitive.Root className="ask-composer">
-          <ComposerPrimitive.Input
-            className="ask-input"
-            placeholder="What do you want to know?"
-            aria-label="Ask Eru"
-            maxLength={boot.maxQuestion}
-            autoFocus
-          />
-          <ThreadPrimitive.If running>
-            <ComposerPrimitive.Cancel className="ask-btn">Stop</ComposerPrimitive.Cancel>
-          </ThreadPrimitive.If>
-          <ThreadPrimitive.If running={false}>
-            <ComposerPrimitive.Send className="ask-btn ask-send">Ask</ComposerPrimitive.Send>
-          </ThreadPrimitive.If>
+          <div className="ask-composer-row">
+            <ComposerPrimitive.Input
+              className="ask-input"
+              placeholder="What do you want to know?"
+              aria-label="Ask Eru"
+              maxLength={boot.maxQuestion}
+              autoFocus
+            />
+            <ThreadPrimitive.If running>
+              <ComposerPrimitive.Cancel className="ask-btn">Stop</ComposerPrimitive.Cancel>
+            </ThreadPrimitive.If>
+            <ThreadPrimitive.If running={false}>
+              <ComposerPrimitive.Send className="ask-btn ask-send">Ask</ComposerPrimitive.Send>
+            </ThreadPrimitive.If>
+          </div>
         </ComposerPrimitive.Root>
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>

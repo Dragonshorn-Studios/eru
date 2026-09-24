@@ -704,7 +704,7 @@ export function askPage(model: ChromeModel): string {
   }).replace(/</g, "\\u003c");
   return layout(
     "Eru · Ask",
-    `<body>
+    `<body class="ask-body">
   <a class="skip" href="#ask-root">Skip to Ask</a>
   <div class="shell">
     ${topbar(model)}
