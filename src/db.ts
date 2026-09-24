@@ -319,7 +319,7 @@ export function upsertPage(
 }
 
 // A refresh replaces the map: pages the new scan did not produce are stale.
-// keepSlugs is never empty on a successful refresh, but never wipe the map.
+// Refuse to wipe the whole map if a caller ever passes an empty list.
 export function deleteStalePages(db: SqliteDb, repoId: number, keepSlugs: string[]): void {
   if (keepSlugs.length === 0) return;
   const placeholders = keepSlugs.map(() => "?").join(",");

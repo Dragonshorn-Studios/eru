@@ -114,6 +114,24 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     expect(result).toEqual({ ok: true, pages: [{ slug: "a", title: "t", body: "b", sortOrder: 0 }] });
   });
 
+  it("fails loudly — not unconfigured — when the marker cannot be written", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
+    // .git as a file: the skeleton mkdir fails ENOTDIR, and that must surface
+    // as "failed" with the error detail — never as a silent wrong-repo run.
+    await writeFile(join(workdir, ".git"), "not a dir");
+    const result = await createMapRefresher({ bin: "/bin/true", timeoutMs: 10_000 })(workdir, "o/r", "main");
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("failed");
+    expect(result.ok === false && result.detail).toMatch(/ENOTDIR|not a dir/i);
+  });
+
+  it("scopes ENOENT to the spawn — a missing workdir is not 'unconfigured'", async () => {
+    const gone = join(await mkdtemp(join(tmpdir(), "eru-map-")), "gone");
+    const result = await createMapRefresher({ bin: "/bin/true", timeoutMs: 10_000 })(gone, "o/r", "main");
+    expect(result).toMatchObject({ ok: false, error: "failed" });
+    expect(result.ok === false && result.detail!.length).toBeGreaterThan(0);
+  });
+
   it("fails with a timed-out detail when the child outlives its budget", async () => {
     const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
     const stub = join(workdir, "stub.sh");

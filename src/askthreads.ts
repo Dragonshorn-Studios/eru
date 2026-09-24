@@ -185,8 +185,10 @@ export function threadStale(thread: AskThread, lastMappedRef: string | null): bo
 export async function ensureWorkspace(db: SqliteDb, workdir: string, thread: AskThread, at: string): Promise<string> {
   const dir = threadWorkspace(workdir, thread.id);
   if (existsSync(dir)) {
-    // Self-heal workspaces written before the project-root marker existed.
-    if (!existsSync(join(dir, ".git", "HEAD"))) await markWorkspaceRoot(dir).catch(() => {});
+    // Self-heal workspaces written before the project-root marker existed —
+    // marking is idempotent. A failed write must not fall through: without
+    // the marker the session binds to the surrounding repository instead.
+    await markWorkspaceRoot(dir);
     return dir;
   }
   const repo = db.prepare(`SELECT last_mapped_ref FROM repos WHERE id = ?`).get(thread.repoId) as

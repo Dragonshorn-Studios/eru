@@ -33,6 +33,12 @@ export async function markWorkspaceRoot(dir: string): Promise<void> {
   const gitDir = join(dir, ".git");
   await mkdir(join(gitDir, "objects"), { recursive: true });
   await mkdir(join(gitDir, "refs"), { recursive: true });
-  await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/main\n", { flag: "wx" }).catch(() => {});
-  await writeFile(join(gitDir, "config"), "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n", { flag: "wx" }).catch(() => {});
+  // wx re-marking expects EEXIST; anything else (EACCES, ENOSPC, EROFS)
+  // would leave a partial .git that silently loses to the parent repo.
+  const writeOnce = (path: string, body: string) =>
+    writeFile(path, body, { flag: "wx" }).catch((err) => {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    });
+  await writeOnce(join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+  await writeOnce(join(gitDir, "config"), "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n");
 }
