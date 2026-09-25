@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +87,9 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
     const result = await createMapRefresher({ bin: script, timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(result).toEqual({ ok: true, pages: [{ slug: "arch", title: "P:deny", body: "b", sortOrder: 0 }] });
+    // The checkout gets a .git marker so OpenCode roots its project here
+    // instead of walking up to a surrounding repository.
+    expect(existsSync(join(workdir, ".git", "HEAD"))).toBe(true);
   });
 
   it("fails closed on missing binary, non-zero exit, and garbage output", async () => {
@@ -108,6 +112,24 @@ console.log(JSON.stringify([{ slug: "arch", title: "P:" + perm["*"], body: "b", 
     await chmod(stub, 0o755);
     const result = await createMapRefresher({ bin: stub, timeoutMs: 10_000 })(workdir, "o/r", "main");
     expect(result).toEqual({ ok: true, pages: [{ slug: "a", title: "t", body: "b", sortOrder: 0 }] });
+  });
+
+  it("fails loudly — not unconfigured — when the marker cannot be written", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "eru-map-"));
+    // .git as a file: the skeleton mkdir fails ENOTDIR, and that must surface
+    // as "failed" with the error detail — never as a silent wrong-repo run.
+    await writeFile(join(workdir, ".git"), "not a dir");
+    const result = await createMapRefresher({ bin: "/bin/true", timeoutMs: 10_000 })(workdir, "o/r", "main");
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("failed");
+    expect(result.ok === false && result.detail).toMatch(/ENOTDIR|not a dir/i);
+  });
+
+  it("scopes ENOENT to the spawn — a missing workdir is not 'unconfigured'", async () => {
+    const gone = join(await mkdtemp(join(tmpdir(), "eru-map-")), "gone");
+    const result = await createMapRefresher({ bin: "/bin/true", timeoutMs: 10_000 })(gone, "o/r", "main");
+    expect(result).toMatchObject({ ok: false, error: "failed" });
+    expect(result.ok === false && result.detail!.length).toBeGreaterThan(0);
   });
 
   it("fails with a timed-out detail when the child outlives its budget", async () => {

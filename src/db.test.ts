@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   deleteForgeCredential,
   deleteSetting,
+  deleteStalePages,
   getForgeCredential,
   getPage,
   getPrimaryRepo,
@@ -159,6 +160,25 @@ describe("forge connect storage", () => {
     upsertPage(db, repoA, { slug: "auth", title: "Auth v2", body: "new", sortOrder: 2 }, "t2");
     expect(getPage(db, repoA, "auth")!.title).toBe("Auth v2");
     expect(listPages(db, repoA)).toHaveLength(2);
+    db.close();
+  });
+
+  it("deleteStalePages removes slugs the scan dropped, scoped to the repo", () => {
+    const db = openDb(":memory:");
+    const repoA = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    const repoB = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-02T00:00:00Z");
+    upsertPage(db, repoA, { slug: "keep", title: "Keep", body: "b", sortOrder: 0 }, "t");
+    upsertPage(db, repoA, { slug: "stale", title: "Stale", body: "b", sortOrder: 1 }, "t");
+    upsertPage(db, repoB, { slug: "stale", title: "Stale", body: "b", sortOrder: 0 }, "t");
+
+    deleteStalePages(db, repoA, ["keep"]);
+    expect(listPages(db, repoA).map((p) => p.slug)).toEqual(["keep"]);
+    // Same slug under another repo is untouched.
+    expect(listPages(db, repoB).map((p) => p.slug)).toEqual(["stale"]);
+
+    // An empty keep-set never wipes the map.
+    deleteStalePages(db, repoA, []);
+    expect(listPages(db, repoA)).toHaveLength(1);
     db.close();
   });
 

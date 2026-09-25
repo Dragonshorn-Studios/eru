@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -114,6 +114,19 @@ describe("ensureWorkspace / sweepWorkspaces", () => {
 
     await ensureWorkspace(db, workdir, thread, AT);
     expect(existsSync(join(dir, ".git", "HEAD"))).toBe(true);
+  });
+
+  it("rejects when the marker backfill fails — an unmarked workspace must not bind", async () => {
+    const db = openDb(":memory:");
+    const repoId = seedRepo(db);
+    const thread = insertThread(db, repoId, "main", AT);
+    const workdir = await mkdtemp(join(tmpdir(), "eru-ask-ws-"));
+    const dir = threadWorkspace(workdir, thread.id);
+    await mkdir(dir, { recursive: true });
+    // .git as a file makes the skeleton write fail; swallowing that error
+    // would hand OpenCode a workspace with no marker and the wrong repo.
+    await writeFile(join(dir, ".git"), "not a dir");
+    await expect(ensureWorkspace(db, workdir, thread, AT)).rejects.toThrow();
   });
 
   it("sweeps orphan workspaces but keeps row-backed ones", async () => {

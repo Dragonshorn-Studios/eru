@@ -22,7 +22,11 @@ export function runChild(
   const started = Date.now();
   const limit = opts.maxBuffer ?? 4 * 1024 * 1024;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+    // cwd changes the child's real working directory but not the inherited
+    // env: PWD/INIT_CWD would keep naming Eru's own launch directory (the eru
+    // checkout under npm run dev) for anything that resolves paths via env.
+    const env = opts.cwd ? { ...(opts.env ?? process.env), PWD: opts.cwd, INIT_CWD: opts.cwd } : opts.env;
+    const child = spawn(bin, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin?.end();
     let stdout = "";
     let stderr = "";

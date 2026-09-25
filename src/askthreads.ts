@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { listAllPages, type MapPage, type SqliteDb } from "./db.js";
+import { markWorkspaceRoot } from "./util.js";
 
 /**
  * Ask threads (#33). Each Eru thread owns an isolated workspace containing
@@ -104,20 +105,6 @@ export async function materializeWorkspace(workdir: string, threadId: string, pa
   return dir;
 }
 
-// The workspace lives under <data>/ask, which can sit inside a git checkout
-// (the dev repo layout). OpenCode discovers its project by walking up to the
-// nearest .git, so without a marker the session binds to *that* repo — its
-// AGENTS.md and file context leak in, and Ask ends up analysing Eru itself.
-// A minimal valid .git skeleton makes the workspace its own project root;
-// no git binary is needed.
-export async function markWorkspaceRoot(dir: string): Promise<void> {
-  const gitDir = join(dir, ".git");
-  await mkdir(join(gitDir, "objects"), { recursive: true });
-  await mkdir(join(gitDir, "refs"), { recursive: true });
-  await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/main\n", { flag: "wx" }).catch(() => {});
-  await writeFile(join(gitDir, "config"), "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n", { flag: "wx" }).catch(() => {});
-}
-
 interface ThreadRow {
   id: string;
   repo_id: number;
@@ -198,8 +185,10 @@ export function threadStale(thread: AskThread, lastMappedRef: string | null): bo
 export async function ensureWorkspace(db: SqliteDb, workdir: string, thread: AskThread, at: string): Promise<string> {
   const dir = threadWorkspace(workdir, thread.id);
   if (existsSync(dir)) {
-    // Self-heal workspaces written before the project-root marker existed.
-    if (!existsSync(join(dir, ".git", "HEAD"))) await markWorkspaceRoot(dir).catch(() => {});
+    // Self-heal workspaces written before the project-root marker existed —
+    // marking is idempotent. A failed write must not fall through: without
+    // the marker the session binds to the surrounding repository instead.
+    await markWorkspaceRoot(dir);
     return dir;
   }
   const repo = db.prepare(`SELECT last_mapped_ref FROM repos WHERE id = ?`).get(thread.repoId) as

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import { markWorkspaceRoot } from "./util.js";
 
 const execFileP = promisify(execFile);
 
@@ -43,6 +44,9 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
           permission: { "*": "deny", read: "allow", glob: "allow", grep: "allow" },
         }),
       );
+      // The tarball has no .git; OpenCode would otherwise root its project at
+      // the nearest .git ancestor of the temp dir and map that repo instead.
+      await markWorkspaceRoot(workdir);
       const args = ["run", "--format", "default"];
       const runModel = model ?? opts.model;
       if (runModel) args.push("-m", runModel);
@@ -77,9 +81,15 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       }
       return { ok: true, pages };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: false, error: "unconfigured" };
-      console.log(`refresh ${repoLabel}: runner error —`, err instanceof Error ? err.message : err);
-      return { ok: false, error: "failed", detail: "" };
+      const e = err as NodeJS.ErrnoException;
+      // ENOENT from the spawn itself means the binary is missing; ENOENT from
+      // the fs writes above is a workdir problem and must not mislabel it.
+      if (e.code === "ENOENT" && (e.syscall ?? "").startsWith("spawn")) {
+        return { ok: false, error: "unconfigured" };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`refresh ${repoLabel}: runner error —`, msg);
+      return { ok: false, error: "failed", detail: msg };
     }
   };
 }
