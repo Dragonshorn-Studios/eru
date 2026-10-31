@@ -52,7 +52,9 @@ import {
   getSetting,
   listAllPages,
   listConnectedRepos,
+  getWebhookLog,
   listIssueRefineJobsForRepo,
+  listWebhookLogs,
   listPages,
   setForgeCredential,
   setLastMapped,
@@ -505,12 +507,18 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
   app.get("/ask", (c) => html(c, askPage(appModel(c))));
 
-  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db))));
+  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db), undefined, listWebhookLogs(db))));
+  app.get("/refine/log/:id", (c) => {
+    const id = Number(c.req.param("id"));
+    const entry = Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
+    if (!entry) return c.text("not found", 404);
+    return html(c, refinePage(appModel(c), refineCatches(db), undefined, listWebhookLogs(db), id));
+  });
   app.get("/refine/:id", (c) => {
     const jobs = refineCatches(db);
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id < 1 || !jobs.some((job) => job.id === id)) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), jobs, id));
+    return html(c, refinePage(appModel(c), jobs, id, listWebhookLogs(db)));
   });
 
   // Ask API + proxy: thread metadata stays on Eru (SQLite), OpenCode session

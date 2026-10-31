@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import {
   enqueueIssueRefineJob,
   listIssueRefineJobs,
+  listWebhookLogs,
   openDb,
   upsertConnectedRepo,
 } from "./db.js";
@@ -286,10 +287,14 @@ describe("enqueue filter", () => {
       enqueue: false,
       reason: "mention",
     });
-    expect(shouldEnqueueIssue(openedPayload({ action: "edited" }), opts)).toEqual({
+    expect(shouldEnqueueIssue(openedPayload({ action: "closed" }), opts)).toEqual({
       enqueue: false,
       reason: "action",
     });
+    expect(shouldEnqueueIssue(openedPayload({ action: "edited" }), opts).enqueue).toBe(true);
+    expect(
+      shouldEnqueueIssue(openedPayload({ body: "no mention here", title: "please @eru-issue-bot" }), opts).enqueue,
+    ).toBe(true);
   });
 
   it("enqueues an allowlisted bot even when author_association is NONE", () => {
@@ -351,6 +356,8 @@ describe("POST /webhooks/github", () => {
     const res = await postWebhook(app, payload, { "X-Hub-Signature-256": sign(JSON.stringify(payload), "wrong-secret-16++") });
     expect(res.status).toBe(401);
     expect(listIssueRefineJobs(db)).toEqual([]);
+    expect(listWebhookLogs(db)[0]).toMatchObject({ outcome: "rejected", reason: "signature" });
+    expect(listWebhookLogs(db)[0].detail).toContain("did not match");
   });
 
   it("ignores a second webhook for the same issue", async () => {
@@ -473,6 +480,7 @@ describe("POST /webhooks/github", () => {
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ ok: true });
     expect(listIssueRefineJobs(db)).toEqual([]);
+    expect(listWebhookLogs(db)[0].detail).toContain("not connected");
   });
 
   it("enqueues a connected repo even when owner and name casing differ", async () => {

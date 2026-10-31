@@ -1,6 +1,6 @@
 import { CSRF_FIELD } from "./auth.js";
 import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
-import type { IssueRefineJob, MapPage, PageTocEntry } from "./db.js";
+import type { IssueRefineJob, MapPage, PageTocEntry, WebhookLogEntry } from "./db.js";
 import type { AppError, AppRepo, GithubAppProbeResult, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { ASK_AGENT } from "./askthreads.js";
@@ -932,21 +932,64 @@ function refineStory(job: IssueRefineJob): string {
         ${original}`;
 }
 
-export function refinePage(model: ChromeModel, jobs: IssueRefineJob[], focusId?: number): string {
-  const focus = jobs.find((job) => job.id === focusId) ?? jobs[0];
+function logTone(entry: WebhookLogEntry): { tone: string; label: string } {
+  if (entry.outcome === "queued") return { tone: "is-ready", label: "queued" };
+  if (entry.outcome === "rejected") return { tone: "is-fail", label: "rejected" };
+  return { tone: "is-open", label: "ignored" };
+}
+
+function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined): string {
+  const items = logs
+    .map((entry) => {
+      const tone = logTone(entry);
+      const current = entry.id === focusId ? ` aria-current="page"` : "";
+      const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : entry.forge;
+      const num = entry.issueNumber ? `#${entry.issueNumber}` : entry.event || entry.outcome;
+      const title = entry.title.trim() || entry.detail;
+      return `<li><a href="/refine/log/${entry.id}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
+    })
+    .join("");
+  return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
+}
+
+function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined): string {
+  const tone = logTone(entry);
+  const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : "no repository on the delivery";
+  return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(entry.outcome)}</p>
+        <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
+        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
+        <div class="refine-verdict ${tone.tone}">
+          <p class="refine-kicker">Why</p>
+          <p>${escapeHtml(entry.detail)}</p>
+          <span class="refine-pill ${tone.tone}">${tone.label}</span>
+        </div>
+        ${job ? refineStory(job) : ""}`;
+}
+
+export function refinePage(
+  model: ChromeModel,
+  jobs: IssueRefineJob[],
+  focusId?: number,
+  logs: WebhookLogEntry[] = [],
+  focusLogId?: number,
+): string {
+  const focusLog = logs.find((entry) => entry.id === focusLogId) ?? (logs.length > 0 && focusId === undefined ? logs[0] : undefined);
+  const focus = jobs.find((job) => job.id === focusId) ?? (focusLog ? undefined : jobs[0]);
   let article: string;
-  if (!model.repo) {
+  if (focusLog) {
+    const job = focusLog.jobId ? jobs.find((item) => item.id === focusLog.jobId) : undefined;
+    article = webhookLogStory(focusLog, job);
+  } else if (!model.repo && !focus) {
     article = `<h2 class="page-title">No repo connected</h2>
-        <p class="page-lead">Caught webhooks show up here once a repository is connected. <a href="/connect">Connect a repo</a>.</p>`;
+        <p class="page-lead">Webhook decisions show up here once a repository is connected. <a href="/connect">Connect a repo</a>.</p>`;
   } else if (!focus) {
-    article = `<h2 class="page-title">No webhooks caught</h2>
-        <p class="page-lead">When a connected repo opens an issue that mentions <code>@eru-issue-bot</code>, Eru keeps it here — the brief it wrote, and why it landed as agent-ready or needs-info.</p>`;
+    article = `<h2 class="page-title">No webhooks yet</h2>
+        <p class="page-lead">Every delivery Eru accepts is listed here, including the ones it ignores. Mention <code>@eru-issue-bot</code> in the issue title or body — the GitHub App name is not the mention — on a repo that is connected.</p>`;
   } else {
     article = refineStory(focus);
   }
-  const repoLine = model.repo
-    ? `<p class="kicker">Caught</p><p class="refine-repo">${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)}</p>`
-    : `<p class="kicker">Caught</p>`;
+  const list = logs.length > 0 ? webhookLogList(logs, focusLog?.id) : refineCatchList(jobs, focus?.id);
+  const repoLine = `<p class="kicker">Webhook log</p><p class="refine-repo">every delivery, and why Eru did or did not rewrite</p>`;
   return layout(
     "Eru · Refine",
     `<body>
@@ -955,12 +998,12 @@ export function refinePage(model: ChromeModel, jobs: IssueRefineJob[], focusId?:
     ${topbar(model)}
     ${masthead(model)}
     <main id="main" class="stage">
-      <aside class="card" aria-label="Caught webhooks">
+      <aside class="card" aria-label="Webhook log">
         ${repoLine}
         <hr class="rule"/>
-        ${refineCatchList(jobs, focus?.id)}
+        ${list}
       </aside>
-      <article class="card" aria-label="Refinement">
+      <article class="card" aria-label="Webhook decision">
         ${article}
       </article>
     </main>
