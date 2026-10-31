@@ -2013,6 +2013,25 @@ describe("refine tab", () => {
     expect(html.match(/Open questions was empty/g)).toHaveLength(1);
   });
 
+  it("lists a delivery with no issue number by its event", async () => {
+    const instance = app();
+    insertWebhookLog(instance.db, {
+      at: "2026-01-01T00:00:00Z",
+      forge: "github",
+      outcome: "ignored",
+      reason: "event",
+      detail: "Ignored. The delivery was “ping”, not an issue event.",
+      event: "ping",
+    });
+    const loggedIn = await login(instance.app);
+    const cookie = cookieLine(loggedIn).split(";")[0];
+    const html = await (await instance.app.request("/log", { headers: { Cookie: cookie } })).text();
+    const row = html.match(/<a class="refine-log-row"[^>]*>[\s\S]*?<\/a>/);
+    expect(row?.[0]).toContain("ping");
+    expect(row?.[0]).toContain("ignored");
+    expect(row?.[0]).not.toContain("Ignored. The delivery");
+  });
+
   it("keeps Refine on the selected repo and lists every delivery on Log", async () => {
     const instance = app();
     const boxId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
