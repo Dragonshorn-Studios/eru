@@ -353,6 +353,13 @@ a:hover { color: var(--ink); }
   flex-wrap: wrap;
   gap: 0.35rem 0.55rem;
 }
+.refine-toc a.refine-log-row {
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  white-space: nowrap;
+}
+.refine-log-row .refine-pill { margin-left: auto; flex-shrink: 0; }
 .refine-num {
   font-family: var(--font-mono);
   font-size: 0.78rem;

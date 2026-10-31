@@ -899,7 +899,7 @@ function refineCatchList(jobs: IssueRefineJob[], focusId: number | undefined): s
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
 }
 
-function refineStory(job: IssueRefineJob): string {
+function refineStory(job: IssueRefineJob, embed = false): string {
   const tone = refineTone(job);
   const sections = job.refined ? briefSections(job.refined) : [];
   const cards = sections
@@ -920,9 +920,12 @@ function refineStory(job: IssueRefineJob): string {
   const original = job.body.trim()
     ? `<details class="refine-original"><summary>What arrived</summary><div class="page-body">${renderMarkdown(job.body)}</div></details>`
     : "";
-  return `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
+  const head = embed
+    ? `<p class="refine-kicker">Brief</p>`
+    : `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
         <h2 class="page-title">${escapeHtml(job.title.trim() || "Untitled issue")}</h2>
-        <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>
+        <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>`;
+  return `${head}
         <div class="refine-verdict ${tone.tone}">
           <p class="refine-kicker">Why</p>
           <p>${escapeHtml(refineWhy(job))}</p>
@@ -944,10 +947,8 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hr
     .map((entry) => {
       const tone = logTone(entry);
       const current = entry.id === focusId ? ` aria-current="page"` : "";
-      const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : entry.forge;
       const num = entry.issueNumber ? `#${entry.issueNumber}` : entry.event || entry.outcome;
-      const title = entry.detail || entry.title.trim() || entry.outcome;
-      return `<li><a href="${hrefFor(entry.id)}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
+      return `<li><a class="refine-log-row" href="${hrefFor(entry.id)}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span></a></li>`;
     })
     .join("");
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
@@ -964,7 +965,7 @@ function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined
           <p>${escapeHtml(entry.detail)}</p>
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
         </div>
-        ${job ? refineStory(job) : ""}`;
+        ${job ? refineStory(job, true) : ""}`;
 }
 
 export function refinePage(

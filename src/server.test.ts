@@ -1965,6 +1965,50 @@ describe("refine tab", () => {
     expect(await own.text()).toContain("Cart secret title");
   });
 
+  it("shows the issue title once when a webhook and its brief share the page", async () => {
+    const instance = app();
+    const boxId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    setSetting(instance.db, "ui.selected_repo", String(boxId), "t");
+    const caught = enqueueIssueRefineJob(
+      instance.db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 105,
+        title: "Automatically refresh expiring mailbox OAuth tokens",
+        body: "Tokens expire.",
+      },
+      "2026-01-03T00:00:00Z",
+    )!;
+    completeIssueRefineJob(instance.db, caught, "2026-01-03T00:01:00Z", {
+      outcome: "agent-ready",
+      refined: brief,
+      why: "Open questions was empty, so Eru marked this agent-ready.",
+    });
+    const logId = insertWebhookLog(instance.db, {
+      at: "2026-01-03T00:00:00Z",
+      forge: "github",
+      owner: "acme",
+      name: "box",
+      issueNumber: 105,
+      outcome: "queued",
+      reason: "queued",
+      detail: "Queued. The issue mentions @eru-issue-bot and acme/box is connected.",
+      title: "Automatically refresh expiring mailbox OAuth tokens",
+      jobId: caught,
+    });
+    const loggedIn = await login(instance.app);
+    const cookie = cookieLine(loggedIn).split(";")[0];
+    const page = await instance.app.request(`/log/${logId}`, { headers: { Cookie: cookie } });
+    const html = await page.text();
+    expect(page.status).toBe(200);
+    expect(html.match(/<h2 class="page-title">/g)).toHaveLength(1);
+    expect(html).toContain("Automatically refresh expiring mailbox OAuth tokens");
+    expect(html).toContain("The hallway light is out.");
+    expect(html).toContain('class="pill pill-link" href="/log" aria-current="page">Log</a>');
+  });
+
   it("keeps Refine on the selected repo and lists every delivery on Log", async () => {
     const instance = app();
     const boxId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
@@ -2027,6 +2071,10 @@ describe("refine tab", () => {
     const homeHtml = await home.text();
     expect(homeHtml).toContain("newer delivery 84");
     expect(homeHtml).not.toContain("OLDEST-DELIVERY-SENTENCE");
+    const row = homeHtml.match(/<a class="refine-log-row"[^>]*>[\s\S]*?<\/a>/);
+    expect(row?.[0]).toContain("#86");
+    expect(row?.[0]).toContain("ignored");
+    expect(row?.[0]).not.toContain("newer delivery");
     expect(homeHtml).not.toContain("LAMP-ONLY-DELIVERY");
     expect(homeHtml).toContain('href="/log"');
 
@@ -2036,7 +2084,10 @@ describe("refine tab", () => {
     const logHtml = await log.text();
     expect(log.status).toBe(200);
     expect(logHtml).toContain("LAMP-ONLY-DELIVERY");
-    expect(logHtml).toContain("newer delivery 84");
+    const logRow = logHtml.match(/<a class="refine-log-row"[^>]*aria-current="page"[^>]*>[\s\S]*?<\/a>/);
+    expect(logRow?.[0]).toContain("#9");
+    expect(logRow?.[0]).toContain("ignored");
+    expect(logRow?.[0]).not.toContain("LAMP-ONLY");
     expect(logHtml).toContain('class="pill pill-link" href="/log" aria-current="page">Log</a>');
     expect(logHtml).toContain('class="pill pill-link" href="/config">Config</a>');
     expect(logHtml).not.toContain('class="tab" href="/log"');
