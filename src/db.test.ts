@@ -231,7 +231,6 @@ describe("repo auth source and page mapped_ref", () => {
 
 describe("issue refine jobs", () => {
   const job = {
-    deliveryId: "deliv-1",
     installationId: "555",
     owner: "acme",
     name: "box",
@@ -244,7 +243,7 @@ describe("issue refine jobs", () => {
     const db = openDb(":memory:");
     const at = "2026-01-01T00:00:00Z";
     const first = enqueueIssueRefineJob(db, job, at);
-    const second = enqueueIssueRefineJob(db, { ...job, deliveryId: "deliv-2", title: "other" }, at);
+    const second = enqueueIssueRefineJob(db, { ...job, title: "other" }, at);
     expect(first).toBeDefined();
     expect(second).toBeUndefined();
     expect(getIssueRefineJob(db, first!)!.attempts).toBe(0);

@@ -140,7 +140,6 @@ CREATE INDEX IF NOT EXISTS ask_threads_repo_idx ON ask_threads (repo_id, updated
 const ISSUE_BOT_SQL = `
 CREATE TABLE IF NOT EXISTS issue_refine_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  delivery_id TEXT NOT NULL,
   installation_id TEXT NOT NULL,
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -356,11 +355,10 @@ export function deleteStalePages(db: SqliteDb, repoId: number, keepSlugs: string
   db.prepare(`DELETE FROM pages WHERE repo_id = ? AND slug NOT IN (${placeholders})`).run(repoId, ...keepSlugs);
 }
 
-export type IssueRefineStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type IssueRefineStatus = "pending" | "running" | "done" | "failed";
 
 export interface IssueRefineJob {
   id: number;
-  deliveryId: string;
   installationId: string;
   owner: string;
   name: string;
@@ -375,13 +373,12 @@ export interface IssueRefineJob {
   updatedAt: string;
 }
 
-const ISSUE_JOB_COLUMNS = `id, delivery_id AS deliveryId, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
+const ISSUE_JOB_COLUMNS = `id, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
 
 /** Insert a job. Returns undefined when that issue is already queued. */
 export function enqueueIssueRefineJob(
   db: SqliteDb,
   job: {
-    deliveryId: string;
     installationId: string;
     owner: string;
     name: string;
@@ -394,12 +391,12 @@ export function enqueueIssueRefineJob(
   const row = db
     .prepare(
       `INSERT OR IGNORE INTO issue_refine_jobs (
-         delivery_id, installation_id, owner, name, issue_number, title, body,
+         installation_id, owner, name, issue_number, title, body,
          status, attempts, run_after, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
        RETURNING id`,
     )
-    .get(job.deliveryId, job.installationId, job.owner, job.name, job.issueNumber, job.title, job.body, at, at, at) as
+    .get(job.installationId, job.owner, job.name, job.issueNumber, job.title, job.body, at, at, at) as
     | { id: number }
     | undefined;
   return row?.id;
@@ -445,14 +442,6 @@ export function claimDueIssueRefineJob(db: SqliteDb, at: string): IssueRefineJob
 
 export function completeIssueRefineJob(db: SqliteDb, id: number, at: string): void {
   db.prepare(`UPDATE issue_refine_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?`).run(at, id);
-}
-
-export function skipIssueRefineJob(db: SqliteDb, id: number, at: string, reason: string): void {
-  db.prepare(`UPDATE issue_refine_jobs SET status = 'skipped', last_error = ?, updated_at = ? WHERE id = ?`).run(
-    reason,
-    at,
-    id,
-  );
 }
 
 export function failIssueRefineJob(db: SqliteDb, id: number, at: string, error: string): void {

@@ -10,7 +10,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "hono";
-import { safeEqual } from "./auth.js";
 import type { IssueBotConfig } from "./config.js";
 import {
   claimDueIssueRefineJob,
@@ -20,7 +19,6 @@ import {
   failIssueRefineJob,
   recoverIssueRefineJobs,
   retryIssueRefineJob,
-  skipIssueRefineJob,
   type IssueRefineJob,
   type SqliteDb,
 } from "./db.js";
@@ -103,7 +101,7 @@ export function verifyGithubWebhookSignature(secret: string, rawBody: string, he
     const expected = Buffer.from(expectedHex, "hex");
     const provided = Buffer.from(providedHex, "hex");
     if (expected.length === 0 || expected.length !== provided.length) {
-      return safeEqual(expectedHex, providedHex);
+      return false;
     }
     return timingSafeEqual(expected, provided);
   } catch {
@@ -296,17 +294,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   }
 
   async function handleWebhook(c: Context): Promise<Response> {
-    const lengthHeader = c.req.header("content-length") ?? c.req.header("Content-Length");
-    if (lengthHeader) {
-      const declared = Number(lengthHeader);
-      if (Number.isFinite(declared) && declared > ISSUE_BOT_MAX_BODY_BYTES) {
-        return c.text("payload too large", 413);
-      }
-    }
     const raw = await c.req.text();
-    if (Buffer.byteLength(raw, "utf8") > ISSUE_BOT_MAX_BODY_BYTES) {
-      return c.text("payload too large", 413);
-    }
     const signature = c.req.header("x-hub-signature-256") ?? c.req.header("X-Hub-Signature-256");
     if (!verifyGithubWebhookSignature(config.webhookSecret, raw, signature)) {
       return c.text("unauthorized", 401);
@@ -337,7 +325,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       console.log(`issuebot: hourly cap ${parsed.owner}/${parsed.name}`);
       return c.json({ ok: true }, 202);
     }
-    const id = enqueueIssueRefineJob(db, { deliveryId, ...parsed }, at);
+    const id = enqueueIssueRefineJob(db, parsed, at);
     if (id) console.log(`issuebot: queued ${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
     if (id && !stopped) void processDue();
     return c.json({ ok: true }, 202);
@@ -358,7 +346,6 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   }
 
   async function processJob(job: IssueRefineJob): Promise<void> {
-    const at = iso();
     const label = `${job.owner}/${job.name}#${job.issueNumber}`;
     try {
       const token = await appClient.installationTokenFor(job.installationId);
@@ -371,11 +358,6 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
         `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
       );
       const liveBody = typeof live.body === "string" ? live.body : job.body;
-      if (hasIssueBotMarker(job.body)) {
-        skipIssueRefineJob(db, job.id, at, "marker");
-        console.log(`issuebot: skip ${label} (marker)`);
-        return;
-      }
       if (hasIssueBotMarker(liveBody)) {
         // Body PATCH already landed (labels/comment failed, or the process
         // crashed). Finish write-back idempotently instead of skipping.
@@ -408,7 +390,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed";
       if (job.attempts >= ISSUE_BOT_MAX_ATTEMPTS) {
-        await applyFailure(job, message).catch((failErr) => {
+        await applyFailure(job).catch((failErr) => {
           console.log(
             `issuebot: failure write-back ${label} —`,
             failErr instanceof Error ? failErr.message : failErr,
@@ -424,7 +406,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     }
   }
 
-  async function applyFailure(job: IssueRefineJob, _message: string): Promise<void> {
+  async function applyFailure(job: IssueRefineJob): Promise<void> {
     const token = await appClient.installationTokenFor(job.installationId);
     if (!token.ok) return;
     const live = await githubJson<{ body?: unknown }>(

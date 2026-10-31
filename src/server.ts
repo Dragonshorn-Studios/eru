@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -94,10 +95,10 @@ import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
+  ISSUE_BOT_MAX_BODY_BYTES,
   ISSUE_BOT_WEBHOOK_PATH,
   createIssueBot,
   type IssueBot,
-  type IssueRefineFn,
 } from "./issuebot.js";
 import {
   APP_ERRORS,
@@ -129,7 +130,6 @@ export interface AppOptions {
   mappingTracker?: MappingTracker;
   issueBot?: IssueBot;
   issueBotAutoStart?: boolean;
-  issueRefine?: IssueRefineFn;
 }
 
 type Env = {
@@ -162,11 +162,10 @@ export function createApp(opts: AppOptions): Hono<Env> {
           db,
           config: config.issueBot,
           fetchImpl,
-          refine: opts.issueRefine,
           openCode: {
             bin: config.openCodeBin,
             timeoutMs: () => resolveTimeout(config, db).value,
-            model: () => resolveModel(config, db, "ask").value ?? config.openCodeModel,
+            model: () => resolveModel(config, db, "ask").value,
           },
           now,
         })
@@ -202,8 +201,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     c.header("X-Content-Type-Options", "nosniff");
     c.header("X-Frame-Options", "DENY");
     c.header("Referrer-Policy", "no-referrer");
-    const requestUrl = new URL(c.req.url);
-    const path = requestUrl.pathname;
+    const path = new URL(c.req.url).pathname;
     let session = verifySession(config.sessionSecret, getCookie(c, SESSION_COOKIE), now());
     // The GitHub allowlist is re-checked on every request: removing an id from
     // ERU_OAUTH_ADMIN_IDS takes effect without waiting for session expiry.
@@ -248,10 +246,17 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.json({ ok: true });
   });
 
-  app.post(ISSUE_BOT_WEBHOOK_PATH, (c) => {
-    if (!issueBot) return c.text("not found", 404);
-    return issueBot.handleWebhook(c);
-  });
+  app.post(
+    ISSUE_BOT_WEBHOOK_PATH,
+    bodyLimit({
+      maxSize: ISSUE_BOT_MAX_BODY_BYTES,
+      onError: (c) => c.text("payload too large", 413),
+    }),
+    (c) => {
+      if (!issueBot) return c.text("not found", 404);
+      return issueBot.handleWebhook(c);
+    },
+  );
 
   app.get("/assets/eru.css", (c) => {
     c.header("Content-Type", "text/css; charset=utf-8");

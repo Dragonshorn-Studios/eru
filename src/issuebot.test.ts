@@ -355,6 +355,31 @@ describe("POST /webhooks/github", () => {
     expect(res.status).toBe(413);
   });
 
+  it("rejects an oversized payload without Content-Length", async () => {
+    const { app } = testApp({});
+    const payload = "x".repeat(ISSUE_BOT_MAX_BODY_BYTES + 1);
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const res = await app.request(
+      new Request("http://localhost/webhooks/github", {
+        method: "POST",
+        body,
+        duplex: "half",
+        headers: {
+          "Content-Type": "text/plain",
+          "X-GitHub-Event": "issues",
+          "X-GitHub-Delivery": "too-big-chunked",
+          "X-Hub-Signature-256": sign(payload),
+        },
+      } as RequestInit),
+    );
+    expect(res.status).toBe(413);
+  });
+
   it("does not enqueue a stranger, own bot, or marker; does enqueue owner and allowlisted bot", async () => {
     const { app, db } = testApp({});
     const cases: Array<{ payload: Record<string, unknown>; delivery: string; jobs: number }> = [
@@ -469,7 +494,6 @@ describe("issue refine worker", () => {
     enqueueIssueRefineJob(
       db,
       {
-        deliveryId: "deliv-marker-live",
         installationId: "555",
         owner: "acme",
         name: "box",
@@ -487,32 +511,6 @@ describe("issue refine worker", () => {
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
-  });
-
-  it("skips when the job snapshot already carries the marker", async () => {
-    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
-    const marked = composeIssueBody(refinedTemplate(), original);
-    const calls: GhCall[] = [];
-    const { db, bot } = testApp({
-      fetchImpl: githubMock({ issueBody: marked, calls }),
-    });
-    enqueueIssueRefineJob(
-      db,
-      {
-        deliveryId: "deliv-marker-job",
-        installationId: "555",
-        owner: "acme",
-        name: "box",
-        issueNumber: 12,
-        title: "The lights flicker",
-        body: marked,
-      },
-      "2026-01-01T00:00:00Z",
-    );
-    await bot.processDue();
-    expect(listIssueRefineJobs(db)[0].status).toBe("skipped");
-    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
-    expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/comments"))).toBe(false);
   });
 
   it("does not modify the issue body after three failed attempts", async () => {
