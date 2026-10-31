@@ -1589,28 +1589,39 @@ async function prepareIssueSource(
   if (!repo) return { ok: false, detail: "repo is not connected" };
   const opened = await openCheckout(db, config, fetchImpl, githubAppFactory, repo);
   if (!opened.ok) return { ok: false, detail: opened.notice };
-  let mapped = false;
-  let pages = listAllPages(db, repo.id);
-  if (pages.length === 0) {
-    console.log(`issuebot: ${repo.owner}/${repo.name} has no map — creating one`);
-    const result = await refresh(opened.checkoutDir, `${repo.owner}/${repo.name}`, opened.ref, resolveModel(config, db, "map").value);
-    if (result.ok) {
-      saveMap(db, repo, opened.ref, result.pages, new Date(now()).toISOString());
-      pages = listAllPages(db, repo.id);
-      mapped = true;
-    } else {
-      console.log(`issuebot: could not create a map for ${repo.owner}/${repo.name} — ${result.error}`);
+  try {
+    let mapped = false;
+    let pages = listAllPages(db, repo.id);
+    if (pages.length === 0) {
+      console.log(`issuebot: ${repo.owner}/${repo.name} has no map — creating one`);
+      const result = await refresh(
+        opened.checkoutDir,
+        `${repo.owner}/${repo.name}`,
+        opened.ref,
+        resolveModel(config, db, "map").value,
+      );
+      if (result.ok) {
+        saveMap(db, repo, opened.ref, result.pages, new Date(now()).toISOString());
+        pages = listAllPages(db, repo.id);
+        mapped = true;
+      } else {
+        console.log(`issuebot: could not create a map for ${repo.owner}/${repo.name} — ${result.error}`);
+      }
     }
+    await rm(joinPath(opened.checkoutDir, "opencode.json"), { force: true }).catch(() => {});
+    return {
+      ok: true,
+      source: {
+        dir: opened.workdir,
+        pages,
+        mapped,
+        cleanup: () => rm(opened.workdir, { recursive: true, force: true }).then(() => undefined),
+      },
+    };
+  } catch (err) {
+    await rm(opened.workdir, { recursive: true, force: true }).catch(() => {});
+    throw err;
   }
-  return {
-    ok: true,
-    source: {
-      dir: opened.checkoutDir,
-      pages,
-      mapped,
-      cleanup: () => rm(opened.workdir, { recursive: true, force: true }).then(() => undefined),
-    },
-  };
 }
 
 async function refreshNotice(
