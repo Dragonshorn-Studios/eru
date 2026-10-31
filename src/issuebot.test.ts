@@ -685,6 +685,10 @@ describe("issue refine worker", () => {
     expect(job.outcome).toBe("agent-ready");
     expect(job.refined).toContain("## Problem");
     expect(job.why).toContain("agent-ready");
+    expect(listWebhookLogs(db).find((entry) => entry.jobId === job.id)).toMatchObject({
+      outcome: "agent-ready",
+      reason: "agent-ready",
+    });
     const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
     expect(patch?.body).toEqual({ body: expect.stringContaining(ISSUE_BOT_MARKER) });
     const patched = (patch?.body as { body: string }).body;

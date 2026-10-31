@@ -95,6 +95,7 @@ function topbar(model: ChromeModel): string {
       ${addPill}
       ${mapped}
       <span class="grow"></span>
+      <a class="pill pill-link" href="/log"${model.path === "/log" || model.path.startsWith("/log/") ? ' aria-current="page"' : ""}>Log</a>
       <a class="pill pill-link" href="/config">Config</a>
       <span class="user-pill">
         ${model.user.avatarUrl ? `<img class="avatar" src="${escapeHtml(model.user.avatarUrl)}" alt="" width="24" height="24"/>` : `<span class="avatar avatar-mono" aria-hidden="true">${escapeHtml(model.user.name.slice(0, 2))}</span>`}
@@ -108,13 +109,11 @@ const TABS = [
   { key: "brief", href: "/", label: "Brief" },
   { key: "ask", href: "/ask", label: "Ask" },
   { key: "refine", href: "/refine", label: "Refine" },
-  { key: "log", href: "/log", label: "Log" },
 ] as const;
 
 function isTabActive(key: string, path: string): boolean {
   if (key === "ask") return path === "/ask";
   if (key === "refine") return path === "/refine" || path.startsWith("/refine/");
-  if (key === "log") return path === "/log" || path.startsWith("/log/");
   return path === "/" || path.startsWith("/brief");
 }
 
@@ -900,7 +899,7 @@ function refineCatchList(jobs: IssueRefineJob[], focusId: number | undefined): s
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
 }
 
-function refineStory(job: IssueRefineJob): string {
+function refineStory(job: IssueRefineJob, embed = false): string {
   const tone = refineTone(job);
   const sections = job.refined ? briefSections(job.refined) : [];
   const cards = sections
@@ -921,9 +920,12 @@ function refineStory(job: IssueRefineJob): string {
   const original = job.body.trim()
     ? `<details class="refine-original"><summary>What arrived</summary><div class="page-body">${renderMarkdown(job.body)}</div></details>`
     : "";
-  return `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
+  const head = embed
+    ? `<p class="refine-kicker">Brief</p>`
+    : `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
         <h2 class="page-title">${escapeHtml(job.title.trim() || "Untitled issue")}</h2>
-        <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>
+        <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>`;
+  return `${head}
         <div class="refine-verdict ${tone.tone}">
           <p class="refine-kicker">Why</p>
           <p>${escapeHtml(refineWhy(job))}</p>
@@ -935,9 +937,22 @@ function refineStory(job: IssueRefineJob): string {
 }
 
 function logTone(entry: WebhookLogEntry): { tone: string; label: string } {
-  if (entry.outcome === "queued") return { tone: "is-ready", label: "queued" };
-  if (entry.outcome === "rejected") return { tone: "is-fail", label: "rejected" };
-  return { tone: "is-open", label: "ignored" };
+  switch (entry.outcome) {
+    case "queued":
+      return { tone: "is-wait", label: "queued" };
+    case "agent-ready":
+      return { tone: "is-ready", label: "agent-ready" };
+    case "needs-info":
+      return { tone: "is-open", label: "needs-info" };
+    case "failed":
+      return { tone: "is-fail", label: "didn't land" };
+    case "skipped":
+      return { tone: "is-skip", label: "skipped" };
+    case "rejected":
+      return { tone: "is-fail", label: "rejected" };
+    case "ignored":
+      return { tone: "is-open", label: "ignored" };
+  }
 }
 
 function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hrefFor: (id: number) => string): string {
@@ -945,10 +960,8 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hr
     .map((entry) => {
       const tone = logTone(entry);
       const current = entry.id === focusId ? ` aria-current="page"` : "";
-      const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : entry.forge;
       const num = entry.issueNumber ? `#${entry.issueNumber}` : entry.event || entry.outcome;
-      const title = entry.detail || entry.title.trim() || entry.outcome;
-      return `<li><a href="${hrefFor(entry.id)}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
+      return `<li><a class="refine-log-row" href="${hrefFor(entry.id)}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span></a></li>`;
     })
     .join("");
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
@@ -957,15 +970,24 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hr
 function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined): string {
   const tone = logTone(entry);
   const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : "no repository on the delivery";
-  return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(entry.outcome)}</p>
-        <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
-        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
-        <div class="refine-verdict ${tone.tone}">
+  const settled =
+    entry.outcome === "agent-ready" ||
+    entry.outcome === "needs-info" ||
+    entry.outcome === "failed" ||
+    entry.outcome === "skipped";
+  const verdict =
+    job && settled
+      ? ""
+      : `<div class="refine-verdict ${tone.tone}">
           <p class="refine-kicker">Why</p>
           <p>${escapeHtml(entry.detail)}</p>
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
-        </div>
-        ${job ? refineStory(job) : ""}`;
+        </div>`;
+  return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(tone.label)}</p>
+        <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
+        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
+        ${verdict}
+        ${job ? refineStory(job, true) : ""}`;
 }
 
 export function refinePage(

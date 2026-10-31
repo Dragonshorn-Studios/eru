@@ -658,7 +658,7 @@ export function retryIssueRefineJob(db: SqliteDb, id: number, at: string, runAft
 }
 
 /** Jobs left `running` after a crash go back on the queue. */
-export type WebhookLogOutcome = "queued" | "ignored" | "rejected";
+export type WebhookLogOutcome = "queued" | "ignored" | "rejected" | "agent-ready" | "needs-info" | "failed" | "skipped";
 
 export interface WebhookLogEntry {
   id: number;
@@ -751,11 +751,33 @@ function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
   ).run(WEBHOOK_LOG_KEEP);
 }
 
+/** A queued row keeps that label forever unless we copy the finished job onto it. */
+export function settleWebhookLogs(db: SqliteDb): void {
+  db.prepare(
+    `UPDATE webhook_log
+        SET outcome = (SELECT j.outcome FROM issue_refine_jobs j WHERE j.id = webhook_log.job_id),
+            reason = (SELECT j.outcome FROM issue_refine_jobs j WHERE j.id = webhook_log.job_id),
+            detail = (
+              SELECT COALESCE(NULLIF(j.why, ''), webhook_log.detail)
+              FROM issue_refine_jobs j WHERE j.id = webhook_log.job_id
+            )
+      WHERE outcome = 'queued'
+        AND job_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM issue_refine_jobs j
+          WHERE j.id = webhook_log.job_id
+            AND j.status IN ('done', 'failed')
+            AND j.outcome IS NOT NULL
+        )`,
+  ).run();
+}
+
 export function listWebhookLogs(
   db: SqliteDb,
   limit = 80,
   repo?: { forge: string; owner: string; name: string; origin?: string },
 ): WebhookLogEntry[] {
+  settleWebhookLogs(db);
   const cap = Math.max(1, Math.min(limit, WEBHOOK_LOG_KEEP));
   if (!repo) {
     return db.prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log ORDER BY id DESC LIMIT ?`).all(cap) as WebhookLogEntry[];
@@ -773,6 +795,7 @@ export function listWebhookLogs(
 }
 
 export function getWebhookLog(db: SqliteDb, id: number): WebhookLogEntry | undefined {
+  settleWebhookLogs(db);
   return db.prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log WHERE id = ?`).get(id) as WebhookLogEntry | undefined;
 }
 

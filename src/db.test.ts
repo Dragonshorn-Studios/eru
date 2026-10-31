@@ -584,4 +584,31 @@ describe("webhook log", () => {
       ),
     ).toEqual(["this-host"]);
   });
+
+  it("replaces a queued row with the finished job the next time the log is read", () => {
+    const db = openDb(":memory:");
+    const job = enqueueIssueRefineJob(
+      db,
+      { installationId: "1", owner: "acme", name: "box", issueNumber: 105, title: "Tokens", body: "expire" },
+      "2026-01-01T00:00:00Z",
+    )!;
+    const id = insertWebhookLog(db, {
+      ...row("Queued. still waiting"),
+      owner: "acme",
+      name: "box",
+      outcome: "queued",
+      reason: "queued",
+      jobId: job,
+      issueNumber: 105,
+    });
+    completeIssueRefineJob(db, job, "2026-01-01T00:01:00Z", {
+      outcome: "needs-info",
+      why: "Open questions still need an answer, so Eru left this as needs-info.",
+    });
+    expect(getWebhookLog(db, id)).toMatchObject({
+      outcome: "needs-info",
+      reason: "needs-info",
+      detail: "Open questions still need an answer, so Eru left this as needs-info.",
+    });
+  });
 });
