@@ -34,6 +34,9 @@ describe("session helpers", () => {
     expect(safeNextPath("https://evil.test")).toBe("/");
     expect(safeNextPath("//evil.test")).toBe("/");
     expect(safeNextPath("/login")).toBe("/");
+    expect(safeNextPath("/config/issue-bot/setup?code=abc&state=xyz")).toBe(
+      "/config/issue-bot/setup?code=abc&state=xyz",
+    );
   });
 
   it("keeps health, login, and an exact asset allowlist public", () => {

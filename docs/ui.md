@@ -43,7 +43,7 @@ Brief-style layout — sticky section nav on the left (OpenCode models / Provide
 - **OpenCode models** — separate Ask and Map model fields (`provider/model`), a datalist fed by `opencode models`, a refresh-list button.
 - **Provider API keys** — write-only inputs per provider (OpenCode Zen, OpenCode Go, Anthropic, OpenAI, …), stored in OpenCode's `auth.json`, shown as a source badge plus a last-4 fingerprint.
 - **GitHub App** — App ID, installation ID (auto-detect), private key (write-only, encrypted). Lists installable repos on Connect.
-- **Issue bot** — the `eru-issue-bot` GitHub App (Issues read/write only). App ID, private key, webhook secret (both write-only, encrypted), bot user id, trusted bot ids, hourly cap. Shows the webhook URL from `ERU_PUBLIC_URL` to paste into GitHub. Saving takes effect without a restart.
+- **Issue bot** — the `eru-issue-bot` GitHub App (Issues read/write only). **Create GitHub App** registers it from a GitHub manifest (permissions, webhook URL, return URL) and stores the App ID / PEM / webhook secret encrypted; an install link appears afterwards. You can still paste credentials by hand. Also: bot user id, trusted bot ids, hourly cap, webhook URL from `ERU_PUBLIC_URL`. Saving takes effect without a restart. Needs `ERU_PUBLIC_URL` for Create.
 - **Operator** — the GitHub login shown in the top-bar pill and used for the avatar.
 
 ![config](ui/config.png)

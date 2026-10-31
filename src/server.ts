@@ -97,7 +97,20 @@ import {
 import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
-import { ISSUE_BOT_WEBHOOK_PATH, createIssueBot, type IssueBot, type IssueRefineFn } from "./issuebot.js";
+import {
+  ISSUE_BOT_CREATE_PATH,
+  ISSUE_BOT_SETUP_PATH,
+  ISSUE_BOT_SETUP_TTL_MS,
+  ISSUE_BOT_WEBHOOK_PATH,
+  convertGithubAppManifest,
+  createIssueBot,
+  githubAppInstallUrl,
+  issueBotManifest,
+  issueBotManifestRegisterUrl,
+  lookupGithubBotUserId,
+  type IssueBot,
+  type IssueRefineFn,
+} from "./issuebot.js";
 import {
   APP_ERRORS,
   appPage,
@@ -107,6 +120,7 @@ import {
   connectPage,
   REFRESH_TARBALL_ERRORS,
   refreshResultFragment,
+  issueBotManifestHandoffPage,
   loginPage,
   themeCss,
   type ChromeModel,
@@ -200,6 +214,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
   const loginOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
   const oauthStates = new OAuthStateStore();
   const OAUTH_STATE_TTL_MS = 10 * 60_000;
+  const issueBotSetupStates = new OAuthStateStore();
 
   // Reused across requests so the minted installation token survives between
   // calls; rebuilt whenever the resolved app credentials change.
@@ -224,7 +239,8 @@ export function createApp(opts: AppOptions): Hono<Env> {
     c.header("X-Content-Type-Options", "nosniff");
     c.header("X-Frame-Options", "DENY");
     c.header("Referrer-Policy", "no-referrer");
-    const path = new URL(c.req.url).pathname;
+    const requestUrl = new URL(c.req.url);
+    const path = requestUrl.pathname;
     let session = verifySession(config.sessionSecret, getCookie(c, SESSION_COOKIE), now());
     // The GitHub allowlist is re-checked on every request: removing an id from
     // ERU_OAUTH_ADMIN_IDS takes effect without waiting for session expiry.
@@ -249,7 +265,8 @@ export function createApp(opts: AppOptions): Hono<Env> {
         return c.text("unauthorized", 401);
       }
       if (c.req.header("HX-Request") === "true") return c.text("unauthorized", 401);
-      const nextPath = path === "/" ? "" : `?next=${encodeURIComponent(path)}`;
+      const nextTarget = `${path}${requestUrl.search}`;
+      const nextPath = path === "/" && !requestUrl.search ? "" : `?next=${encodeURIComponent(nextTarget)}`;
       return c.redirect(`/login${nextPath}`);
     }
 
@@ -801,9 +818,62 @@ export function createApp(opts: AppOptions): Hono<Env> {
       deleteSetting(db, SETTING_ISSUE_BOT_USER);
       deleteSetting(db, SETTING_ISSUE_BOT_TRUSTED);
       deleteSetting(db, SETTING_ISSUE_BOT_CAP);
+      deleteSetting(db, SETTING_ISSUE_BOT_SLUG);
     })();
     issueBotRuntime();
     return c.redirect("/config#issue-bot");
+  });
+
+  app.post(ISSUE_BOT_CREATE_PATH, async (c) => {
+    const reject = (notice: string) =>
+      html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), 400);
+    if (!config.publicUrl) {
+      return reject("Set ERU_PUBLIC_URL so GitHub can send you back here after creating the App.");
+    }
+    const body = await c.req.parseBody();
+    const org = typeof body.org === "string" ? body.org.trim() : "";
+    const register = issueBotManifestRegisterUrl(org);
+    if (!register) return reject("That is not a GitHub organization login.");
+    const state = issueBotSetupStates.issue(now(), ISSUE_BOT_SETUP_TTL_MS);
+    const action = `${register}?state=${encodeURIComponent(state)}`;
+    return html(c, issueBotManifestHandoffPage(action, JSON.stringify(issueBotManifest(config.publicUrl))));
+  });
+
+  app.get(ISSUE_BOT_SETUP_PATH, async (c) => {
+    const ip = requestClientKey(c);
+    const url = new URL(c.req.url);
+    const consumed = issueBotSetupStates.consume(url.searchParams.get("state") ?? undefined, now());
+    if (consumed === undefined) {
+      limiter.allow(`issue-bot-setup:${ip}`);
+      console.warn(`issuebot: GitHub App setup state rejected ip=${ip}`);
+      return renderConfig(c, "That GitHub App setup link expired — try Create again.", 403);
+    }
+    if (url.searchParams.get("error")) {
+      console.log(`issuebot: GitHub App setup cancelled (${url.searchParams.get("error")}) ip=${ip}`);
+      return renderConfig(c, "GitHub App creation was cancelled.", 400);
+    }
+    const converted = await convertGithubAppManifest(url.searchParams.get("code") ?? "", fetchImpl);
+    if (!converted) {
+      limiter.allow(`issue-bot-setup:${ip}`);
+      console.warn("issuebot: GitHub App manifest conversion failed");
+      return renderConfig(c, "GitHub did not finish creating the App — try Create again.", 502);
+    }
+    const botUserId = await lookupGithubBotUserId(converted.slug, fetchImpl);
+    const at = new Date(now()).toISOString();
+    const secrets = forgeKeySecrets(config);
+    db.transaction(() => {
+      setSetting(db, SETTING_ISSUE_BOT_ID, converted.appId, at);
+      setSetting(db, SETTING_ISSUE_BOT_KEY, encryptForgeToken(secrets[0], converted.privateKey), at);
+      setSetting(db, SETTING_ISSUE_BOT_SECRET, encryptForgeToken(secrets[0], converted.webhookSecret), at);
+      if (converted.slug) setSetting(db, SETTING_ISSUE_BOT_SLUG, converted.slug, at);
+      else deleteSetting(db, SETTING_ISSUE_BOT_SLUG);
+      if (botUserId) setSetting(db, SETTING_ISSUE_BOT_USER, String(botUserId), at);
+    })();
+    issueBotRuntime();
+    return renderConfig(
+      c,
+      "GitHub App saved. Install it on the repos you want — then new issues mentioning @eru-issue-bot will be rewritten.",
+    );
   });
 
   const renderConfig = (c: Context<Env>, notice = "", status: ContentfulStatusCode = 200) =>
@@ -865,6 +935,7 @@ const SETTING_ISSUE_BOT_SECRET = "issue_bot.webhook_secret";
 const SETTING_ISSUE_BOT_USER = "issue_bot.user_id";
 const SETTING_ISSUE_BOT_TRUSTED = "issue_bot.trusted_ids";
 const SETTING_ISSUE_BOT_CAP = "issue_bot.hourly_cap";
+const SETTING_ISSUE_BOT_SLUG = "issue_bot.slug";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
 const SETTING_OPENCODE_TIMEOUT = "opencode.timeout_ms";
@@ -1021,9 +1092,12 @@ function issueBotView(db: SqliteDb, config: Config): ConfigIssueBotView {
       ? "env"
       : "default";
   const capSource: ConfigIssueBotView["capSource"] = storedCap ? "stored" : env ? "env" : "default";
+  const storedSlug = getSetting(db, SETTING_ISSUE_BOT_SLUG) ?? "";
   return {
     enabled: Boolean(resolved),
     webhookUrl: config.publicUrl ? `${config.publicUrl}${ISSUE_BOT_WEBHOOK_PATH}` : "",
+    canCreate: Boolean(config.publicUrl),
+    installUrl: githubAppInstallUrl(storedSlug) ?? "",
     appId: resolved?.appId ?? env?.appId ?? "",
     appIdSource,
     storedAppId,

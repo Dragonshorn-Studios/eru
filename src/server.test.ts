@@ -1231,8 +1231,117 @@ describe("issue bot on /config", () => {
     expect(html).toContain('id="issue-bot"');
     expect(html).toContain("http://eru.test/webhooks/github");
     expect(html).toContain('action="/config/issue-bot"');
+    expect(html).toContain('action="/config/issue-bot/create"');
+    expect(html).toContain("Create GitHub App");
     expect(html).toContain("@eru-issue-bot");
     expect(html).not.toContain(WEBHOOK_SECRET);
+  });
+
+  it("hides the Create GitHub App form when ERU_PUBLIC_URL is unset", async () => {
+    const instance = app({ publicUrl: "" });
+    const { cookie } = await authed(instance);
+    const html = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(html).toContain("Set <code>ERU_PUBLIC_URL</code> to create the App from this page");
+    expect(html).not.toContain('action="/config/issue-bot/create"');
+  });
+
+  it("hands off a GitHub App manifest and stores the converted credentials", async () => {
+    const instance = app({}, async (url, init) => {
+      if (String(url).includes("/app-manifests/goodcode1/conversions") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: 4242,
+            slug: "eru-issue-bot",
+            pem: APP_PEM,
+            webhook_secret: WEBHOOK_SECRET,
+            client_secret: "never-store-me",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (String(url).includes("eru-issue-bot")) {
+        return new Response(JSON.stringify({ id: 9001, login: "eru-issue-bot[bot]" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("nope", { status: 404 });
+    });
+    const created = await post(instance, "/config/issue-bot/create", { org: "" });
+    expect(created.status).toBe(200);
+    const handoff = await created.text();
+    expect(handoff).toContain("https://github.com/settings/apps/new?state=");
+    expect(handoff).toContain("&quot;name&quot;:&quot;eru-issue-bot&quot;");
+    expect(handoff).toContain("http://eru.test/webhooks/github");
+    expect(handoff).toContain("http://eru.test/config/issue-bot/setup");
+    expect(handoff).not.toMatch(/contents|actions|administration/);
+    const state = new URL(handoff.match(/action="([^"]+)"/)![1].replaceAll("&amp;", "&")).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    const unauth = await instance.app.request(`/config/issue-bot/setup?code=goodcode1&state=${state}`, {
+      redirect: "manual",
+    });
+    expect(unauth.status).toBe(302);
+    expect(unauth.headers.get("location")).toBe(
+      `/login?next=${encodeURIComponent(`/config/issue-bot/setup?code=goodcode1&state=${state}`)}`,
+    );
+
+    const { cookie } = await authed(instance);
+    const setup = await instance.app.request(`/config/issue-bot/setup?code=goodcode1&state=${state}`, {
+      headers: { Cookie: cookie },
+    });
+    expect(setup.status).toBe(200);
+    const page = await setup.text();
+    expect(page).toContain("GitHub App saved");
+    expect(page).toContain("https://github.com/apps/eru-issue-bot/installations/new");
+    expect(page).not.toContain(WEBHOOK_SECRET);
+    expect(page).not.toContain(APP_PEM);
+    expect(page).not.toContain("never-store-me");
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBe("4242");
+    expect(getSetting(instance.db, "issue_bot.user_id")).toBe("9001");
+    expect(getSetting(instance.db, "issue_bot.slug")).toBe("eru-issue-bot");
+    expect(decryptForgeToken(instance.config.sessionSecret, getSetting(instance.db, "issue_bot.webhook_secret")!)).toBe(
+      WEBHOOK_SECRET,
+    );
+
+    const ping = JSON.stringify({ zen: "ok" });
+    const signed = await instance.app.request("/webhooks/github", {
+      method: "POST",
+      body: ping,
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": "ping",
+        "X-GitHub-Delivery": "manifest-setup-ping",
+        "X-Hub-Signature-256": `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(ping).digest("hex")}`,
+      },
+    });
+    expect(signed.status).toBe(202);
+
+    const replay = await instance.app.request(`/config/issue-bot/setup?code=goodcode1&state=${state}`, {
+      headers: { Cookie: cookie },
+    });
+    expect(replay.status).toBe(403);
+  });
+
+  it("rejects a malformed org on Create and a conversion that GitHub refuses", async () => {
+    const instance = app({}, async () => new Response("nope", { status: 500 }));
+    const badOrg = await post(instance, "/config/issue-bot/create", { org: "not a login" });
+    expect(badOrg.status).toBe(400);
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBeUndefined();
+
+    const orgCreate = await post(instance, "/config/issue-bot/create", { org: "Acme-Org" });
+    expect(orgCreate.status).toBe(200);
+    expect(await orgCreate.text()).toContain("https://github.com/organizations/Acme-Org/settings/apps/new?state=");
+
+    const created = await post(instance, "/config/issue-bot/create", {});
+    const handoff = await created.text();
+    const state = new URL(handoff.match(/action="([^"]+)"/)![1].replaceAll("&amp;", "&")).searchParams.get("state");
+    const { cookie } = await authed(instance);
+    const failed = await instance.app.request(`/config/issue-bot/setup?code=goodcode1&state=${state}`, {
+      headers: { Cookie: cookie },
+    });
+    expect(failed.status).toBe(502);
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBeUndefined();
   });
 
   it("saves encrypted credentials from the UI and starts accepting signed webhooks", async () => {

@@ -11,14 +11,22 @@ import {
   COMMENT_COMPLETE,
   COMMENT_FAILED,
   COMMENT_NEEDS_INFO,
+  ISSUE_BOT_APP_NAME,
   ISSUE_BOT_MARKER,
+  ISSUE_BOT_SETUP_PATH,
+  ISSUE_BOT_WEBHOOK_PATH,
   LABEL_AGENT_READY,
   LABEL_FAILED,
   LABEL_NEEDS_INFO,
   LABEL_REFINED,
   composeIssueBody,
+  convertGithubAppManifest,
   createIssueBot,
+  githubAppInstallUrl,
   hasIssueBotMarker,
+  issueBotManifest,
+  issueBotManifestRegisterUrl,
+  lookupGithubBotUserId,
   openQuestionsEmpty,
   parseRefinedMarkdown,
   shouldEnqueueIssue,
@@ -459,5 +467,76 @@ describe("issue refine worker", () => {
     expect(JSON.stringify(labelAdds)).toContain(LABEL_FAILED);
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comments.some((c) => (c.body as { body: string }).body === COMMENT_FAILED)).toBe(true);
+  });
+});
+
+describe("github app manifest", () => {
+  it("builds a private Issues-only app pointed at this Eru", () => {
+    const manifest = issueBotManifest("https://eru.example/");
+    expect(manifest.name).toBe(ISSUE_BOT_APP_NAME);
+    expect(manifest.url).toBe("https://eru.example");
+    expect(manifest.public).toBe(false);
+    expect(manifest.default_events).toEqual(["issues"]);
+    expect(manifest.default_permissions).toEqual({ issues: "write", metadata: "read" });
+    expect(manifest.hook_attributes).toEqual({ url: `https://eru.example${ISSUE_BOT_WEBHOOK_PATH}`, active: true });
+    expect(manifest.redirect_url).toBe(`https://eru.example${ISSUE_BOT_SETUP_PATH}`);
+    expect(JSON.stringify(manifest.default_permissions)).not.toMatch(/contents|actions|administration/);
+  });
+
+  it("registers on a personal account or a valid org login", () => {
+    expect(issueBotManifestRegisterUrl()).toBe("https://github.com/settings/apps/new");
+    expect(issueBotManifestRegisterUrl("Acme-Org")).toBe("https://github.com/organizations/Acme-Org/settings/apps/new");
+    expect(issueBotManifestRegisterUrl("../evil")).toBeUndefined();
+    expect(issueBotManifestRegisterUrl("a/b")).toBeUndefined();
+    expect(githubAppInstallUrl("eru-issue-bot")).toBe(
+      "https://github.com/apps/eru-issue-bot/installations/new",
+    );
+    expect(githubAppInstallUrl("not a slug")).toBeUndefined();
+  });
+
+  it("converts a manifest code into app credentials and looks up the bot user", async () => {
+    const fetches: string[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      fetches.push(`${init?.method ?? "GET"} ${url}`);
+      if (String(url).includes("/app-manifests/goodcode1/conversions")) {
+        return new Response(
+          JSON.stringify({
+            id: 4242,
+            slug: "eru-issue-bot",
+            pem: APP_PEM,
+            webhook_secret: WEBHOOK_SECRET,
+            client_secret: "never-store-me",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (String(url).includes("/users/eru-issue-bot%5Bbot%5D") || String(url).includes("/users/eru-issue-bot[bot]")) {
+        return new Response(JSON.stringify({ id: BOT_USER_ID, login: "eru-issue-bot[bot]" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("nope", { status: 404 });
+    };
+    const converted = await convertGithubAppManifest("goodcode1", fetchImpl);
+    expect(converted).toEqual({
+      appId: "4242",
+      slug: "eru-issue-bot",
+      privateKey: APP_PEM.trim(),
+      webhookSecret: WEBHOOK_SECRET,
+    });
+    expect(await lookupGithubBotUserId("eru-issue-bot", fetchImpl)).toBe(BOT_USER_ID);
+    expect(fetches.some((line) => line.includes("never-store-me"))).toBe(false);
+  });
+
+  it("rejects a short code, a failed conversion, and a payload without a PEM", async () => {
+    expect(await convertGithubAppManifest("short")).toBeUndefined();
+    const fail: FetchLike = async () => new Response("nope", { status: 404 });
+    expect(await convertGithubAppManifest("goodcode1", fail)).toBeUndefined();
+    const bad: FetchLike = async () =>
+      new Response(JSON.stringify({ id: 1, slug: "x", pem: "not-a-key", webhook_secret: WEBHOOK_SECRET }), {
+        status: 201,
+      });
+    expect(await convertGithubAppManifest("goodcode1", bad)).toBeUndefined();
   });
 });

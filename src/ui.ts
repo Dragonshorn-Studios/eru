@@ -223,6 +223,8 @@ export interface ConfigAppView {
 export interface ConfigIssueBotView {
   enabled: boolean;
   webhookUrl: string;
+  canCreate: boolean;
+  installUrl: string;
   appId: string;
   appIdSource: "env" | "stored" | "default";
   storedAppId: string;
@@ -478,6 +480,25 @@ function appFieldHint(
   return escapeHtml(fallback);
 }
 
+export function issueBotManifestHandoffPage(registerUrl: string, manifestJson: string): string {
+  return layout(
+    "Eru — create GitHub App",
+    `<body>
+  <main id="main" class="stage">
+    <section class="card">
+      <h2>Continue on GitHub</h2>
+      <p class="page-lead">GitHub will offer the name <code>eru-issue-bot</code> with Issues read/write and the webhook URL already filled in. After you create it, you'll come back here and Eru stores the credentials encrypted.</p>
+      <form id="issue-bot-manifest" class="connect-form" method="post" action="${escapeHtml(registerUrl)}">
+        <input type="hidden" name="manifest" value="${escapeHtml(manifestJson)}"/>
+        <button class="enter" type="submit">Continue on GitHub</button>
+      </form>
+      <script>document.getElementById("issue-bot-manifest").submit();</script>
+    </section>
+  </main>
+</body>`,
+  );
+}
+
 function issueBotSection(bot: ConfigIssueBotView, csrf: string): string {
   const webhookField = bot.webhookUrl
     ? `<label class="field">
@@ -486,6 +507,19 @@ function issueBotSection(bot: ConfigIssueBotView, csrf: string): string {
             <span class="field-hint">paste this into the GitHub App · webhook secret below must match GitHub's</span>
           </label>`
     : `<p class="field-hint">Set <code>ERU_PUBLIC_URL</code> so this page can show the webhook URL, or use <code>https://&lt;host&gt;/webhooks/github</code> on the GitHub App.</p>`;
+  const createBlock = bot.canCreate
+    ? `<form class="connect-form" method="post" action="/config/issue-bot/create" autocomplete="off">
+          ${csrfInput(csrf)}
+          <label class="field">
+            <span>GitHub organization <span class="field-hint">optional — leave empty to create the App on your account</span></span>
+            <input type="text" name="org" maxlength="39" placeholder="your-org"/>
+          </label>
+          <button class="enter" type="submit">Create GitHub App</button>
+        </form>`
+    : `<p class="field-hint">Set <code>ERU_PUBLIC_URL</code> to create the App from this page (GitHub needs the webhook and return URLs). Until then, create it on GitHub and paste the credentials below.</p>`;
+  const installLine = bot.installUrl
+    ? `<p class="field-hint"><a href="${escapeHtml(bot.installUrl)}">Install this App on GitHub</a> — pick the repos that should get rewritten issues.</p>`
+    : "";
   const hasSaved =
     bot.hasStoredKey ||
     bot.hasStoredSecret ||
@@ -495,7 +529,10 @@ function issueBotSection(bot: ConfigIssueBotView, csrf: string): string {
     Boolean(bot.storedCap);
   return `<h3 id="issue-bot">Issue bot</h3>
         <p class="mapped">rewrites newly opened issues that mention <code>@eru-issue-bot</code> — a separate GitHub App (Issues read/write, Metadata read, event: Issues only)</p>
-        <p class="field-hint">Create the App on GitHub, install it on the repos you want, then paste the credentials here. Saved values win over <code>ERU_ISSUE_BOT_*</code>. Nagato only needs to append <code>@eru-issue-bot</code> on its own line at the end of the issue body.</p>
+        <p class="field-hint">Create the App here (GitHub fills in permissions and the webhook URL), then install it on the repos you want. Saved values win over <code>ERU_ISSUE_BOT_*</code>. Nagato only needs to append <code>@eru-issue-bot</code> on its own line at the end of the issue body.</p>
+        ${createBlock}
+        ${installLine}
+        <p class="mapped">or paste credentials from an App you already created</p>
         <form class="connect-form" method="post" action="/config/issue-bot" autocomplete="off">
           ${csrfInput(csrf)}
           ${webhookField}

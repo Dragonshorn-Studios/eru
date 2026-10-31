@@ -3,7 +3,8 @@
  *
  * Issue title/body are untrusted user data. They go to the model as text only
  * (no tools, no repo, no secrets) and are never logged. App private key,
- * webhook secret, and installation tokens stay in env / memory.
+ * webhook secret, and installation tokens stay in env, encrypted SQLite
+ * settings, or memory — never logs or git.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -11,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "hono";
 import { safeEqual } from "./auth.js";
-import type { IssueBotConfig } from "./config.js";
+import { MIN_WEBHOOK_SECRET, type IssueBotConfig } from "./config.js";
 import {
   claimDueIssueRefineJob,
   completeIssueRefineJob,
@@ -39,9 +40,13 @@ import { markWorkspaceRoot } from "./util.js";
 
 export const ISSUE_BOT_MENTION = "@eru-issue-bot";
 export const ISSUE_BOT_MARKER = "<!-- eru-issue-bot:v1 -->";
+export const ISSUE_BOT_APP_NAME = "eru-issue-bot";
 export const ISSUE_BOT_MAX_ATTEMPTS = 3;
 export const ISSUE_BOT_WEBHOOK_PATH = "/webhooks/github";
+export const ISSUE_BOT_CREATE_PATH = "/config/issue-bot/create";
+export const ISSUE_BOT_SETUP_PATH = "/config/issue-bot/setup";
 export const ISSUE_BOT_MAX_BODY_BYTES = 1_000_000;
+export const ISSUE_BOT_SETUP_TTL_MS = 60 * 60 * 1000;
 
 export const LABEL_REFINED = "eru:refined";
 export const LABEL_AGENT_READY = "agent-ready";
@@ -70,6 +75,143 @@ const MENTION_RE = /@eru-issue-bot\b/gi;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const POLL_IDLE_MS = 2_000;
 const DEFAULT_BACKOFF_MS = [5_000, 20_000, 80_000];
+const GITHUB_WEB_BASE = "https://github.com";
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const GITHUB_APP_SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
+const MANIFEST_CODE_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
+export interface IssueBotManifest {
+  name: string;
+  url: string;
+  hook_attributes: { url: string; active: boolean };
+  redirect_url: string;
+  setup_url: string;
+  description: string;
+  public: false;
+  default_events: ["issues"];
+  default_permissions: { issues: "write"; metadata: "read" };
+}
+
+export interface ConvertedGithubApp {
+  appId: string;
+  slug: string;
+  privateKey: string;
+  webhookSecret: string;
+}
+
+/** Homepage, webhook, and redirect URLs GitHub needs to register eru-issue-bot. */
+export function issueBotPublicUrls(publicUrl: string): { home: string; webhook: string; setup: string } {
+  const home = publicUrl.replace(/\/+$/, "");
+  return {
+    home,
+    webhook: `${home}${ISSUE_BOT_WEBHOOK_PATH}`,
+    setup: `${home}${ISSUE_BOT_SETUP_PATH}`,
+  };
+}
+
+export function issueBotManifest(publicUrl: string): IssueBotManifest {
+  const urls = issueBotPublicUrls(publicUrl);
+  return {
+    name: ISSUE_BOT_APP_NAME,
+    url: urls.home,
+    hook_attributes: { url: urls.webhook, active: true },
+    redirect_url: urls.setup,
+    setup_url: `${urls.home}/config`,
+    description:
+      "Rewrites newly opened issues that mention @eru-issue-bot into an agent-ready brief. Issues read/write only.",
+    public: false,
+    default_events: ["issues"],
+    default_permissions: { issues: "write", metadata: "read" },
+  };
+}
+
+/** Personal account, or an org login. Undefined when the org slug is invalid. */
+export function issueBotManifestRegisterUrl(org = ""): string | undefined {
+  const trimmed = org.trim();
+  if (!trimmed) return `${GITHUB_WEB_BASE}/settings/apps/new`;
+  if (!GITHUB_LOGIN_RE.test(trimmed)) return undefined;
+  return `${GITHUB_WEB_BASE}/organizations/${encodeURIComponent(trimmed)}/settings/apps/new`;
+}
+
+export function githubAppInstallUrl(slug: string): string | undefined {
+  if (!GITHUB_APP_SLUG_RE.test(slug)) return undefined;
+  return `${GITHUB_WEB_BASE}/apps/${encodeURIComponent(slug)}/installations/new`;
+}
+
+export async function convertGithubAppManifest(
+  code: string,
+  fetchImpl: FetchLike = fetch,
+  apiBase: string = GITHUB_API_BASE,
+): Promise<ConvertedGithubApp | undefined> {
+  if (!MANIFEST_CODE_RE.test(code)) return undefined;
+  const url = `${apiBase.replace(/\/+$/, "")}/app-manifests/${encodeURIComponent(code)}/conversions`;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: forgeHeaders(""),
+      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    console.warn("issuebot: GitHub App manifest conversion request failed:", error instanceof Error ? error.message : error);
+    return undefined;
+  }
+  if (!response.ok) {
+    console.warn(`issuebot: GitHub App manifest conversion failed with status=${response.status}`);
+    return undefined;
+  }
+  let body: { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown };
+  try {
+    body = (await response.json()) as { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown };
+  } catch {
+    console.warn("issuebot: GitHub App manifest conversion returned a non-JSON body");
+    return undefined;
+  }
+  const appId = typeof body.id === "number" && Number.isInteger(body.id) && body.id > 0 ? String(body.id) : undefined;
+  const slug = typeof body.slug === "string" ? body.slug.trim() : "";
+  const privateKey = typeof body.pem === "string" ? body.pem.trim() : "";
+  const webhookSecret = typeof body.webhook_secret === "string" ? body.webhook_secret.trim() : "";
+  if (!appId || !privateKey.includes("PRIVATE KEY") || webhookSecret.length < MIN_WEBHOOK_SECRET) {
+    console.warn("issuebot: GitHub App manifest conversion returned a malformed payload");
+    return undefined;
+  }
+  return { appId, slug: GITHUB_APP_SLUG_RE.test(slug) ? slug : "", privateKey, webhookSecret };
+}
+
+export async function lookupGithubBotUserId(
+  slug: string,
+  fetchImpl: FetchLike = fetch,
+  apiBase: string = GITHUB_API_BASE,
+): Promise<number | undefined> {
+  if (!GITHUB_APP_SLUG_RE.test(slug)) return undefined;
+  const url = `${apiBase.replace(/\/+$/, "")}/users/${encodeURIComponent(`${slug}[bot]`)}`;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: forgeHeaders(""),
+      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    console.warn("issuebot: bot user lookup request failed:", error instanceof Error ? error.message : error);
+    return undefined;
+  }
+  if (!response.ok) {
+    console.warn(`issuebot: bot user lookup failed with status=${response.status}`);
+    return undefined;
+  }
+  let body: { id?: unknown };
+  try {
+    body = (await response.json()) as { id?: unknown };
+  } catch {
+    console.warn("issuebot: bot user lookup returned a non-JSON body");
+    return undefined;
+  }
+  if (typeof body.id !== "number" || !Number.isInteger(body.id) || body.id <= 0) {
+    console.warn("issuebot: bot user lookup returned a malformed id");
+    return undefined;
+  }
+  return body.id;
+}
 
 export type IssueRefineFn = (input: { title: string; body: string }) => Promise<string>;
 
