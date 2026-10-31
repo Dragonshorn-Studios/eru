@@ -751,10 +751,25 @@ function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
   ).run(WEBHOOK_LOG_KEEP);
 }
 
-export function listWebhookLogs(db: SqliteDb, limit = 80): WebhookLogEntry[] {
+export function listWebhookLogs(
+  db: SqliteDb,
+  limit = 80,
+  repo?: { forge: string; owner: string; name: string; origin?: string },
+): WebhookLogEntry[] {
+  const cap = Math.max(1, Math.min(limit, WEBHOOK_LOG_KEEP));
+  if (!repo) {
+    return db.prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log ORDER BY id DESC LIMIT ?`).all(cap) as WebhookLogEntry[];
+  }
   return db
-    .prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log ORDER BY id DESC LIMIT ?`)
-    .all(Math.max(1, Math.min(limit, WEBHOOK_LOG_KEEP))) as WebhookLogEntry[];
+    .prepare(
+      `SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log
+        WHERE lower(forge) = lower(?)
+          AND lower(owner) = lower(?)
+          AND lower(name) = lower(?)
+          AND lower(origin) = lower(?)
+        ORDER BY id DESC LIMIT ?`,
+    )
+    .all(repo.forge, repo.owner, repo.name, repo.origin ?? "", cap) as WebhookLogEntry[];
 }
 
 export function getWebhookLog(db: SqliteDb, id: number): WebhookLogEntry | undefined {

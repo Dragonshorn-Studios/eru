@@ -570,4 +570,18 @@ describe("webhook log", () => {
       detail: "later-5",
     });
   });
+
+  it("lists only the requested repository", () => {
+    const db = openDb(":memory:");
+    insertWebhookLog(db, { ...row("box"), owner: "acme", name: "box", forge: "github" });
+    insertWebhookLog(db, { ...row("lamp"), owner: "acme", name: "lamp", forge: "github" });
+    insertWebhookLog(db, { ...row("other-host"), owner: "acme", name: "box", forge: "gitlab", origin: "https://git.other" });
+    insertWebhookLog(db, { ...row("this-host"), owner: "ACME", name: "Box", forge: "gitlab", origin: "https://git.example" });
+    expect(listWebhookLogs(db, 80, { forge: "github", owner: "Acme", name: "box" }).map((entry) => entry.detail)).toEqual(["box"]);
+    expect(
+      listWebhookLogs(db, 80, { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.example" }).map(
+        (entry) => entry.detail,
+      ),
+    ).toEqual(["this-host"]);
+  });
 });

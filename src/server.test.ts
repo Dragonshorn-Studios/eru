@@ -1965,8 +1965,11 @@ describe("refine tab", () => {
     expect(await own.text()).toContain("Cart secret title");
   });
 
-  it("opens the requested webhook even when it is outside the recent list", async () => {
+  it("keeps Refine on the selected repo and lists every delivery on Log", async () => {
     const instance = app();
+    const boxId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "lamp" }, "2026-01-01T00:00:00Z");
+    setSetting(instance.db, "ui.selected_repo", String(boxId), "t");
     const oldest = insertWebhookLog(instance.db, {
       at: "2026-01-01T00:00:00Z",
       forge: "github",
@@ -1991,6 +1994,17 @@ describe("refine tab", () => {
         issueNumber: i + 2,
       });
     }
+    const other = insertWebhookLog(instance.db, {
+      at: "2026-01-03T00:00:00Z",
+      forge: "github",
+      outcome: "ignored",
+      reason: "mention",
+      detail: "LAMP-ONLY-DELIVERY",
+      title: "Other repo",
+      owner: "acme",
+      name: "lamp",
+      issueNumber: 9,
+    });
     const anon = await instance.app.request(`/refine/log/${oldest}`, { redirect: "manual" });
     expect(anon.status).toBe(302);
     expect(anon.headers.get("location")).toContain("/login");
@@ -1999,16 +2013,33 @@ describe("refine tab", () => {
     const cookie = cookieLine(loggedIn).split(";")[0];
     const missing = await instance.app.request("/refine/log/99999", { headers: { Cookie: cookie } });
     expect(missing.status).toBe(404);
+    const otherOnRefine = await instance.app.request(`/refine/log/${other}`, { headers: { Cookie: cookie } });
+    expect(otherOnRefine.status).toBe(404);
 
     const page = await instance.app.request(`/refine/log/${oldest}`, { headers: { Cookie: cookie } });
     expect(page.status).toBe(200);
     const html = await page.text();
     expect(html).toContain("OLDEST-DELIVERY-SENTENCE");
     expect(html).toContain(`href="/refine/log/${oldest}" aria-current="page"`);
+    expect(html).not.toContain("LAMP-ONLY-DELIVERY");
 
     const home = await instance.app.request("/refine", { headers: { Cookie: cookie } });
     const homeHtml = await home.text();
     expect(homeHtml).toContain("newer delivery 84");
     expect(homeHtml).not.toContain("OLDEST-DELIVERY-SENTENCE");
+    expect(homeHtml).not.toContain("LAMP-ONLY-DELIVERY");
+    expect(homeHtml).toContain('href="/log"');
+
+    const logAnon = await instance.app.request("/log", { redirect: "manual" });
+    expect(logAnon.status).toBe(302);
+    const log = await instance.app.request("/log", { headers: { Cookie: cookie } });
+    const logHtml = await log.text();
+    expect(log.status).toBe(200);
+    expect(logHtml).toContain("LAMP-ONLY-DELIVERY");
+    expect(logHtml).toContain("newer delivery 84");
+    expect(logHtml).toContain('aria-current="page">Log');
+    const logDetail = await instance.app.request(`/log/${other}`, { headers: { Cookie: cookie } });
+    expect(logDetail.status).toBe(200);
+    expect(await logDetail.text()).toContain("LAMP-ONLY-DELIVERY");
   });
 });

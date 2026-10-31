@@ -53,6 +53,7 @@ import {
   listAllPages,
   listConnectedRepos,
   getWebhookLog,
+  listIssueRefineJobs,
   listIssueRefineJobsForRepo,
   listWebhookLogs,
   listPages,
@@ -63,6 +64,7 @@ import {
   upsertPage,
   type MappedRepo,
   type SqliteDb,
+  type WebhookLogEntry,
 } from "./db.js";
 import {
   createGithubAppClient,
@@ -507,20 +509,27 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
   app.get("/ask", (c) => html(c, askPage(appModel(c))));
 
-  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db), undefined, listWebhookLogs(db))));
+  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db), undefined, logsForSelectedRepo(db))));
   app.get("/refine/log/:id", (c) => {
     const id = Number(c.req.param("id"));
-    const entry = Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
-    if (!entry) return c.text("not found", 404);
-    const listed = listWebhookLogs(db);
-    const logs = listed.some((row) => row.id === entry.id) ? listed : [entry, ...listed];
-    return html(c, refinePage(appModel(c), refineCatches(db), undefined, logs, id));
+    const repo = selectedRepo(db);
+    const entry = repo && Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
+    if (!entry || !repo || !logMatchesRepo(entry, repo)) return c.text("not found", 404);
+    return html(c, refinePage(appModel(c), refineCatches(db), undefined, withFocusedLog(logsForSelectedRepo(db), entry), id));
   });
   app.get("/refine/:id", (c) => {
     const jobs = refineCatches(db);
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id < 1 || !jobs.some((job) => job.id === id)) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), jobs, id, listWebhookLogs(db)));
+    return html(c, refinePage(appModel(c), jobs, id, logsForSelectedRepo(db)));
+  });
+
+  app.get("/log", (c) => html(c, refinePage(appModel(c), listIssueRefineJobs(db), undefined, listWebhookLogs(db), undefined, "all")));
+  app.get("/log/:id", (c) => {
+    const id = Number(c.req.param("id"));
+    const entry = Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
+    if (!entry) return c.text("not found", 404);
+    return html(c, refinePage(appModel(c), listIssueRefineJobs(db), undefined, withFocusedLog(listWebhookLogs(db), entry), id, "all"));
   });
 
   // Ask API + proxy: thread metadata stays on Eru (SQLite), OpenCode session
@@ -1202,6 +1211,30 @@ function refineCatches(db: SqliteDb) {
   const repo = selectedRepo(db);
   if (!repo) return [];
   return listIssueRefineJobsForRepo(db, repo);
+}
+
+function webhookRepoFilter(repo: MappedRepo) {
+  return { forge: repo.forge, owner: repo.owner, name: repo.name, origin: repo.origin ?? "" };
+}
+
+function logMatchesRepo(entry: WebhookLogEntry, repo: MappedRepo): boolean {
+  const filter = webhookRepoFilter(repo);
+  return (
+    entry.forge.toLowerCase() === filter.forge.toLowerCase() &&
+    entry.owner.toLowerCase() === filter.owner.toLowerCase() &&
+    entry.name.toLowerCase() === filter.name.toLowerCase() &&
+    entry.origin.toLowerCase() === filter.origin.toLowerCase()
+  );
+}
+
+function logsForSelectedRepo(db: SqliteDb): WebhookLogEntry[] {
+  const repo = selectedRepo(db);
+  if (!repo) return [];
+  return listWebhookLogs(db, 80, webhookRepoFilter(repo));
+}
+
+function withFocusedLog(logs: WebhookLogEntry[], entry: WebhookLogEntry): WebhookLogEntry[] {
+  return logs.some((row) => row.id === entry.id) ? logs : [entry, ...logs];
 }
 
 function selectedRepo(db: SqliteDb): MappedRepo | undefined {
