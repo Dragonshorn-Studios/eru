@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { normalizeForgeOrigin } from "./forges.js";
 import { parseBooleanEnv, parseInteger } from "./util.js";
 
 export const MIN_SESSION_SECRET = 16;
@@ -46,18 +47,27 @@ export interface Config {
   oauthClientSecret?: string;
   oauthAdminIds: number[];
   uiLocalLogin: boolean;
-  /** Present only when the eru-issue-bot GitHub App is fully configured. */
+  /** Present when webhook secret + bot user id + App ID/PEM all resolve (one App is enough). */
   issueBot?: IssueBotConfig;
+  gitlab?: ForgeInstanceConfig;
+  forgejo?: ForgeInstanceConfig;
 }
 
 export interface IssueBotConfig {
   appId: string;
   privateKey: string;
   webhookSecret: string;
-  /** GitHub user id of `eru-issue-bot[bot]` — loop guard compares `sender.id`. */
+  /** GitHub user id of the App's `*[bot]` account — loop guard compares `sender.id`. */
   botUserId: number;
   trustedBotIds: number[];
   hourlyCap: number;
+}
+
+/** Self-hosted GitLab or Forgejo instance. Token is a PAT / access token, not OAuth. */
+export interface ForgeInstanceConfig {
+  origin: string;
+  token: string;
+  webhookSecret?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -119,21 +129,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("eru: ERU_UI_USER is not a GitHub login");
   }
 
-  const oauthClientId = env.ERU_OAUTH_CLIENT_ID?.trim() || undefined;
-  const oauthClientSecret = env.ERU_OAUTH_CLIENT_SECRET?.trim() || undefined;
+  const oauthClientId =
+    env.ERU_GITHUB_APP_CLIENT_ID?.trim() || env.ERU_OAUTH_CLIENT_ID?.trim() || undefined;
+  const oauthClientSecret =
+    env.ERU_GITHUB_APP_CLIENT_SECRET?.trim() || env.ERU_OAUTH_CLIENT_SECRET?.trim() || undefined;
   if (Boolean(oauthClientId) !== Boolean(oauthClientSecret)) {
-    throw new Error("eru: set both ERU_OAUTH_CLIENT_ID and ERU_OAUTH_CLIENT_SECRET (or neither)");
+    throw new Error(
+      "eru: set both GitHub App client id and secret (ERU_GITHUB_APP_CLIENT_ID/SECRET, or ERU_OAUTH_* aliases)",
+    );
   }
-  const oauthAdminIds = parseIdList(env.ERU_OAUTH_ADMIN_IDS, "ERU_OAUTH_ADMIN_IDS");
-  const issueBot = loadIssueBotConfig(env);
+  const oauthAdminIds = parseIdList(
+    env.ERU_GITHUB_APP_ADMIN_IDS?.trim() || env.ERU_OAUTH_ADMIN_IDS,
+    env.ERU_GITHUB_APP_ADMIN_IDS?.trim() ? "ERU_GITHUB_APP_ADMIN_IDS" : "ERU_OAUTH_ADMIN_IDS",
+  );
+  const issueBot = loadIssueBotConfig(env, githubAppId, githubAppPrivateKey);
+  const gitlab = loadForgeInstance(env, "GITLAB");
+  const forgejo = loadForgeInstance(env, "FORGEJO");
   const publicUrl = env.ERU_PUBLIC_URL?.trim().replace(/\/+$/, "") ?? "";
   const uiLocalLogin = parseBooleanEnv(env.ERU_UI_LOCAL_LOGIN);
   if (oauthClientId) {
     if (oauthAdminIds.length === 0) {
-      throw new Error("eru: GitHub OAuth requires ERU_OAUTH_ADMIN_IDS (numeric GitHub user ids)");
+      throw new Error("eru: GitHub login requires ERU_GITHUB_APP_ADMIN_IDS (or ERU_OAUTH_ADMIN_IDS)");
     }
     if (!publicUrl) {
-      throw new Error("eru: GitHub OAuth requires ERU_PUBLIC_URL to build the exact callback URL");
+      throw new Error("eru: GitHub login requires ERU_PUBLIC_URL to build the exact callback URL");
     }
   }
 
@@ -163,6 +182,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oauthAdminIds,
     uiLocalLogin,
     issueBot,
+    gitlab,
+    forgejo,
   };
 }
 
@@ -209,37 +230,44 @@ function loadPem(env: NodeJS.ProcessEnv, inlineKey: string, fileKey: string): st
   return inline;
 }
 
-function loadIssueBotConfig(env: NodeJS.ProcessEnv): IssueBotConfig | undefined {
-  const appId = optionalDigits(env, "ERU_ISSUE_BOT_APP_ID");
-  const privateKey = loadPem(env, "ERU_ISSUE_BOT_PRIVATE_KEY", "ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
-  const webhookSecret = env.ERU_ISSUE_BOT_WEBHOOK_SECRET?.trim() || undefined;
-  const botUserRaw = env.ERU_ISSUE_BOT_USER_ID?.trim();
+function loadIssueBotConfig(
+  env: NodeJS.ProcessEnv,
+  githubAppId?: string,
+  githubAppPrivateKey?: string,
+): IssueBotConfig | undefined {
+  const dedicatedAppId = optionalDigits(env, "ERU_ISSUE_BOT_APP_ID");
+  const dedicatedKey = loadPem(env, "ERU_ISSUE_BOT_PRIVATE_KEY", "ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
+  const appId = dedicatedAppId ?? githubAppId;
+  const privateKey = dedicatedKey ?? githubAppPrivateKey;
+  const webhookSecret =
+    env.ERU_GITHUB_APP_WEBHOOK_SECRET?.trim() || env.ERU_ISSUE_BOT_WEBHOOK_SECRET?.trim() || undefined;
+  const botUserRaw = env.ERU_GITHUB_APP_BOT_USER_ID?.trim() || env.ERU_ISSUE_BOT_USER_ID?.trim();
   const hourlyRaw = env.ERU_ISSUE_BOT_HOURLY_CAP?.trim();
   const any =
-    Boolean(appId) ||
-    Boolean(privateKey) ||
+    Boolean(dedicatedAppId) ||
+    Boolean(dedicatedKey) ||
     Boolean(webhookSecret) ||
     Boolean(botUserRaw) ||
     Boolean(env.ERU_TRUSTED_BOT_IDS?.trim()) ||
     Boolean(hourlyRaw);
   if (!any) return undefined;
   if (!appId) {
-    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_APP_ID");
+    throw new Error("eru: issue bot needs ERU_GITHUB_APP_ID (or ERU_ISSUE_BOT_APP_ID)");
   }
   if (!privateKey) {
-    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_PRIVATE_KEY or ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
+    throw new Error("eru: issue bot needs the GitHub App private key (or ERU_ISSUE_BOT_PRIVATE_KEY/_FILE)");
   }
   if (!webhookSecret) {
-    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_WEBHOOK_SECRET");
+    throw new Error("eru: issue bot needs ERU_GITHUB_APP_WEBHOOK_SECRET (or ERU_ISSUE_BOT_WEBHOOK_SECRET)");
   }
   if (webhookSecret.length < MIN_WEBHOOK_SECRET) {
-    throw new Error("eru: ERU_ISSUE_BOT_WEBHOOK_SECRET is too short");
+    throw new Error("eru: webhook secret is too short");
   }
   if (!botUserRaw) {
-    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_USER_ID");
+    throw new Error("eru: issue bot needs ERU_GITHUB_APP_BOT_USER_ID (or ERU_ISSUE_BOT_USER_ID)");
   }
   if (!/^\d+$/.test(botUserRaw)) {
-    throw new Error("eru: ERU_ISSUE_BOT_USER_ID is not a number");
+    throw new Error("eru: ERU_GITHUB_APP_BOT_USER_ID (or ERU_ISSUE_BOT_USER_ID) is not a number");
   }
   const botUserId = Number(botUserRaw);
   const hourlyCap = parseInteger(env.ERU_ISSUE_BOT_HOURLY_CAP, DEFAULT_ISSUE_BOT_HOURLY_CAP);
@@ -254,6 +282,25 @@ function loadIssueBotConfig(env: NodeJS.ProcessEnv): IssueBotConfig | undefined 
     trustedBotIds: parseIdList(env.ERU_TRUSTED_BOT_IDS, "ERU_TRUSTED_BOT_IDS"),
     hourlyCap,
   };
+}
+
+function loadForgeInstance(env: NodeJS.ProcessEnv, kind: "GITLAB" | "FORGEJO"): ForgeInstanceConfig | undefined {
+  const label = kind.toLowerCase() as "gitlab" | "forgejo";
+  const urlRaw = env[`ERU_${kind}_URL`]?.trim();
+  const token = env[`ERU_${kind}_TOKEN`]?.trim();
+  const webhookSecret = env[`ERU_${kind}_WEBHOOK_SECRET`]?.trim();
+  if (!urlRaw && !token && !webhookSecret) return undefined;
+  if (!urlRaw || !token) {
+    throw new Error(`eru: ${label} needs ERU_${kind}_URL and ERU_${kind}_TOKEN (or neither)`);
+  }
+  const origin = normalizeForgeOrigin(urlRaw, label);
+  if (!origin) {
+    throw new Error(`eru: ERU_${kind}_URL is not an http(s) origin`);
+  }
+  if (webhookSecret && webhookSecret.length < MIN_WEBHOOK_SECRET) {
+    throw new Error(`eru: ERU_${kind}_WEBHOOK_SECRET is too short`);
+  }
+  return { origin, token, webhookSecret: webhookSecret || undefined };
 }
 
 function requiredOrDefault(env: NodeJS.ProcessEnv, key: string, fallback: string): string {

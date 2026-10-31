@@ -218,12 +218,57 @@ export interface ConfigAppView {
   appIdOverriddenEnv: boolean;
   installOverriddenEnv: boolean;
   keyOverriddenEnv: boolean;
+  clientId: string;
+  storedClientId: string;
+  clientIdSource: "env" | "stored" | "default";
+  clientIdOverriddenEnv: boolean;
+  hasStoredClientSecret: boolean;
+  clientSecretSource: "env" | "stored" | "default";
+  clientSecretOverriddenEnv: boolean;
+  adminIds: string;
+  storedAdminIds: string;
+  adminSource: "env" | "stored" | "default";
+  adminOverriddenEnv: boolean;
+  publicUrl: string;
+  storedPublicUrl: string;
+  publicUrlSource: "env" | "stored" | "default";
+  publicUrlOverriddenEnv: boolean;
+  hasStoredWebhook: boolean;
+  webhookSource: "env" | "stored" | "default";
+  webhookOverriddenEnv: boolean;
+  botUserId: string;
+  storedBotUserId: string;
+  botUserSource: "env" | "stored" | "default";
+  botUserOverriddenEnv: boolean;
+  loginReady: boolean;
+  issueBotReady: boolean;
+}
+
+export interface ConfigForgeView {
+  kind: "gitlab" | "forgejo";
+  label: string;
+  origin: string;
+  storedOrigin: string;
+  originSource: "env" | "stored" | "default";
+  originOverriddenEnv: boolean;
+  hasStoredToken: boolean;
+  tokenSource: "env" | "stored" | "default";
+  tokenOverriddenEnv: boolean;
+  hasStoredWebhook: boolean;
+  webhookSource: "env" | "stored" | "default";
+  webhookOverriddenEnv: boolean;
+  urlEnvKey: string;
+  tokenEnvKey: string;
+  webhookEnvKey: string;
+  webhookPath: string;
 }
 
 export interface ConfigView {
   bin: string;
   timeout: ConfigModelRow;
   app: ConfigAppView;
+  gitlab: ConfigForgeView;
+  forgejo: ConfigForgeView;
   user: ConfigModelRow;
   ask: ConfigModelRow;
   map: ConfigModelRow;
@@ -319,6 +364,8 @@ const CONFIG_SECTIONS = [
   { id: "models", label: "OpenCode models" },
   { id: "providers", label: "Provider keys" },
   { id: "github-app", label: "GitHub App" },
+  { id: "gitlab", label: "GitLab" },
+  { id: "forgejo", label: "Forgejo" },
   { id: "operator", label: "Operator" },
 ] as const;
 
@@ -386,7 +433,8 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
         })();
         </script>
         <h3 id="github-app">GitHub App</h3>
-        <p class="mapped">lists installable repos on Connect and mints tokens for refresh — <code>ERU_GITHUB_APP_ID</code> · <code>ERU_GITHUB_APP_PRIVATE_KEY</code>/<code>_FILE</code> · <code>ERU_GITHUB_APP_INSTALLATION_ID</code></p>
+        <p class="mapped">One App covers mapping, Sign in with GitHub, and <code>@eru-issue-bot</code>. Permissions: Contents read, Issues read/write, Metadata read. Subscribe to Issues. Callback URL must be exactly <code>${escapeHtml((view.app.publicUrl || "https://eru.example") + "/login/github/callback")}</code>.</p>
+        <p class="field-hint">${view.app.loginReady ? "GitHub login is on." : "GitHub login needs Client ID, Client secret, operator user ids, and public URL."} ${view.app.issueBotReady ? "Issue webhooks are on." : "Issue bot needs webhook secret + bot user id on top of App ID and private key."}</p>
         <form class="connect-form" method="post" action="/config/github-app" autocomplete="off">
           ${csrfInput(model.csrf)}
           <label class="field">
@@ -404,9 +452,41 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
             <textarea name="app_private_key" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN RSA PRIVATE KEY-----"></textarea>
             <span class="field-hint">write-only — stored encrypted; leave empty to keep the saved key · env: <code>ERU_GITHUB_APP_PRIVATE_KEY</code> or <code>ERU_GITHUB_APP_PRIVATE_KEY_FILE</code></span>
           </label>
+          <label class="field">
+            <span>Client ID <span class="field-hint">${appFieldHint(view.app.clientId, view.app.clientIdSource, "ERU_GITHUB_APP_CLIENT_ID", "Sign in with GitHub", view.app.clientIdOverriddenEnv)}</span></span>
+            <input type="text" name="app_client_id" maxlength="80" value="${escapeHtml(view.app.storedClientId)}" placeholder="${escapeHtml(view.app.clientId || "Iv1.…")}" autocomplete="off"/>
+            <span class="field-hint">from the App's GitHub settings — <code>ERU_GITHUB_APP_CLIENT_ID</code> or <code>ERU_OAUTH_CLIENT_ID</code></span>
+          </label>
+          <label class="field">
+            <span>Client secret <span class="field-hint">${secretHint(view.app.clientSecretSource, view.app.hasStoredClientSecret, view.app.clientSecretOverriddenEnv, "ERU_GITHUB_APP_CLIENT_SECRET")}</span></span>
+            <input type="password" name="app_client_secret" autocomplete="off" placeholder="${view.app.hasStoredClientSecret || view.app.clientSecretSource === "env" ? "leave empty to keep" : "github app client secret"}"/>
+            <span class="field-hint">write-only — <code>ERU_GITHUB_APP_CLIENT_SECRET</code> or <code>ERU_OAUTH_CLIENT_SECRET</code></span>
+          </label>
+          <label class="field">
+            <span>Operator GitHub user ids <span class="field-hint">${appFieldHint(view.app.adminIds, view.app.adminSource, "ERU_GITHUB_APP_ADMIN_IDS", "required for GitHub login", view.app.adminOverriddenEnv)}</span></span>
+            <input type="text" name="app_admin_ids" value="${escapeHtml(view.app.storedAdminIds)}" placeholder="${escapeHtml(view.app.adminIds || "12345678")}" autocomplete="off"/>
+            <span class="field-hint">comma-separated numeric ids — checked on every request · <code>ERU_GITHUB_APP_ADMIN_IDS</code> or <code>ERU_OAUTH_ADMIN_IDS</code></span>
+          </label>
+          <label class="field">
+            <span>Public URL <span class="field-hint">${appFieldHint(view.app.publicUrl, view.app.publicUrlSource, "ERU_PUBLIC_URL", "https://eru.example", view.app.publicUrlOverriddenEnv)}</span></span>
+            <input type="url" name="public_url" value="${escapeHtml(view.app.storedPublicUrl)}" placeholder="${escapeHtml(view.app.publicUrl || "https://eru.example")}" autocomplete="off"/>
+            <span class="field-hint">no trailing slash — used as the OAuth callback origin · <code>ERU_PUBLIC_URL</code></span>
+          </label>
+          <label class="field">
+            <span>Webhook secret <span class="field-hint">${secretHint(view.app.webhookSource, view.app.hasStoredWebhook, view.app.webhookOverriddenEnv, "ERU_GITHUB_APP_WEBHOOK_SECRET")}</span></span>
+            <input type="password" name="app_webhook_secret" autocomplete="off" minlength="16" placeholder="${view.app.hasStoredWebhook || view.app.webhookSource === "env" ? "leave empty to keep" : "16+ characters"}"/>
+            <span class="field-hint">same secret as the App webhook · URL <code>/webhooks/github</code> · <code>ERU_GITHUB_APP_WEBHOOK_SECRET</code></span>
+          </label>
+          <label class="field">
+            <span>Bot user id <span class="field-hint">${appFieldHint(view.app.botUserId, view.app.botUserSource, "ERU_GITHUB_APP_BOT_USER_ID", "loop guard", view.app.botUserOverriddenEnv)}</span></span>
+            <input type="text" name="app_bot_user_id" inputmode="numeric" maxlength="20" value="${escapeHtml(view.app.storedBotUserId)}" placeholder="${escapeHtml(view.app.botUserId || "from api.github.com/users/your-app[bot]")}"/>
+            <span class="field-hint">numeric id of <code>your-app[bot]</code> — stops the bot from refining its own edits</span>
+          </label>
           <button class="enter" type="submit">Save GitHub App</button>
         </form>
-        ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
+        ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall || view.app.storedClientId || view.app.hasStoredClientSecret || view.app.hasStoredWebhook ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
+        ${forgeInstanceSection(view.gitlab, model.csrf)}
+        ${forgeInstanceSection(view.forgejo, model.csrf)}
         <h3 id="operator">Operator</h3>
         <p class="mapped">the name (and GitHub avatar) shown in the top bar — <code>ERU_UI_USER</code></p>
         <form class="connect-form" method="post" action="/config/user" autocomplete="off">
@@ -458,21 +538,73 @@ function appKeyHint(app: ConfigAppView): string {
   return "no key saved";
 }
 
-function appRepoSection(appList: { repos: AppRepo[] } | { error: string } | null | undefined, csrf: string): string {
-  if (!appList) return "";
-  if ("error" in appList) {
-    return `<h3>From your GitHub App</h3>
-        <p class="field-hint">repo list unavailable — ${escapeHtml(appList.error)}</p>`;
+function secretHint(
+  source: "env" | "stored" | "default",
+  hasStored: boolean,
+  overriddenEnv: boolean,
+  envKey: string,
+): string {
+  if (source === "env") return `in effect from <code>${escapeHtml(envKey)}</code>`;
+  if (hasStored) {
+    return overriddenEnv ? `saved on this page · overrides <code>${escapeHtml(envKey)}</code>` : "saved on this page";
   }
-  if (appList.repos.length === 0) {
-    return `<h3>From your GitHub App</h3>
-        <p class="field-hint">the installation can see no repositories — grant it access on GitHub first</p>`;
+  return "not set";
+}
+
+function forgeInstanceSection(view: ConfigForgeView, csrf: string): string {
+  const stored = view.storedOrigin || view.hasStoredToken || view.hasStoredWebhook;
+  return `<h3 id="${view.kind}">${escapeHtml(view.label)}</h3>
+        <p class="mapped">self-hosted ${escapeHtml(view.label)} — list and map repos with an API token; optional webhook secret turns on <code>@eru-issue-bot</code> at <code>${escapeHtml(view.webhookPath)}</code>.</p>
+        <form class="connect-form" method="post" action="/config/${view.kind}" autocomplete="off">
+          ${csrfInput(csrf)}
+          <label class="field">
+            <span>Base URL <span class="field-hint">${appFieldHint(view.origin, view.originSource, view.urlEnvKey, "https://git.example", view.originOverriddenEnv)}</span></span>
+            <input type="url" name="base_url" value="${escapeHtml(view.storedOrigin)}" placeholder="${escapeHtml(view.origin || "https://git.example")}" autocomplete="off"/>
+            <span class="field-hint"><code>${escapeHtml(view.urlEnvKey)}</code> in .env is used when nothing is saved here</span>
+          </label>
+          <label class="field">
+            <span>API token <span class="field-hint">${secretHint(view.tokenSource, view.hasStoredToken, view.tokenOverriddenEnv, view.tokenEnvKey)}</span></span>
+            <input type="password" name="token" autocomplete="off" placeholder="${view.hasStoredToken || view.tokenSource === "env" ? "leave empty to keep" : "personal access token"}"/>
+            <span class="field-hint">write-only, stored encrypted — repo read + issues. ${view.kind === "gitlab" ? "scope: read_api, write issues" : "repo + issues"}</span>
+          </label>
+          <label class="field">
+            <span>Webhook secret <span class="field-hint">${secretHint(view.webhookSource, view.hasStoredWebhook, view.webhookOverriddenEnv, view.webhookEnvKey)}</span></span>
+            <input type="password" name="webhook_secret" autocomplete="off" minlength="16" placeholder="${view.hasStoredWebhook || view.webhookSource === "env" ? "leave empty to keep" : "optional, 16+"}"/>
+            <span class="field-hint">${view.kind === "gitlab" ? "X-Gitlab-Token" : "X-Hub-Signature-256 / X-Gitea-Signature"} on <code>${escapeHtml(view.webhookPath)}</code></span>
+          </label>
+          <button class="enter" type="submit">Save ${escapeHtml(view.label)}</button>
+        </form>
+        ${stored ? `<form class="config-refresh" method="post" action="/config/${view.kind}/remove">${csrfInput(csrf)}<button class="link-button" type="submit">Remove saved ${escapeHtml(view.label)} config</button></form>` : ""}`;
+}
+
+export interface ConnectForgeLists {
+  github?: { repos: AppRepo[] } | { error: string } | null;
+  gitlab?: { origin: string; repos: AppRepo[] } | { error: string } | null;
+  forgejo?: { origin: string; repos: AppRepo[] } | { error: string } | null;
+}
+
+function forgeRepoSection(
+  title: string,
+  action: string,
+  forge: string,
+  list: { repos: AppRepo[] } | { error: string } | null | undefined,
+  csrf: string,
+): string {
+  if (!list) return "";
+  if ("error" in list) {
+    return `<h3>${escapeHtml(title)}</h3>
+        <p class="field-hint">repo list unavailable — ${escapeHtml(list.error)}</p>`;
   }
-  const items = appList.repos
+  if (list.repos.length === 0) {
+    return `<h3>${escapeHtml(title)}</h3>
+        <p class="field-hint">no repositories visible with this credential</p>`;
+  }
+  const items = list.repos
     .map(
       (repo) => `<li>
-          <form method="post" action="/connect/app">
+          <form method="post" action="${escapeHtml(action)}">
             ${csrfInput(csrf)}
+            <input type="hidden" name="forge" value="${escapeHtml(forge)}"/>
             <input type="hidden" name="owner" value="${escapeHtml(repo.owner)}"/>
             <input type="hidden" name="name" value="${escapeHtml(repo.name)}"/>
             <button class="repo-pick" type="submit"><span class="mono">${escapeHtml(repo.owner)}/${escapeHtml(repo.name)}</span>${repo.privateRepo ? ' <span class="tag">private</span>' : ""}</button>
@@ -480,18 +612,23 @@ function appRepoSection(appList: { repos: AppRepo[] } | { error: string } | null
         </li>`,
     )
     .join("");
-  return `<h3>From your GitHub App</h3>
-      <ul class="repo-list">${items}</ul>
-      <p class="or-line">— or add manually —</p>`;
+  return `<h3>${escapeHtml(title)}</h3>
+      <ul class="repo-list">${items}</ul>`;
 }
 
 export function connectPage(
   model: ChromeModel,
   error = "",
-  values: { owner?: string; name?: string } = {},
-  appList?: { repos: AppRepo[] } | { error: string } | null,
+  values: { forge?: string; owner?: string; name?: string } = {},
+  lists: ConnectForgeLists = {},
 ): string {
   const flash = error ? `<p class="flash" role="alert">${escapeHtml(error)}</p>` : "";
+  const github = forgeRepoSection("From your GitHub App", "/connect/app", "github", lists.github, model.csrf);
+  const gitlab = forgeRepoSection("From GitLab", "/connect/instance", "gitlab", lists.gitlab, model.csrf);
+  const forgejo = forgeRepoSection("From Forgejo", "/connect/instance", "forgejo", lists.forgejo, model.csrf);
+  const picked = [github, gitlab, forgejo].filter(Boolean).join("");
+  const orLine = picked ? `<p class="or-line">— or add manually —</p>` : "";
+  const forge = values.forge ?? "github";
   return layout(
     "Eru — connect a repo",
     `<body>
@@ -501,22 +638,32 @@ export function connectPage(
     <main id="main" class="connect">
       <section class="card connect-card">
         <h2>Connect a repo</h2>
-        <p class="page-lead">Point Eru at one GitHub repository. A least-privilege token is stored encrypted; it never reaches logs.</p>
+        <p class="page-lead">Point Eru at a GitHub, GitLab, or Forgejo repository. Tokens stay encrypted and never reach logs.</p>
         ${flash}
-        ${appRepoSection(appList, model.csrf)}
+        ${picked}
+        ${orLine}
         <form class="connect-form" method="post" action="/connect" autocomplete="off">
           ${csrfInput(model.csrf)}
           <label class="field">
+            <span>Forge</span>
+            <select name="forge">
+              <option value="github"${forge === "github" ? " selected" : ""}>GitHub</option>
+              <option value="gitlab"${forge === "gitlab" ? " selected" : ""}>GitLab</option>
+              <option value="forgejo"${forge === "forgejo" ? " selected" : ""}>Forgejo</option>
+            </select>
+          </label>
+          <label class="field">
             <span>Owner</span>
-            <input type="text" name="owner" required maxlength="39" value="${escapeHtml(values.owner ?? "")}" placeholder="dragonshorn-studios"/>
+            <input type="text" name="owner" required maxlength="200" value="${escapeHtml(values.owner ?? "")}" placeholder="dragonshorn-studios"/>
+            <span class="field-hint">GitLab nested groups use slashes, e.g. <code>group/sub</code></span>
           </label>
           <label class="field">
             <span>Repo</span>
             <input type="text" name="name" required maxlength="100" value="${escapeHtml(values.name ?? "")}" placeholder="eru"/>
           </label>
           <label class="field">
-            <span>Token <span class="field-hint">optional for public repos</span></span>
-            <input type="password" name="token" autocomplete="off" placeholder="github_pat_..."/>
+            <span>Token <span class="field-hint">optional when the forge is configured on Config, or for public GitHub</span></span>
+            <input type="password" name="token" autocomplete="off" placeholder="pat / access token"/>
           </label>
           <button class="enter" type="submit">Connect</button>
         </form>

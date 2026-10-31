@@ -13,6 +13,7 @@ import {
   getIssueRefineJob,
   getPage,
   getPrimaryRepo,
+  getRepo,
   getSetting,
   listPages,
   migrate,
@@ -49,7 +50,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(7);
+    expect(migrations.n).toBe(8);
     again.close();
   });
 
@@ -94,7 +95,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(7);
+    expect(migrations.n).toBe(8);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -103,7 +104,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(7);
+    expect(after.n).toBe(8);
     legacy.close();
   });
 });
@@ -209,8 +210,18 @@ describe("repo auth source and page mapped_ref", () => {
     const appId = upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-02T00:00:00Z", "app");
     expect(getPrimaryRepo(db)!.authSource).toBe("app");
 
-    // Reconnecting the same repo manually flips it back.
-    upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-03T00:00:00Z");
+    const instanceId = upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box" },
+      "2026-01-04T00:00:00Z",
+      "instance",
+    );
+    expect(getRepo(db, instanceId)!.authSource).toBe("instance");
+    expect(getRepo(db, instanceId)!.forge).toBe("gitlab");
+
+    // Reconnecting the same GitHub repo manually flips it back.
+    upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-05T00:00:00Z");
+    expect(getRepo(db, appId)!.authSource).toBe("manual");
     expect(getPrimaryRepo(db)!.authSource).toBe("manual");
     expect(manual).not.toBe(appId);
     db.close();
@@ -258,5 +269,105 @@ describe("issue refine jobs", () => {
     expect(getIssueRefineJob(db, first!)!.attempts).toBe(1);
     expect(claimDueIssueRefineJob(db, at)?.attempts).toBe(2);
     db.close();
+  });
+
+  it("allows the same issue number on different forges", () => {
+    const db = openDb(":memory:");
+    const at = "2026-01-01T00:00:00Z";
+    const github = enqueueIssueRefineJob(db, { ...job, forge: "github" }, at);
+    const gitlab = enqueueIssueRefineJob(db, { ...job, forge: "gitlab" }, at);
+    expect(github).toBeDefined();
+    expect(gitlab).toBeDefined();
+    expect(github).not.toBe(gitlab);
+    expect(getIssueRefineJob(db, gitlab!)!.forge).toBe("gitlab");
+    db.close();
+  });
+
+  it("adds forge to a pre-0008 issue_refine_jobs table", () => {
+    const legacy = new Database(":memory:");
+    legacy.pragma("foreign_keys = ON");
+    legacy.exec(`
+      CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE repos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        forge TEXT NOT NULL DEFAULT 'github',
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        auth_source TEXT NOT NULL DEFAULT 'manual',
+        default_branch TEXT,
+        last_mapped_ref TEXT,
+        last_mapped_at TEXT,
+        connected_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (forge, owner, name)
+      );
+      CREATE TABLE pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        mapped_ref TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE (repo_id, slug)
+      );
+      CREATE TABLE forge_credentials (
+        repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+        token_enc TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE ask_threads (
+        id TEXT PRIMARY KEY,
+        repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+        session_id TEXT,
+        title TEXT NOT NULL DEFAULT '',
+        mapped_ref TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE issue_refine_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        installation_id TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        run_after TEXT NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (owner, name, issue_number)
+      );
+      INSERT INTO issue_refine_jobs (
+        installation_id, owner, name, issue_number, title, body, status, attempts,
+        run_after, created_at, updated_at
+      ) VALUES ('555', 'acme', 'box', 12, 't', 'b', 'pending', 0, 't', 't', 't');
+    `);
+    for (const name of [
+      "0001_init.sql",
+      "0002_forge_connect.sql",
+      "0003_settings.sql",
+      "0004_auth_source.sql",
+      "0005_default_branch.sql",
+      "0006_ask_threads.sql",
+      "0007_issue_bot.sql",
+    ]) {
+      legacy.prepare(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(name, "t");
+    }
+    migrate(legacy);
+    const columns = legacy.prepare(`PRAGMA table_info(issue_refine_jobs)`).all() as { name: string }[];
+    expect(columns.some((col) => col.name === "forge")).toBe(true);
+    const row = legacy.prepare(`SELECT forge, owner FROM issue_refine_jobs`).get() as { forge: string; owner: string };
+    expect(row).toEqual({ forge: "github", owner: "acme" });
+    legacy.close();
   });
 });

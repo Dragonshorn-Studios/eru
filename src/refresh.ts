@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { opencodeModel, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
+import { opencodeModel, opencodeRunArgs, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 import { markWorkspaceRoot } from "./util.js";
 
@@ -47,13 +47,12 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // The tarball has no .git; OpenCode would otherwise root its project at
       // the nearest .git ancestor of the temp dir and map that repo instead.
       await markWorkspaceRoot(workdir);
-      const args = ["run", "--format", "default"];
       const runModel = model ?? opencodeModel(opts);
-      if (runModel) args.push("-m", runModel);
       // `--` guards the prompt: opencode args are yargs-parsed and array
       // options can otherwise swallow a trailing positional (maomao learned
-      // this with --file).
-      args.push("--", refreshPrompt(repoLabel, ref));
+      // this with --file). `--standalone` keeps OC2 off the shared background
+      // service so map runs cannot leak into another workspace.
+      const args = opencodeRunArgs(refreshPrompt(repoLabel, ref), runModel);
       const timeoutMs = opencodeTimeout(opts);
       console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${timeoutMs}ms)`);
       const child = await runChild(opts.bin, args, {

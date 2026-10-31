@@ -913,7 +913,7 @@ a.enter {
   padding: 2rem;
   flex: 1;
 }
-.connect-card { width: min(480px, 100%); }
+.connect-card { width: min(640px, 100%); }
 .connect-form { display: flex; flex-direction: column; gap: 1rem; margin-top: 0.6rem; }
 .field { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: color-mix(in srgb, var(--ink) 65%, white); }
 .field-hint { color: color-mix(in srgb, var(--ink) 40%, white); font-size: 0.78rem; }

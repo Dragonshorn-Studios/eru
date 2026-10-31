@@ -494,11 +494,15 @@ if [[ "$REUSE_ENV" != "1" ]]; then
   elif confirm "Configure a GitHub App? (enables repo pick-list on /connect)" N; then
     cat <<'EOF'
 
-Create the GitHub App first if you have not (least privilege — Eru only reads):
+Create the GitHub App first if you have not (one App covers mapping, login, issues):
   Metadata: Read
   Contents: Read
+  Issues: Read & write
+  Subscribe: Issues
+  Callback: $ERU_PUBLIC_URL/login/github/callback
 This installer does not create the App. The PEM is copied to github-app.pem and
 bind-mounted read-only; it is never written to .env or baked into the image.
+Client id/secret, webhook secret, and GitLab/Forgejo tokens can be saved on /config.
 
 EOF
     prompt_digits ERU_GITHUB_APP_ID 1 "GitHub App ID (numeric)"

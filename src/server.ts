@@ -28,12 +28,15 @@ import {
   exchangeOAuthCode,
   fetchGithubUser,
   oauthAuthorizeUrl,
-  oauthEnabled,
 } from "./oauth.js";
 import {
+  DEFAULT_ISSUE_BOT_HOURLY_CAP,
   DEFAULT_OPENCODE_TIMEOUT_MS,
+  MIN_WEBHOOK_SECRET,
   parseOpenCodeTimeout,
   type Config,
+  type ForgeInstanceConfig,
+  type IssueBotConfig,
 } from "./config.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -69,11 +72,22 @@ import {
   type FetchLike,
   type GithubAppClient,
   type GithubAppCredentials,
-  type TarballError,
   type TarballResult,
   type VerifyError,
 } from "./forge.js";
-import { createModelDiscovery, isValidModelName, type ModelDiscovery } from "./opencode.js";
+import {
+  FORGE_FORGEJO,
+  FORGE_GITLAB,
+  fetchForgejoArchive,
+  fetchGitlabArchive,
+  isForgeKind,
+  listForgejoRepos,
+  listGitlabRepos,
+  normalizeForgeOrigin,
+  verifyForgejoRepo,
+  verifyGitlabRepo,
+} from "./forges.js";
+import { createModelDiscovery, isValidModelName, unwrapOcData, type ModelDiscovery } from "./opencode.js";
 import { createOpenCodeServer, type OpenCodeServe } from "./askserver.js";
 import { askProxy } from "./askproxy.js";
 import {
@@ -95,6 +109,8 @@ import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
+  FORGEJO_WEBHOOK_PATH,
+  GITLAB_WEBHOOK_PATH,
   ISSUE_BOT_MAX_BODY_BYTES,
   ISSUE_BOT_WEBHOOK_PATH,
   createIssueBot,
@@ -112,7 +128,9 @@ import {
   loginPage,
   themeCss,
   type ChromeModel,
+  type ConfigForgeView,
   type ConfigView,
+  type ConnectForgeLists,
 } from "./ui.js";
 
 export interface AppOptions {
@@ -155,26 +173,61 @@ export function createApp(opts: AppOptions): Hono<Env> {
   void modelDiscovery.refresh();
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
   const mapping = opts.mappingTracker ?? createMappingTracker();
-  const issueBot: IssueBot | undefined =
-    opts.issueBot ??
-    (config.issueBot
-      ? createIssueBot({
-          db,
-          config: config.issueBot,
-          fetchImpl,
-          openCode: {
-            bin: config.openCodeBin,
-            timeoutMs: () => resolveTimeout(config, db).value,
-            model: () => resolveModel(config, db, "ask").value,
-          },
-          now,
-        })
-      : undefined);
-  if (issueBot && opts.issueBotAutoStart !== false) issueBot.start();
+  const injectedBot = opts.issueBot;
+  let liveBot: IssueBot | undefined;
+  let liveBotSig = "";
+  function issueBotNow(): IssueBot | undefined {
+    if (injectedBot) return injectedBot;
+    const github = resolveGithubIssueBot(config, db);
+    const gitlab = resolveGitlab(config, db);
+    const forgejo = resolveForgejo(config, db);
+    const gitlabBot = gitlab?.webhookSecret ? gitlab : undefined;
+    const forgejoBot = forgejo?.webhookSecret ? forgejo : undefined;
+    if (!github && !gitlabBot && !forgejoBot) {
+      if (liveBot) {
+        liveBot.stop();
+        liveBot = undefined;
+        liveBotSig = "";
+      }
+      return undefined;
+    }
+    const sig = [
+      github ? `${github.appId}\n${github.webhookSecret}\n${github.botUserId}\n${github.privateKey}` : "",
+      gitlabBot ? `${gitlabBot.origin}\n${gitlabBot.token}\n${gitlabBot.webhookSecret}` : "",
+      forgejoBot ? `${forgejoBot.origin}\n${forgejoBot.token}\n${forgejoBot.webhookSecret}` : "",
+    ].join("\0");
+    if (sig !== liveBotSig) {
+      liveBot?.stop();
+      liveBot = createIssueBot({
+        db,
+        config: github,
+        gitlab: gitlabBot,
+        forgejo: forgejoBot,
+        fetchImpl,
+        openCode: {
+          bin: config.openCodeBin,
+          timeoutMs: () => resolveTimeout(config, db).value,
+          model: () => resolveModel(config, db, "ask").value,
+        },
+        now,
+      });
+      if (opts.issueBotAutoStart !== false) liveBot.start();
+      liveBotSig = sig;
+    }
+    return liveBot;
+  }
+  if (opts.issueBotAutoStart !== false) issueBotNow();
 
-  const oauthOn = oauthEnabled(config);
-  const passwordLoginOn = !oauthOn || config.uiLocalLogin;
-  const loginOpts = { showGithub: oauthOn, showPassword: passwordLoginOn };
+  function oauthCreds(): ResolvedOAuth | null {
+    return resolveOAuth(config, db);
+  }
+  function oauthOn(): boolean {
+    return oauthCreds() !== null;
+  }
+  function loginOpts() {
+    const on = oauthOn();
+    return { showGithub: on, showPassword: !on || config.uiLocalLogin };
+  }
   const oauthStates = new OAuthStateStore();
   const OAUTH_STATE_TTL_MS = 10 * 60_000;
 
@@ -205,10 +258,13 @@ export function createApp(opts: AppOptions): Hono<Env> {
     let session = verifySession(config.sessionSecret, getCookie(c, SESSION_COOKIE), now());
     // The GitHub allowlist is re-checked on every request: removing an id from
     // ERU_OAUTH_ADMIN_IDS takes effect without waiting for session expiry.
-    if (session?.github && !config.oauthAdminIds.includes(session.github.id)) {
-      console.warn(`auth: session denied (not allowlisted) id=${session.github.id} login=${session.github.login}`);
-      deleteCookie(c, SESSION_COOKIE, { path: "/" });
-      session = undefined;
+    if (session?.github) {
+      const oauth = oauthCreds();
+      if (!oauth || !oauth.adminIds.includes(session.github.id)) {
+        console.warn(`auth: session denied (not allowlisted) id=${session.github.id} login=${session.github.login}`);
+        deleteCookie(c, SESSION_COOKIE, { path: "/" });
+        session = undefined;
+      }
     }
     if (session) c.set("session", session);
 
@@ -253,8 +309,35 @@ export function createApp(opts: AppOptions): Hono<Env> {
       onError: (c) => c.text("payload too large", 413),
     }),
     (c) => {
-      if (!issueBot) return c.text("not found", 404);
-      return issueBot.handleWebhook(c);
+      const bot = issueBotNow();
+      if (!bot) return c.text("not found", 404);
+      return bot.handleWebhook(c);
+    },
+  );
+
+  app.post(
+    GITLAB_WEBHOOK_PATH,
+    bodyLimit({
+      maxSize: ISSUE_BOT_MAX_BODY_BYTES,
+      onError: (c) => c.text("payload too large", 413),
+    }),
+    (c) => {
+      const bot = issueBotNow();
+      if (!bot) return c.text("not found", 404);
+      return bot.handleGitlabWebhook(c);
+    },
+  );
+
+  app.post(
+    FORGEJO_WEBHOOK_PATH,
+    bodyLimit({
+      maxSize: ISSUE_BOT_MAX_BODY_BYTES,
+      onError: (c) => c.text("payload too large", 413),
+    }),
+    (c) => {
+      const bot = issueBotNow();
+      if (!bot) return c.text("not found", 404);
+      return bot.handleForgejoWebhook(c);
     },
   );
 
@@ -306,15 +389,19 @@ export function createApp(opts: AppOptions): Hono<Env> {
 
   app.get("/login", (c) => {
     if (c.get("session")) return c.redirect("/");
-    return html(c, loginPage({ ...loginOpts, next: c.req.query("next") }));
+    return html(c, loginPage({ ...loginOpts(), next: c.req.query("next") }));
   });
 
   app.post("/login", async (c) => {
     const body = await c.req.parseBody();
     const password = typeof body.password === "string" ? body.password : "";
-    if (!passwordLoginOn || !passwordsMatch(password, config.uiPassword)) {
+    if (oauthOn() && !config.uiLocalLogin) {
       console.log("login refused");
-      return html(c, loginPage({ ...loginOpts, error: "Refused.", next: c.req.query("next") }), 401);
+      return html(c, loginPage({ ...loginOpts(), error: "Refused.", next: c.req.query("next") }), 401);
+    }
+    if (!passwordsMatch(password, config.uiPassword)) {
+      console.log("login refused");
+      return html(c, loginPage({ ...loginOpts(), error: "Refused.", next: c.req.query("next") }), 401);
     }
     const issued = issueSession(config.sessionSecret, now());
     setCookie(c, SESSION_COOKIE, issued.token, {
@@ -328,43 +415,49 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
 
   app.get("/login/github", (c) => {
-    if (!oauthOn) return c.redirect("/login");
+    const oauth = oauthCreds();
+    if (!oauth) return c.redirect("/login");
     if (!limiter.allow(`oauth-start:${requestClientKey(c)}`)) {
       console.warn(`auth: oauth start rate limited ip=${requestClientKey(c)}`);
       return c.text("too many requests", 429);
     }
     const state = oauthStates.issue(now(), OAUTH_STATE_TTL_MS, safeNextPath(c.req.query("next")));
-    return c.redirect(oauthAuthorizeUrl(config, state));
+    return c.redirect(oauthAuthorizeUrl({ ...config, ...oauthAsConfig(oauth) }, state));
   });
 
   app.get("/login/github/callback", async (c) => {
-    if (!oauthOn) return c.redirect("/login");
+    const oauth = oauthCreds();
+    if (!oauth) return c.redirect("/login");
     const ip = requestClientKey(c);
     const url = new URL(c.req.url);
     const next = oauthStates.consume(url.searchParams.get("state") ?? undefined, now());
     if (next === undefined) {
       limiter.allow(`oauth-fail:${ip}`);
       console.warn(`auth: oauth state rejected (missing, expired, or replayed) ip=${ip}`);
-      return html(c, loginPage({ ...loginOpts, error: "Sign-in link expired — try again." }), 403);
+      return html(c, loginPage({ ...loginOpts(), error: "Sign-in link expired — try again." }), 403);
     }
     if (url.searchParams.get("error")) {
       // User-initiated cancel or provider refusal: no code exists, so this is
       // not a protocol failure and does not count toward the failure budget.
       console.log(`auth: oauth sign-in not completed at provider (${url.searchParams.get("error")}) ip=${ip}`);
-      return html(c, loginPage({ ...loginOpts, error: "Sign-in was cancelled." }), 400);
+      return html(c, loginPage({ ...loginOpts(), error: "Sign-in was cancelled." }), 400);
     }
     const oauthFetch = opts.oauthFetch ?? fetch;
-    const accessToken = await exchangeOAuthCode(config, url.searchParams.get("code") ?? "", oauthFetch);
+    const accessToken = await exchangeOAuthCode(
+      { ...config, ...oauthAsConfig(oauth) },
+      url.searchParams.get("code") ?? "",
+      oauthFetch,
+    );
     const user = accessToken ? await fetchGithubUser(accessToken, oauthFetch) : undefined;
     if (!user) {
       limiter.allow(`oauth-fail:${ip}`);
       console.warn("auth: oauth token exchange or user lookup failed");
-      return html(c, loginPage({ ...loginOpts, error: "GitHub sign-in failed — try again." }), 502);
+      return html(c, loginPage({ ...loginOpts(), error: "GitHub sign-in failed — try again." }), 502);
     }
-    if (!config.oauthAdminIds.includes(user.id)) {
+    if (!oauth.adminIds.includes(user.id)) {
       limiter.allow(`oauth-fail:${ip}`);
       console.warn(`auth: oauth login denied id=${user.id} login=${user.login} ip=${ip}`);
-      return html(c, loginPage({ ...loginOpts, error: "This GitHub account is not an operator here." }), 403);
+      return html(c, loginPage({ ...loginOpts(), error: "This GitHub account is not an operator here." }), 403);
     }
     const issued = issueOAuthSession(config.sessionSecret, user, now());
     setCookie(c, SESSION_COOKIE, issued.token, {
@@ -442,9 +535,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const upstream = ocServe.url();
     if (!upstream) return;
     try {
-      const res = await ocFetch(ocServe, `/session/${t.sessionId}`, { directory: threadWorkspace(askWorkdir, t.id) }, fetchImpl);
+      const res = await ocFetch(ocServe, `/api/session/${t.sessionId}`, { directory: threadWorkspace(askWorkdir, t.id) }, fetchImpl);
       if (!res.ok) return;
-      const session = (await res.json()) as { title?: string };
+      const session = unwrapOcData<{ title?: string }>(await res.json());
       if (session.title) renameThread(db, t.id, session.title, new Date(now()).toISOString());
     } catch {
       /* title sync is best-effort */
@@ -475,13 +568,13 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const thread = insertThread(db, repo.id, repo.lastMappedRef, at);
     try {
       const dir = await materializeWorkspace(askWorkdir, thread.id, pages);
-      const res = await ocFetch(ocServe, "/session", {
+      const res = await ocFetch(ocServe, "/api/session", {
         method: "POST",
         directory: dir,
-        body: {},
+        body: { location: { directory: dir } },
       }, fetchImpl);
       if (res.ok) {
-        const session = (await res.json()) as { id?: string };
+        const session = unwrapOcData<{ id?: string }>(await res.json());
         if (session.id) setThreadSession(db, thread.id, session.id, at);
       } else {
         console.log(`ask: session create refused upstream — ${res.status}`);
@@ -526,7 +619,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     if (!repo || !thread || thread.repoId !== repo.id) return c.json({ error: "no such thread" }, 404);
     const upstream = ocServe.url();
     if (upstream && thread.sessionId) {
-      await ocFetch(ocServe, `/session/${thread.sessionId}`, {
+      await ocFetch(ocServe, `/api/session/${thread.sessionId}`, {
         method: "DELETE",
         directory: threadWorkspace(askWorkdir, thread.id),
       }, fetchImpl).catch(() => {});
@@ -548,32 +641,55 @@ export function createApp(opts: AppOptions): Hono<Env> {
     }),
   );
 
-  app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db, config), "", {}, await appRepoList())));
+  app.get("/connect", async (c) => html(c, connectPage(chromeModel(c, db, config), "", {}, await forgeLists())));
 
-  async function appRepoList(): Promise<{ repos: AppRepo[] } | { error: string } | null> {
+  async function forgeLists(): Promise<ConnectForgeLists> {
+    const lists: ConnectForgeLists = {};
     const client = githubApp();
-    if (!client) return null;
-    const repos = await client.listRepos();
-    if (!repos.ok) {
-      console.log(`github app repo list refused: ${repos.error}`);
-      return { error: APP_ERRORS[repos.error] };
+    if (client) {
+      const repos = await client.listRepos();
+      if (!repos.ok) {
+        console.log(`github app repo list refused: ${repos.error}`);
+        lists.github = { error: APP_ERRORS[repos.error] };
+      } else {
+        lists.github = { repos: repos.value };
+      }
     }
-    return { repos: repos.value };
+    const gitlab = resolveGitlab(config, db);
+    if (gitlab) {
+      const repos = await listGitlabRepos(gitlab.origin, gitlab.token, fetchImpl);
+      lists.gitlab = repos.ok
+        ? { origin: gitlab.origin, repos: repos.repos }
+        : { origin: gitlab.origin, error: repos.error === "auth" ? "The GitLab token cannot list repositories." : "Could not reach GitLab." };
+    }
+    const forgejo = resolveForgejo(config, db);
+    if (forgejo) {
+      const repos = await listForgejoRepos(forgejo.origin, forgejo.token, fetchImpl);
+      lists.forgejo = repos.ok
+        ? { origin: forgejo.origin, repos: repos.repos }
+        : { origin: forgejo.origin, error: repos.error === "auth" ? "The Forgejo token cannot list repositories." : "Could not reach Forgejo." };
+    }
+    return lists;
   }
 
   app.post("/connect", async (c) => {
     const body = await c.req.parseBody();
+    const forgeRaw = typeof body.forge === "string" ? body.forge.trim() : "github";
     const owner = typeof body.owner === "string" ? body.owner.trim() : "";
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const token = typeof body.token === "string" ? body.token.trim() : "";
-    const result = await verifyGithubRepo(owner, name, token, fetchImpl);
-    if (!result.ok) {
-      console.log(`connect refused: ${result.error}`);
-      return html(c, connectPage(chromeModel(c, db, config), CONNECT_ERRORS[result.error], { owner, name }), connectStatus(result.error));
+    const errorPage = async (error: string, status: ContentfulStatusCode = 400) =>
+      html(c, connectPage(chromeModel(c, db, config), error, { forge: forgeRaw, owner, name }, await forgeLists()), status);
+    if (!isForgeKind(forgeRaw)) return errorPage("Unknown forge.");
+    const verified = await verifyForgeRepo(forgeRaw, owner, name, token, config, db, fetchImpl);
+    if (!verified.ok) {
+      console.log(`connect refused: ${verified.error}`);
+      return errorPage(CONNECT_ERRORS[verified.error], connectStatus(verified.error));
     }
     const at = new Date(now()).toISOString();
+    const authSource = token ? "manual" : verified.usedInstance ? "instance" : "manual";
     db.transaction(() => {
-      const repoId = upsertConnectedRepo(db, result.repo, at);
+      const repoId = upsertConnectedRepo(db, verified.repo, at, authSource);
       if (token) {
         setForgeCredential(db, repoId, encryptForgeToken(forgeKeySecrets(config)[0], token), at);
       } else {
@@ -581,7 +697,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
       }
       setSetting(db, SETTING_SELECTED_REPO, String(repoId), at);
     })();
-    console.log(`connected ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
+    console.log(`connected ${verified.repo.forge}:${verified.repo.owner}/${verified.repo.name}`);
     return c.redirect("/");
   });
 
@@ -601,7 +717,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const owner = typeof body.owner === "string" ? body.owner.trim() : "";
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const errorPage = async (error: string, status: ContentfulStatusCode = 400) =>
-      html(c, connectPage(chromeModel(c, db, config), error, { owner, name }, await appRepoList()), status);
+      html(c, connectPage(chromeModel(c, db, config), error, { owner, name }, await forgeLists()), status);
     const client = githubApp();
     if (!client) return errorPage("No GitHub App is configured — add one on the Config page or connect manually.");
     const token = await client.installationToken();
@@ -620,6 +736,31 @@ export function createApp(opts: AppOptions): Hono<Env> {
       setSetting(db, SETTING_SELECTED_REPO, String(repoId), at);
     })();
     console.log(`connected via app ${result.repo.forge}:${result.repo.owner}/${result.repo.name}`);
+    return c.redirect("/");
+  });
+
+  app.post("/connect/instance", async (c) => {
+    const body = await c.req.parseBody();
+    const forgeRaw = typeof body.forge === "string" ? body.forge.trim() : "";
+    const owner = typeof body.owner === "string" ? body.owner.trim() : "";
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const errorPage = async (error: string, status: ContentfulStatusCode = 400) =>
+      html(c, connectPage(chromeModel(c, db, config), error, { forge: forgeRaw, owner, name }, await forgeLists()), status);
+    if (forgeRaw !== FORGE_GITLAB && forgeRaw !== FORGE_FORGEJO) {
+      return errorPage("Unknown forge.");
+    }
+    const verified = await verifyForgeRepo(forgeRaw, owner, name, "", config, db, fetchImpl);
+    if (!verified.ok) {
+      console.log(`connect via instance refused: ${verified.error}`);
+      return errorPage(CONNECT_ERRORS[verified.error], connectStatus(verified.error));
+    }
+    const at = new Date(now()).toISOString();
+    db.transaction(() => {
+      const repoId = upsertConnectedRepo(db, verified.repo, at, "instance");
+      deleteForgeCredential(db, repoId);
+      setSetting(db, SETTING_SELECTED_REPO, String(repoId), at);
+    })();
+    console.log(`connected via instance ${verified.repo.forge}:${verified.repo.owner}/${verified.repo.name}`);
     return c.redirect("/");
   });
 
@@ -699,18 +840,47 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const appId = typeof body.app_id === "string" ? body.app_id.trim() : "";
     const installationId = typeof body.app_installation_id === "string" ? body.app_installation_id.trim() : "";
     const privateKey = typeof body.app_private_key === "string" ? body.app_private_key.trim() : "";
+    const clientId = typeof body.app_client_id === "string" ? body.app_client_id.trim() : "";
+    const clientSecret = typeof body.app_client_secret === "string" ? body.app_client_secret.trim() : "";
+    const adminIds = typeof body.app_admin_ids === "string" ? body.app_admin_ids.trim() : "";
+    const publicUrlRaw = typeof body.public_url === "string" ? body.public_url.trim() : "";
+    const webhookSecret = typeof body.app_webhook_secret === "string" ? body.app_webhook_secret.trim() : "";
+    const botUserId = typeof body.app_bot_user_id === "string" ? body.app_bot_user_id.trim() : "";
     const reject = (notice: string) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), 400);
     if (!appId || !/^\d+$/.test(appId)) return reject("App ID is a number — find it on the app's GitHub settings page.");
     if (installationId && !/^\d+$/.test(installationId)) return reject("Installation ID is a number, or leave it empty to auto-detect.");
     if (privateKey && !privateKey.includes("PRIVATE KEY")) return reject("That does not look like a PEM private key.");
+    if (adminIds && !parseAdminIds(adminIds)) return reject("Operator GitHub user ids must be comma-separated numbers.");
+    if (publicUrlRaw) {
+      try {
+        const parsed = new URL(publicUrlRaw);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return reject("Public URL must be http(s).");
+      } catch {
+        return reject("Public URL must be an http(s) origin.");
+      }
+    }
+    if (webhookSecret && webhookSecret.length < MIN_WEBHOOK_SECRET) return reject("Webhook secret must be at least 16 characters.");
+    if (botUserId && !/^\d+$/.test(botUserId)) return reject("Bot user id is a number — the GitHub user id of your-app[bot].");
     const at = new Date(now()).toISOString();
+    const key = forgeKeySecrets(config)[0];
     db.transaction(() => {
       setSetting(db, SETTING_APP_ID, appId, at);
       if (installationId) setSetting(db, SETTING_APP_INSTALL, installationId, at);
       else deleteSetting(db, SETTING_APP_INSTALL);
-      if (privateKey) setSetting(db, SETTING_APP_KEY, encryptForgeToken(forgeKeySecrets(config)[0], privateKey), at);
+      if (privateKey) setSetting(db, SETTING_APP_KEY, encryptForgeToken(key, privateKey), at);
+      if (clientId) setSetting(db, SETTING_APP_CLIENT_ID, clientId, at);
+      else deleteSetting(db, SETTING_APP_CLIENT_ID);
+      if (clientSecret) setSetting(db, SETTING_APP_CLIENT_SECRET, encryptForgeToken(key, clientSecret), at);
+      if (adminIds) setSetting(db, SETTING_APP_ADMIN_IDS, adminIds, at);
+      else deleteSetting(db, SETTING_APP_ADMIN_IDS);
+      if (publicUrlRaw) setSetting(db, SETTING_PUBLIC_URL, publicUrlRaw.replace(/\/+$/, ""), at);
+      else deleteSetting(db, SETTING_PUBLIC_URL);
+      if (webhookSecret) setSetting(db, SETTING_APP_WEBHOOK, encryptForgeToken(key, webhookSecret), at);
+      if (botUserId) setSetting(db, SETTING_APP_BOT_USER, botUserId, at);
+      else deleteSetting(db, SETTING_APP_BOT_USER);
     })();
-    return c.redirect("/config");
+    issueBotNow();
+    return c.redirect("/config#github-app");
   });
 
   app.post("/config/github-app/remove", (c) => {
@@ -718,9 +888,54 @@ export function createApp(opts: AppOptions): Hono<Env> {
       deleteSetting(db, SETTING_APP_ID);
       deleteSetting(db, SETTING_APP_INSTALL);
       deleteSetting(db, SETTING_APP_KEY);
+      deleteSetting(db, SETTING_APP_CLIENT_ID);
+      deleteSetting(db, SETTING_APP_CLIENT_SECRET);
+      deleteSetting(db, SETTING_APP_ADMIN_IDS);
+      deleteSetting(db, SETTING_PUBLIC_URL);
+      deleteSetting(db, SETTING_APP_WEBHOOK);
+      deleteSetting(db, SETTING_APP_BOT_USER);
     })();
-    return c.redirect("/config");
+    issueBotNow();
+    return c.redirect("/config#github-app");
   });
+
+  for (const kind of ["gitlab", "forgejo"] as const) {
+    app.post(`/config/${kind}`, async (c) => {
+      const body = await c.req.parseBody();
+      const urlRaw = typeof body.base_url === "string" ? body.base_url.trim() : "";
+      const token = typeof body.token === "string" ? body.token.trim() : "";
+      const webhookSecret = typeof body.webhook_secret === "string" ? body.webhook_secret.trim() : "";
+      const reject = (notice: string) => html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), 400);
+      if (!urlRaw) return reject(`${kind === "gitlab" ? "GitLab" : "Forgejo"} base URL is required.`);
+      const origin = normalizeForgeOrigin(urlRaw, kind);
+      if (!origin) return reject("Base URL must be an http(s) origin.");
+      if (webhookSecret && webhookSecret.length < MIN_WEBHOOK_SECRET) return reject("Webhook secret must be at least 16 characters.");
+      const at = new Date(now()).toISOString();
+      const urlKey = kind === "gitlab" ? SETTING_GITLAB_URL : SETTING_FORGEJO_URL;
+      const tokenKey = kind === "gitlab" ? SETTING_GITLAB_TOKEN : SETTING_FORGEJO_TOKEN;
+      const hookKey = kind === "gitlab" ? SETTING_GITLAB_WEBHOOK : SETTING_FORGEJO_WEBHOOK;
+      const existingToken = decryptStored(config, getSetting(db, tokenKey));
+      if (!token && !existingToken && !(kind === "gitlab" ? config.gitlab?.token : config.forgejo?.token)) {
+        return reject("Paste an API token — Eru needs one to list and read repositories.");
+      }
+      db.transaction(() => {
+        setSetting(db, urlKey, origin, at);
+        if (token) setSetting(db, tokenKey, encryptForgeToken(forgeKeySecrets(config)[0], token), at);
+        if (webhookSecret) setSetting(db, hookKey, encryptForgeToken(forgeKeySecrets(config)[0], webhookSecret), at);
+      })();
+      issueBotNow();
+      return c.redirect(`/config#${kind}`);
+    });
+    app.post(`/config/${kind}/remove`, (c) => {
+      db.transaction(() => {
+        deleteSetting(db, kind === "gitlab" ? SETTING_GITLAB_URL : SETTING_FORGEJO_URL);
+        deleteSetting(db, kind === "gitlab" ? SETTING_GITLAB_TOKEN : SETTING_FORGEJO_TOKEN);
+        deleteSetting(db, kind === "gitlab" ? SETTING_GITLAB_WEBHOOK : SETTING_FORGEJO_WEBHOOK);
+      })();
+      issueBotNow();
+      return c.redirect(`/config#${kind}`);
+    });
+  }
 
   const renderConfig = (c: Context<Env>, notice = "", status: ContentfulStatusCode = 200) =>
     html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), status);
@@ -775,9 +990,138 @@ const SETTING_MAP_MODEL = "opencode.map_model";
 const SETTING_APP_ID = "github_app.id";
 const SETTING_APP_KEY = "github_app.private_key";
 const SETTING_APP_INSTALL = "github_app.installation_id";
+const SETTING_APP_CLIENT_ID = "github_app.client_id";
+const SETTING_APP_CLIENT_SECRET = "github_app.client_secret";
+const SETTING_APP_ADMIN_IDS = "github_app.admin_ids";
+const SETTING_APP_WEBHOOK = "github_app.webhook_secret";
+const SETTING_APP_BOT_USER = "github_app.bot_user_id";
+const SETTING_PUBLIC_URL = "eru.public_url";
+const SETTING_GITLAB_URL = "gitlab.base_url";
+const SETTING_GITLAB_TOKEN = "gitlab.token";
+const SETTING_GITLAB_WEBHOOK = "gitlab.webhook_secret";
+const SETTING_FORGEJO_URL = "forgejo.base_url";
+const SETTING_FORGEJO_TOKEN = "forgejo.token";
+const SETTING_FORGEJO_WEBHOOK = "forgejo.webhook_secret";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
 const SETTING_OPENCODE_TIMEOUT = "opencode.timeout_ms";
+
+interface ResolvedOAuth {
+  oauthClientId: string;
+  oauthClientSecret: string;
+  publicUrl: string;
+  adminIds: number[];
+}
+
+function oauthAsConfig(oauth: ResolvedOAuth): Pick<Config, "oauthClientId" | "oauthClientSecret" | "publicUrl"> {
+  return {
+    oauthClientId: oauth.oauthClientId,
+    oauthClientSecret: oauth.oauthClientSecret,
+    publicUrl: oauth.publicUrl,
+  };
+}
+
+function parseAdminIds(raw: string): number[] | undefined {
+  const ids = raw.split(",").map((piece) => Number(piece.trim()));
+  if (ids.length === 0 || ids.some((id) => !Number.isInteger(id) || id <= 0)) return undefined;
+  return ids;
+}
+
+function decryptStored(config: Config, stored: string | undefined): string | undefined {
+  if (!stored) return undefined;
+  try {
+    return decryptForgeToken(forgeKeySecrets(config), stored);
+  } catch {
+    console.log("stored secret unreadable");
+    return undefined;
+  }
+}
+
+function resolvePublicUrl(config: Config, db: SqliteDb): { value: string; source: ModelSource; overriddenEnv: boolean } {
+  const stored = getSetting(db, SETTING_PUBLIC_URL) ?? "";
+  if (stored) return { value: stored, source: "stored", overriddenEnv: Boolean(config.publicUrl) };
+  if (config.publicUrl) return { value: config.publicUrl, source: "env", overriddenEnv: false };
+  return { value: "", source: "default", overriddenEnv: false };
+}
+
+function resolveOAuth(config: Config, db: SqliteDb): ResolvedOAuth | null {
+  const storedId = getSetting(db, SETTING_APP_CLIENT_ID);
+  const clientId = storedId || config.oauthClientId;
+  const clientSecret = decryptStored(config, getSetting(db, SETTING_APP_CLIENT_SECRET)) || config.oauthClientSecret;
+  const storedAdmins = getSetting(db, SETTING_APP_ADMIN_IDS);
+  const adminIds = storedAdmins ? parseAdminIds(storedAdmins) : config.oauthAdminIds;
+  const publicUrl = resolvePublicUrl(config, db).value;
+  if (!clientId || !clientSecret || !adminIds || adminIds.length === 0 || !publicUrl) return null;
+  return { oauthClientId: clientId, oauthClientSecret: clientSecret, publicUrl, adminIds };
+}
+
+function resolveGithubIssueBot(config: Config, db: SqliteDb): IssueBotConfig | undefined {
+  const app = resolveGithubApp(config, db);
+  const webhook = decryptStored(config, getSetting(db, SETTING_APP_WEBHOOK)) || config.issueBot?.webhookSecret;
+  const storedBot = getSetting(db, SETTING_APP_BOT_USER);
+  const botUserId = storedBot && /^\d+$/.test(storedBot) ? Number(storedBot) : config.issueBot?.botUserId;
+  if (!app || !webhook || botUserId === undefined) {
+    return config.issueBot;
+  }
+  return {
+    appId: app.creds.appId,
+    privateKey: app.creds.privateKey,
+    webhookSecret: webhook,
+    botUserId,
+    trustedBotIds: config.issueBot?.trustedBotIds ?? [],
+    hourlyCap: config.issueBot?.hourlyCap ?? DEFAULT_ISSUE_BOT_HOURLY_CAP,
+  };
+}
+
+function resolveGitlab(config: Config, db: SqliteDb): ForgeInstanceConfig | null {
+  return resolveForgeInstance(config, db, "gitlab");
+}
+
+function resolveForgejo(config: Config, db: SqliteDb): ForgeInstanceConfig | null {
+  return resolveForgeInstance(config, db, "forgejo");
+}
+
+function resolveForgeInstance(config: Config, db: SqliteDb, kind: "gitlab" | "forgejo"): ForgeInstanceConfig | null {
+  const env = kind === "gitlab" ? config.gitlab : config.forgejo;
+  const urlKey = kind === "gitlab" ? SETTING_GITLAB_URL : SETTING_FORGEJO_URL;
+  const tokenKey = kind === "gitlab" ? SETTING_GITLAB_TOKEN : SETTING_FORGEJO_TOKEN;
+  const hookKey = kind === "gitlab" ? SETTING_GITLAB_WEBHOOK : SETTING_FORGEJO_WEBHOOK;
+  const origin = getSetting(db, urlKey) || env?.origin;
+  const token = decryptStored(config, getSetting(db, tokenKey)) || env?.token;
+  const webhookSecret = decryptStored(config, getSetting(db, hookKey)) || env?.webhookSecret;
+  if (!origin || !token) return null;
+  return { origin, token, webhookSecret };
+}
+
+async function verifyForgeRepo(
+  forge: string,
+  owner: string,
+  name: string,
+  token: string,
+  config: Config,
+  db: SqliteDb,
+  fetchImpl: FetchLike,
+): Promise<({ ok: true; repo: { forge: string; owner: string; name: string; defaultBranch?: string }; usedInstance: boolean } | { ok: false; error: VerifyError })> {
+  if (forge === FORGE_GITLAB) {
+    const instance = resolveGitlab(config, db);
+    const use = token || instance?.token || "";
+    if (!instance) return { ok: false, error: "auth" };
+    const result = await verifyGitlabRepo(instance.origin, owner, name, use, fetchImpl);
+    if (!result.ok) return result;
+    return { ok: true, repo: result.repo, usedInstance: !token };
+  }
+  if (forge === FORGE_FORGEJO) {
+    const instance = resolveForgejo(config, db);
+    const use = token || instance?.token || "";
+    if (!instance) return { ok: false, error: "auth" };
+    const result = await verifyForgejoRepo(instance.origin, owner, name, use, fetchImpl);
+    if (!result.ok) return result;
+    return { ok: true, repo: result.repo, usedInstance: !token };
+  }
+  const result = await verifyGithubRepo(owner, name, token, fetchImpl);
+  if (!result.ok) return result;
+  return { ok: true, repo: result.repo, usedInstance: false };
+}
 
 // Saved setting > env > default — the same precedence as the model fields.
 function resolveTimeout(config: Config, db: SqliteDb): { value: number; source: ModelSource; overriddenEnv?: string } {
@@ -862,7 +1206,7 @@ async function repoToken(
   config: Config,
   fetchImpl: FetchLike,
   githubApp: () => GithubAppClient | null,
-  repo: { id: number; authSource: string },
+  repo: { id: number; authSource: string; forge?: string },
 ): Promise<{ ok: true; token: string } | { ok: false; notice: string }> {
   const stored = getForgeCredential(db, repo.id);
   if (stored) {
@@ -882,6 +1226,13 @@ async function repoToken(
       return { ok: false, notice: APP_ERRORS[token.error] };
     }
     return { ok: true, token: token.value };
+  }
+  if (repo.authSource === "instance" || repo.forge === "gitlab" || repo.forge === "forgejo") {
+    const instance = repo.forge === "gitlab" ? resolveGitlab(config, db) : repo.forge === "forgejo" ? resolveForgejo(config, db) : null;
+    if (!instance) {
+      return { ok: false, notice: `The ${repo.forge} instance is not configured — add a URL and token on Config.` };
+    }
+    return { ok: true, token: instance.token };
   }
   return { ok: true, token: "" };
 }
@@ -913,11 +1264,63 @@ function modelRow(
   return { label, field, envKey, effective: resolved.value ?? "", source: resolved.source, stored, overriddenEnv: resolved.overriddenEnv };
 }
 
+function storedOrEnv(
+  stored: string,
+  envValue: string | undefined,
+): { value: string; source: ModelSource; stored: string; overriddenEnv: boolean } {
+  if (stored) return { value: stored, source: "stored", stored, overriddenEnv: Boolean(envValue) };
+  if (envValue) return { value: envValue, source: "env", stored: "", overriddenEnv: false };
+  return { value: "", source: "default", stored: "", overriddenEnv: false };
+}
+
+function forgeConfigView(
+  db: SqliteDb,
+  config: Config,
+  kind: "gitlab" | "forgejo",
+): ConfigForgeView {
+  const env = kind === "gitlab" ? config.gitlab : config.forgejo;
+  const urlKey = kind === "gitlab" ? SETTING_GITLAB_URL : SETTING_FORGEJO_URL;
+  const tokenKey = kind === "gitlab" ? SETTING_GITLAB_TOKEN : SETTING_FORGEJO_TOKEN;
+  const hookKey = kind === "gitlab" ? SETTING_GITLAB_WEBHOOK : SETTING_FORGEJO_WEBHOOK;
+  const origin = storedOrEnv(getSetting(db, urlKey) ?? "", env?.origin);
+  const tokenStored = Boolean(getSetting(db, tokenKey));
+  const hookStored = Boolean(getSetting(db, hookKey));
+  return {
+    kind,
+    label: kind === "gitlab" ? "GitLab" : "Forgejo",
+    origin: origin.value,
+    storedOrigin: origin.stored,
+    originSource: origin.source,
+    originOverriddenEnv: origin.overriddenEnv,
+    hasStoredToken: tokenStored,
+    tokenSource: tokenStored ? "stored" : env?.token ? "env" : "default",
+    tokenOverriddenEnv: tokenStored && Boolean(env?.token),
+    hasStoredWebhook: hookStored,
+    webhookSource: hookStored ? "stored" : env?.webhookSecret ? "env" : "default",
+    webhookOverriddenEnv: hookStored && Boolean(env?.webhookSecret),
+    urlEnvKey: kind === "gitlab" ? "ERU_GITLAB_URL" : "ERU_FORGEJO_URL",
+    tokenEnvKey: kind === "gitlab" ? "ERU_GITLAB_TOKEN" : "ERU_FORGEJO_TOKEN",
+    webhookEnvKey: kind === "gitlab" ? "ERU_GITLAB_WEBHOOK_SECRET" : "ERU_FORGEJO_WEBHOOK_SECRET",
+    webhookPath: kind === "gitlab" ? "/webhooks/gitlab" : "/webhooks/forgejo",
+  };
+}
+
 function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, providers: ProviderCredentialStore): ConfigView {
   const app = resolveGithubApp(config, db);
   const storedAppId = getSetting(db, SETTING_APP_ID) ?? "";
   const storedInstall = getSetting(db, SETTING_APP_INSTALL) ?? "";
   const timeout = resolveTimeout(config, db);
+  const clientId = storedOrEnv(getSetting(db, SETTING_APP_CLIENT_ID) ?? "", config.oauthClientId);
+  const admin = storedOrEnv(getSetting(db, SETTING_APP_ADMIN_IDS) ?? "", config.oauthAdminIds.join(", ") || undefined);
+  const publicUrl = resolvePublicUrl(config, db);
+  const botUser = storedOrEnv(
+    getSetting(db, SETTING_APP_BOT_USER) ?? "",
+    config.issueBot ? String(config.issueBot.botUserId) : undefined,
+  );
+  const hasStoredClientSecret = Boolean(getSetting(db, SETTING_APP_CLIENT_SECRET));
+  const hasStoredWebhook = Boolean(getSetting(db, SETTING_APP_WEBHOOK));
+  const oauth = resolveOAuth(config, db);
+  const issueBot = resolveGithubIssueBot(config, db);
   return {
     bin: config.openCodeBin,
     timeout: {
@@ -941,7 +1344,33 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
       appIdOverriddenEnv: app?.appIdOverriddenEnv ?? false,
       installOverriddenEnv: app?.installOverriddenEnv ?? false,
       keyOverriddenEnv: app?.keyOverriddenEnv ?? false,
+      clientId: clientId.value,
+      storedClientId: clientId.stored,
+      clientIdSource: clientId.source,
+      clientIdOverriddenEnv: clientId.overriddenEnv,
+      hasStoredClientSecret,
+      clientSecretSource: hasStoredClientSecret ? "stored" : config.oauthClientSecret ? "env" : "default",
+      clientSecretOverriddenEnv: hasStoredClientSecret && Boolean(config.oauthClientSecret),
+      adminIds: admin.value,
+      storedAdminIds: admin.stored,
+      adminSource: admin.source,
+      adminOverriddenEnv: admin.overriddenEnv,
+      publicUrl: publicUrl.value,
+      storedPublicUrl: getSetting(db, SETTING_PUBLIC_URL) ?? "",
+      publicUrlSource: publicUrl.source,
+      publicUrlOverriddenEnv: publicUrl.overriddenEnv,
+      hasStoredWebhook,
+      webhookSource: hasStoredWebhook ? "stored" : config.issueBot?.webhookSecret ? "env" : "default",
+      webhookOverriddenEnv: hasStoredWebhook && Boolean(config.issueBot?.webhookSecret),
+      botUserId: botUser.value,
+      storedBotUserId: botUser.stored,
+      botUserSource: botUser.source,
+      botUserOverriddenEnv: botUser.overriddenEnv,
+      loginReady: oauth !== null,
+      issueBotReady: Boolean(issueBot),
     },
+    gitlab: forgeConfigView(db, config, "gitlab"),
+    forgejo: forgeConfigView(db, config, "forgejo"),
     user: (() => {
       const u = resolveUser(config, db);
       return {
@@ -1001,7 +1430,17 @@ async function refreshNotice(
       return { ok: false, notice: "The stored default branch does not look like a ref." };
     }
     console.log(`refresh ${label} @${candidate}: fetching checkout tarball`);
-    tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
+    if (repo.forge === "gitlab") {
+      const gitlab = resolveGitlab(config, db);
+      if (!gitlab) return { ok: false, notice: "GitLab is not configured — add a URL and token on Config." };
+      tarball = await fetchGitlabArchive(gitlab.origin, repo.owner, repo.name, candidate, token, fetchImpl);
+    } else if (repo.forge === "forgejo") {
+      const forgejo = resolveForgejo(config, db);
+      if (!forgejo) return { ok: false, notice: "Forgejo is not configured — add a URL and token on Config." };
+      tarball = await fetchForgejoArchive(forgejo.origin, repo.owner, repo.name, candidate, token, fetchImpl);
+    } else {
+      tarball = await fetchRepoTarball(repo.owner, repo.name, candidate, token, fetchImpl);
+    }
     if (tarball.ok) {
       console.log(`refresh ${label} @${candidate}: tarball ok — ${Math.round(tarball.data.length / 1024)} KiB`);
       ref = candidate;

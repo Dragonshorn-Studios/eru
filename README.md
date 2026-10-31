@@ -14,17 +14,17 @@ Eru is named after Chitanda Eru from the anime *Hyouka*. The catchphrase above i
 
 ## What it does
 
-- **Map a repo.** Connect a GitHub repository — pick one from a GitHub App installation, or add it manually — and Eru has OpenCode write a page-by-page map of it into SQLite.
+- **Map a repo.** Connect a GitHub, GitLab, or Forgejo repository — pick from a GitHub App installation or a GitLab/Forgejo token configured on `/config`, or add one manually — and Eru has OpenCode write a page-by-page map of it into SQLite.
 - **Ask against the map.** The Ask tab sends a question to OpenCode with only the stored pages materialized, and returns an answer that cites map paths.
 - **Refresh on demand.** The refresh button re-maps the repository's default branch; pages update in place and the top bar shows `last mapped @ref`.
 - **Self-hosted.** One Node.js process, one SQLite file, two Docker volumes.
 
 ## How it works
 
-Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a small GitHub adapter using a personal token or a GitHub App installation token. Ask and Refresh shell out to the OpenCode CLI inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Model output is untrusted text and is escaped before rendering.
+Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a GitHub App or PAT, or a GitLab/Forgejo API token set on `/config`. Ask and Refresh shell out to the OpenCode CLI (2.0 `--standalone run`) inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Model output is untrusted text and is escaped before rendering.
 
 ```
-GitHub ──► forge adapter ──► tarball ──► OpenCode ──► map pages ──► SQLite ──► Brief / Ask UI
+GitHub / GitLab / Forgejo ──► forge adapter ──► tarball ──► OpenCode ──► map pages ──► SQLite ──► Brief / Ask UI
 ```
 
 ## Stack
@@ -63,33 +63,28 @@ Configuration is environment variables plus values saved on `/config` — saved 
 
 Recommended: `ERU_FORGE_TOKEN_KEY` — a stable key for encrypting stored forge credentials. Without it, credentials are encrypted under the session secret and become unreadable when that secret rotates. Secrets model and rotation details: [docs/configuration.md](docs/configuration.md).
 
+## GitHub App (mapping + login + issue bot)
+
+One GitHub App is enough. Permissions: **Contents** Read, **Issues** Read & write, **Metadata** Read. Subscribe to **Issues**. Set the App ID, PEM, client id/secret, operator GitHub user ids, public URL, webhook secret, and bot user id on `/config` (or via `ERU_GITHUB_APP_*` / `ERU_OAUTH_*` aliases in `.env`). Callback URL must be exactly `$ERU_PUBLIC_URL/login/github/callback`.
+
+## GitLab and Forgejo
+
+Self-hosted GitLab and Forgejo are configured on `/config` (or `ERU_GITLAB_*` / `ERU_FORGEJO_*`): base URL + API token lists and maps repos; an optional webhook secret turns on `@eru-issue-bot` at `POST /webhooks/gitlab` (`X-Gitlab-Token`) or `POST /webhooks/forgejo` (HMAC). Tokens stay encrypted. Nested GitLab groups use slashes in the owner field (`group/sub`).
+
 ## eru-issue-bot
 
-Optional GitHub App that rewrites newly opened issues mentioning `@eru-issue-bot` into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it.
+Rewrites newly opened issues mentioning `@eru-issue-bot` into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it.
 
-This App is **not** the mapping GitHub App. Permissions are Issues read/write and Metadata read only — no Contents, Actions, or Admin. The only subscribed event is `issues`.
+On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` App is an optional override. Partial env config fails closed at boot; the webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve (GitLab/Forgejo need URL + token + webhook secret).
 
 ### One-time GitHub App setup
 
-Create the App on GitHub and set the env vars below (Coolify / `.env` — never in git). Partial config fails closed at boot; the webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve.
-
 1. GitHub → Settings → Developer settings → GitHub Apps → New GitHub App.
-2. Name it `eru-issue-bot`. Homepage URL can be your Eru URL.
-3. Webhook URL: `https://<your-eru-host>/webhooks/github`. Webhook secret: a random 16+ byte string — the same value as `ERU_ISSUE_BOT_WEBHOOK_SECRET`.
-4. Repository permissions: **Issues** Read & write, **Metadata** Read-only. Uncheck everything else.
-5. Subscribe to events: **Issues** only.
-6. Where can this GitHub App be installed? Only on this account (or the org). Create the App.
-7. Note the **App ID**. Generate a private key and store the PEM on the host (mode 400) — do not commit it. Install the App on the selected repositories.
-8. Look up the bot user id: `https://api.github.com/users/eru-issue-bot%5Bbot%5D` (`id` is `ERU_ISSUE_BOT_USER_ID`).
-
-| Variable | Purpose |
-| --- | --- |
-| `ERU_ISSUE_BOT_APP_ID` | Numeric App ID |
-| `ERU_ISSUE_BOT_PRIVATE_KEY` or `ERU_ISSUE_BOT_PRIVATE_KEY_FILE` | App PEM (inline with `\n` escapes, or a file path) |
-| `ERU_ISSUE_BOT_WEBHOOK_SECRET` | Webhook HMAC secret (16+ bytes) |
-| `ERU_ISSUE_BOT_USER_ID` | GitHub user id of `eru-issue-bot[bot]` (loop guard) |
-| `ERU_TRUSTED_BOT_IDS` | Optional comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER / MEMBER / COLLABORATOR |
-| `ERU_ISSUE_BOT_HOURLY_CAP` | Optional per-repo hourly job cap (default 20) |
+2. Homepage URL can be your Eru URL. Callback URL: `https://<your-eru-host>/login/github/callback`.
+3. Webhook URL: `https://<your-eru-host>/webhooks/github`. Webhook secret: a random 16+ byte string.
+4. Repository permissions: **Contents** Read, **Issues** Read & write, **Metadata** Read-only. Uncheck everything else.
+5. Subscribe to events: **Issues**.
+6. Install the App on the selected repositories. Note the App ID, generate a PEM (mode 400), copy the client id/secret, and look up the bot user id at `https://api.github.com/users/<app-slug>%5Bbot%5D`.
 
 The bot uses the same OpenCode model as Ask (`ERU_OPENCODE_ASK_MODEL` / saved `/config` Ask model / `ERU_OPENCODE_MODEL`). Nagato's "Refine with Eru" checkbox only needs to append `@eru-issue-bot` on its own line at the end of the issue body.
 

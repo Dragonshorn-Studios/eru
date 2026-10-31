@@ -22,6 +22,8 @@ import {
   hasIssueBotMarker,
   openQuestionsEmpty,
   parseRefinedMarkdown,
+  shouldEnqueueForgejoIssue,
+  shouldEnqueueGitlabIssue,
   shouldEnqueueIssue,
   verifyGithubWebhookSignature,
 } from "./issuebot.js";
@@ -236,6 +238,7 @@ describe("enqueue filter", () => {
     expect(decision).toEqual({
       enqueue: true,
       target: {
+        forge: "github",
         installationId: "555",
         owner: "acme",
         name: "box",
@@ -530,5 +533,123 @@ describe("issue refine worker", () => {
     expect(JSON.stringify(labelAdds)).toContain(LABEL_FAILED);
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comments.some((c) => (c.body as { body: string }).body === COMMENT_FAILED)).toBe(true);
+  });
+});
+
+function gitlabOpened(opts: { description?: string; action?: string; iid?: number } = {}): Record<string, unknown> {
+  return {
+    object_kind: "issue",
+    user: { id: OWNER_ID },
+    project: { path_with_namespace: "acme/box" },
+    object_attributes: {
+      action: opts.action ?? "open",
+      iid: opts.iid ?? 12,
+      title: "The lights flicker",
+      description: opts.description ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+    },
+  };
+}
+
+function forgejoOpened(opts: { body?: string; action?: string; number?: number } = {}): Record<string, unknown> {
+  return {
+    action: opts.action ?? "opened",
+    sender: { id: OWNER_ID },
+    repository: { name: "box", owner: { login: "acme" } },
+    issue: {
+      number: opts.number ?? 12,
+      title: "The lights flicker",
+      body: opts.body ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+    },
+  };
+}
+
+describe("gitlab and forgejo enqueue filters", () => {
+  it("enqueues a GitLab issue open that mentions the bot", () => {
+    const decision = shouldEnqueueGitlabIssue(gitlabOpened(), { trustedBotIds: [] });
+    expect(decision).toEqual({
+      enqueue: true,
+      target: {
+        forge: "gitlab",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+      },
+    });
+    expect(shouldEnqueueGitlabIssue(gitlabOpened({ action: "update" }), { trustedBotIds: [] }).enqueue).toBe(false);
+    expect(shouldEnqueueGitlabIssue(gitlabOpened({ description: "no mention" }), { trustedBotIds: [] }).enqueue).toBe(
+      false,
+    );
+  });
+
+  it("enqueues a Forgejo issue opened that mentions the bot", () => {
+    const decision = shouldEnqueueForgejoIssue(forgejoOpened(), { trustedBotIds: [] });
+    expect(decision.enqueue).toBe(true);
+    if (decision.enqueue) expect(decision.target.forge).toBe("forgejo");
+    expect(shouldEnqueueForgejoIssue(forgejoOpened({ action: "closed" }), { trustedBotIds: [] }).enqueue).toBe(false);
+  });
+});
+
+describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
+  const GITLAB_SECRET = "gitlab-webhook-16+";
+  const FORGEJO_SECRET = "forgejo-webhook-16+";
+
+  function instanceApp() {
+    const db = openDb(":memory:");
+    const config = gatedConfig({
+      gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: GITLAB_SECRET },
+      forgejo: { origin: "https://git.example", token: "tok", webhookSecret: FORGEJO_SECRET },
+    });
+    const bot = createIssueBot({
+      db,
+      config: config.issueBot,
+      gitlab: config.gitlab,
+      forgejo: config.forgejo,
+      fetchImpl: async () => json(500, {}),
+      refine: async () => refinedTemplate(),
+      backoffMs: () => 0,
+    });
+    const app = createApp({
+      config,
+      db,
+      issueBot: bot,
+      issueBotAutoStart: false,
+      openCodeServe: { url: () => null, password: () => "x", ensure: async () => {}, stop: async () => {} },
+    });
+    return { app, db };
+  }
+
+  it("accepts a GitLab Issue Hook with a matching token and ignores a bad token", async () => {
+    const { app, db } = instanceApp();
+    const payload = gitlabOpened();
+    const bad = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": "nope-nope-nope-nope" },
+    });
+    expect(bad.status).toBe(401);
+    const good = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(good.status).toBe(202);
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
+    expect(listIssueRefineJobs(db)[0].forge).toBe("gitlab");
+  });
+
+  it("accepts a Forgejo issues webhook with a matching HMAC", async () => {
+    const { app, db } = instanceApp();
+    const payload = JSON.stringify(forgejoOpened());
+    const sig = createHmac("sha256", FORGEJO_SECRET).update(payload).digest("hex");
+    const res = await app.request("/webhooks/forgejo", {
+      method: "POST",
+      body: payload,
+      headers: { "Content-Type": "application/json", "X-Gitea-Event": "issues", "X-Gitea-Signature": sig },
+    });
+    expect(res.status).toBe(202);
+    expect(listIssueRefineJobs(db)[0].forge).toBe("forgejo");
   });
 });
