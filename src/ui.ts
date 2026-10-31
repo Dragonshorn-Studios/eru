@@ -945,7 +945,7 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined): s
       const current = entry.id === focusId ? ` aria-current="page"` : "";
       const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : entry.forge;
       const num = entry.issueNumber ? `#${entry.issueNumber}` : entry.event || entry.outcome;
-      const title = entry.title.trim() || entry.detail;
+      const title = entry.detail || entry.title.trim() || entry.outcome;
       return `<li><a href="/refine/log/${entry.id}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
     })
     .join("");

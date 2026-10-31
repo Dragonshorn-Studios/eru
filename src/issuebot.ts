@@ -183,6 +183,21 @@ function clipFact(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
+/** What GitHub, GitLab, and Forgejo store on the delivery. No issue body and no secret. */
+export interface WebhookAck {
+  ok: true;
+  outcome: "queued" | "ignored" | "rejected";
+  reason: string;
+  detail: string;
+  forge: string;
+  repo: string | null;
+  issue: number | null;
+  event: string | null;
+  action: string | null;
+  delivery: string | null;
+  jobId: number | null;
+}
+
 /** Operator sentence. No issue body and no webhook secret. */
 export function explainWebhookDecision(reason: string, facts: WebhookFacts = emptyWebhookFacts()): string {
   const where = facts.owner && facts.name ? `${facts.owner}/${facts.name}` : "this repository";
@@ -546,9 +561,14 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     event?: string;
     delivery?: string;
     jobId?: number | null;
-  }): void {
+  }): WebhookAck {
     const facts = row.facts ?? emptyWebhookFacts();
-    const detail = explainWebhookDecision(row.reason, facts);
+    const detail = explainWebhookDecision(row.reason, facts).slice(0, 500);
+    const repo =
+      facts.owner && facts.name ? `${facts.owner.slice(0, 200)}/${facts.name.slice(0, 200)}` : null;
+    const event = clipFact(row.event ?? "") || null;
+    const action = clipFact(facts.action) || null;
+    const delivery = clipFact(row.delivery ?? "") || null;
     insertWebhookLog(db, {
       at: iso(),
       forge: row.forge,
@@ -565,8 +585,24 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       title: facts.title,
       jobId: row.jobId,
     });
-    const where = facts.owner && facts.name ? `${facts.owner}/${facts.name}` : "-";
-    console.log(`issuebot: ${row.outcome} ${row.forge} ${where} ${row.reason}`);
+    const ack: WebhookAck = {
+      ok: true,
+      outcome: row.outcome,
+      reason: row.reason,
+      detail,
+      forge: row.forge,
+      repo,
+      issue: facts.issueNumber,
+      event,
+      action,
+      delivery,
+      jobId: row.jobId ?? null,
+    };
+    const where = repo ? `${repo}${facts.issueNumber ? `#${facts.issueNumber}` : ""}` : "-";
+    console.log(
+      `issuebot webhook forge=${row.forge} repo=${where} event=${event ?? "-"} action=${action ?? "-"} outcome=${row.outcome} reason=${row.reason} delivery=${delivery ?? "-"} — ${detail}`,
+    );
+    return ack;
   }
 
   async function acceptJob(
@@ -574,32 +610,28 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     ctx: { forge: string; event: string; delivery: string; facts: WebhookFacts },
   ): Promise<Response> {
     if (!decision.enqueue) {
-      recordWebhook({ ...ctx, outcome: "ignored", reason: decision.reason });
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: decision.reason }));
     }
     const parsed = decision.target;
     if (!isConnected(parsed.forge, parsed.owner, parsed.name)) {
-      recordWebhook({ ...ctx, outcome: "ignored", reason: "unconnected" });
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "unconnected" }));
     }
     const at = iso();
     const hourAgo = iso(now() - 60 * 60 * 1000);
     if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo, parsed.forge) >= hourlyCap) {
-      recordWebhook({ ...ctx, outcome: "ignored", reason: "cap" });
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "cap" }));
     }
     const id = enqueueIssueRefineJob(db, { ...parsed, origin: connectedOrigin(parsed.forge) }, at);
     if (!id) {
-      recordWebhook({ ...ctx, outcome: "ignored", reason: "duplicate" });
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "duplicate" }));
     }
-    recordWebhook({ ...ctx, outcome: "queued", reason: "queued", jobId: id });
+    const ack = recordWebhook({ ...ctx, outcome: "queued", reason: "queued", jobId: id });
     if (!stopped) void processDue();
-    return jsonOk();
+    return jsonOk(ack);
   }
 
-  function jsonOk(): Response {
-    return new Response(JSON.stringify({ ok: true }), {
+  function jsonOk(ack: WebhookAck): Response {
+    return new Response(JSON.stringify(ack), {
       status: 202,
       headers: { "content-type": "application/json" },
     });
@@ -620,22 +652,22 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     }
     const event = (c.req.header("x-github-event") ?? c.req.header("X-GitHub-Event") ?? "").trim();
     if (event !== "issues") {
-      recordWebhook({
-        forge: FORGE_GITHUB,
-        outcome: "ignored",
-        reason: "event",
-        event,
-        delivery: deliveryId,
-        facts: { ...emptyWebhookFacts(), action: event },
-      });
-      return c.json({ ok: true }, 202);
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_GITHUB,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          delivery: deliveryId,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
     }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      recordWebhook({ forge: FORGE_GITHUB, outcome: "ignored", reason: "json", event, delivery: deliveryId });
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_GITHUB, outcome: "ignored", reason: "json", event, delivery: deliveryId }));
     }
     return acceptJob(
       shouldEnqueueIssue(payload, {
@@ -657,21 +689,21 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     }
     const event = (c.req.header("x-gitlab-event") ?? c.req.header("X-Gitlab-Event") ?? "").trim();
     if (event && event !== "Issue Hook" && event !== "Confidential Issue Hook") {
-      recordWebhook({
-        forge: FORGE_GITLAB,
-        outcome: "ignored",
-        reason: "event",
-        event,
-        facts: { ...emptyWebhookFacts(), action: event },
-      });
-      return c.json({ ok: true }, 202);
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_GITLAB,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
     }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      recordWebhook({ forge: FORGE_GITLAB, outcome: "ignored", reason: "json", event });
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_GITLAB, outcome: "ignored", reason: "json", event }));
     }
     return acceptJob(shouldEnqueueGitlabIssue(payload, { trustedBotIds }), {
       forge: FORGE_GITLAB,
@@ -704,21 +736,21 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       ""
     ).trim();
     if (event && event !== "issues") {
-      recordWebhook({
-        forge: FORGE_FORGEJO,
-        outcome: "ignored",
-        reason: "event",
-        event,
-        facts: { ...emptyWebhookFacts(), action: event },
-      });
-      return c.json({ ok: true }, 202);
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_FORGEJO,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
     }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      recordWebhook({ forge: FORGE_FORGEJO, outcome: "ignored", reason: "json", event });
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_FORGEJO, outcome: "ignored", reason: "json", event }));
     }
     return acceptJob(shouldEnqueueForgejoIssue(payload, { trustedBotIds }), {
       forge: FORGE_FORGEJO,

@@ -1,5 +1,5 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   enqueueIssueRefineJob,
@@ -478,9 +478,95 @@ describe("POST /webhooks/github", () => {
       "X-GitHub-Delivery": "d-unconnected",
     });
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "github",
+      repo: "other/lamp",
+      issue: 12,
+      event: "issues",
+      action: "opened",
+      delivery: "d-unconnected",
+      jobId: null,
+    });
     expect(listIssueRefineJobs(db)).toEqual([]);
     expect(listWebhookLogs(db)[0].detail).toContain("not connected");
+  });
+
+  it("puts the decision and repo on the 202 body and on the server log", async () => {
+    const { app, db } = testApp({});
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => {
+      if (typeof line === "string" && line.startsWith("issuebot webhook")) lines.push(line);
+    });
+    try {
+      const missed = await postWebhook(app, openedPayload({ body: "no mention", title: "Lamp" }), {
+        "X-GitHub-Delivery": "d-mention",
+      });
+      expect(missed.status).toBe(202);
+      const missedBody = (await missed.json()) as Record<string, unknown>;
+      expect(missedBody).toMatchObject({
+        ok: true,
+        outcome: "ignored",
+        reason: "mention",
+        forge: "github",
+        repo: "acme/box",
+        issue: 12,
+        event: "issues",
+        action: "opened",
+        delivery: "d-mention",
+        jobId: null,
+      });
+      expect(missedBody.detail).toEqual(expect.stringContaining("@eru-issue-bot"));
+      expect(JSON.stringify(missedBody)).not.toContain("no mention");
+
+      const queued = await postWebhook(app, openedPayload({}), { "X-GitHub-Delivery": "d-queue" });
+      const queuedBody = (await queued.json()) as { jobId: number; detail: string };
+      expect(queuedBody).toMatchObject({
+        ok: true,
+        outcome: "queued",
+        reason: "queued",
+        forge: "github",
+        repo: "acme/box",
+        issue: 12,
+        delivery: "d-queue",
+      });
+      expect(queuedBody.jobId).toBe(listIssueRefineJobs(db)[0]?.id);
+      expect(queuedBody.detail).toContain("acme/box");
+      expect(JSON.stringify(queuedBody)).not.toContain("hallway");
+
+      const pingRaw = JSON.stringify({ zen: "keep it logically awesome" });
+      const ping = await app.request("/webhooks/github", {
+        method: "POST",
+        body: pingRaw,
+        headers: {
+          "Content-Type": "application/json",
+          "X-GitHub-Event": "ping",
+          "X-GitHub-Delivery": "d-ping",
+          "X-Hub-Signature-256": sign(pingRaw),
+        },
+      });
+      expect(ping.status).toBe(202);
+      expect(await ping.json()).toMatchObject({
+        ok: true,
+        outcome: "ignored",
+        reason: "event",
+        forge: "github",
+        repo: null,
+        issue: null,
+        event: "ping",
+        delivery: "d-ping",
+        jobId: null,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.some((line) => line.includes("repo=acme/box#12") && line.includes("reason=mention"))).toBe(true);
+    expect(lines.some((line) => line.includes("outcome=queued") && line.includes("reason=queued"))).toBe(true);
+    expect(lines.some((line) => line.includes("event=ping") && line.includes("reason=event"))).toBe(true);
+    expect(lines.join("\n")).not.toContain(WEBHOOK_SECRET);
+    expect(lines.join("\n")).not.toContain("hallway");
   });
 
   it("enqueues a connected repo even when owner and name casing differ", async () => {
@@ -855,6 +941,13 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
       headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
     });
     expect(gitlab.status).toBe(202);
+    expect(await gitlab.json()).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "gitlab",
+      repo: "other/lamp",
+    });
     const payload = JSON.stringify(forgejoOpened({ owner: "other", repo: "lamp" }));
     const sig = createHmac("sha256", FORGEJO_SECRET).update(payload).digest("hex");
     const forgejo = await app.request("/webhooks/forgejo", {
@@ -863,6 +956,13 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
       headers: { "Content-Type": "application/json", "X-Gitea-Event": "issues", "X-Gitea-Signature": sig },
     });
     expect(forgejo.status).toBe(202);
+    expect(await forgejo.json()).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "forgejo",
+      repo: "other/lamp",
+    });
     expect(listIssueRefineJobs(db)).toEqual([]);
   });
 
