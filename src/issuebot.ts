@@ -33,8 +33,8 @@ import {
   type FetchLike,
   type GithubAppClient,
 } from "./forge.js";
-import { opencodeModel, opencodeRunArgs, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
-import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import { opencodeModel, opencodeTimeout, runOpenCode, type OpenCodeOptions } from "./opencode.js";
+import { outputTail } from "./proc.js";
 import {
   FORGE_FORGEJO,
   FORGE_GITLAB,
@@ -368,11 +368,12 @@ export function createIssueRefiner(opts: OpenCodeOptions): IssueRefineFn {
       await writeFile(join(workdir, "opencode.json"), JSON.stringify(ISSUE_BOT_WORKSPACE_CONFIG));
       await markWorkspaceRoot(workdir);
       const runModel = opencodeModel(opts);
-      const args = opencodeRunArgs(refinePrompt(title, body), runModel);
       const timeoutMs = opencodeTimeout(opts);
-      const child = await runChild(opts.bin, args, {
+      const child = await runOpenCode({
+        bin: opts.bin,
+        prompt: refinePrompt(title, body),
+        model: runModel,
         cwd: workdir,
-        env: opencodeChildEnv(),
         timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });

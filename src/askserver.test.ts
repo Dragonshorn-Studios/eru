@@ -40,7 +40,29 @@ describe("opencode serve health probe", () => {
     await server.stop();
   });
 
-  it("times out when no OC2 health path answers", async () => {
+  it("accepts the OpenCode 1 /global/health path when the 2.x paths are missing", async () => {
+    const paths: string[] = [];
+    const server = createOpenCodeServer({
+      bin: "opencode",
+      port: 4197,
+      password: "test-password",
+      healthTimeoutMs: 2_000,
+      maxRestarts: 0,
+      spawnImpl: spawnStub,
+      fetchImpl: (async (url: string | URL | Request) => {
+        const path = new URL(String(url)).pathname;
+        paths.push(path);
+        if (path === "/global/health") return new Response("{}", { status: 200 });
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+      log: () => {},
+    });
+    await server.ensure();
+    expect(paths).toEqual(["/api/health", "/api/info", "/global/health"]);
+    await server.stop();
+  });
+
+  it("times out when no health path answers", async () => {
     const server = createOpenCodeServer({
       bin: "opencode",
       port: 4198,

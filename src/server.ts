@@ -1578,7 +1578,7 @@ function ocFetch(
 
 function mapFailureDetail(detail: string): string {
   if (isCliHelpDump(detail)) {
-    return "OpenCode printed command help instead of running. Check ERU_OPENCODE_BIN.";
+    return "OpenCode printed command help instead of running. Eru tried the 1.x and 2.x run commands — check ERU_OPENCODE_BIN.";
   }
   return detail.slice(-160);
 }
