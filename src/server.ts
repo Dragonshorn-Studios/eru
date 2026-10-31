@@ -1562,13 +1562,17 @@ function ocFetch(
   const upstream = serve.url();
   if (!upstream) return Promise.reject(new Error("opencode serve is down"));
   const target = new URL(`${upstream}${path}`);
-  if (opts.directory) target.searchParams.set("directory", opts.directory);
+  if (opts.directory) {
+    target.searchParams.set("directory", opts.directory);
+    if (path.startsWith("/api/")) target.searchParams.set("location[directory]", opts.directory);
+  }
   // Always bounded: an upstream that accepts the socket but stalls would
   // otherwise hang the owning request (and the island's boot) forever.
   return fetchImpl(target.toString(), {
     method: opts.method ?? "GET",
     headers: {
       authorization: `Basic ${Buffer.from(`opencode:${serve.password()}`).toString("base64")}`,
+      ...(opts.directory ? { "x-opencode-directory": opts.directory } : {}),
       ...(opts.body ? { "content-type": "application/json" } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
