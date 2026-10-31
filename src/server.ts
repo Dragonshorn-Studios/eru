@@ -45,6 +45,7 @@ import {
   deleteForgeCredential,
   deleteSetting,
   deleteStalePages,
+  findConnectedRepo,
   getForgeCredential,
   getPage,
   getPrimaryRepo,
@@ -121,6 +122,7 @@ import {
   ISSUE_BOT_WEBHOOK_PATH,
   createIssueBot,
   type IssueBot,
+  type PrepareIssueSource,
 } from "./issuebot.js";
 import {
   APP_ERRORS,
@@ -216,6 +218,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
           timeoutMs: () => resolveTimeout(config, db).value,
           model: () => resolveModel(config, db, "ask").value,
         },
+        prepareSource: (job) => prepareIssueSource(db, config, fetchImpl, refresh, now, githubApp, job),
         now,
       });
       if (opts.issueBotAutoStart !== false) liveBot.start();
@@ -1498,24 +1501,19 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
   };
 }
 
-async function refreshNotice(
+async function openCheckout(
   db: SqliteDb,
   config: Config,
   fetchImpl: FetchLike,
-  refresh: RefreshRunner,
-  now: () => number,
   githubAppFactory: () => GithubAppClient | null,
   repo: MappedRepo,
-): Promise<{ ok: boolean; notice: string }> {
-  const started = now();
+): Promise<{ ok: true; workdir: string; checkoutDir: string; ref: string } | { ok: false; notice: string }> {
   const label = `${repo.owner}/${repo.name}`;
   const resolved = await repoToken(db, config, fetchImpl, githubAppFactory, repo);
   if (!resolved.ok) return { ok: false, notice: resolved.notice };
   const token = resolved.token;
   console.log(`refresh ${label}: forge token resolved (${token ? "credential" : "anonymous"})`);
 
-  // Always re-map the default branch: the one recorded at connect, else
-  // main (master) for repos connected before it was stored.
   const candidates = repo.defaultBranch ? [repo.defaultBranch] : ["main", "master"];
   let ref = "";
   let tarball: TarballResult | undefined;
@@ -1555,17 +1553,84 @@ async function refreshNotice(
     await extractTarball(tarball.data, workdir);
   } catch (err) {
     console.log(`refresh ${label} @${ref}: could not unpack the checkout —`, err instanceof Error ? err.message : err);
+    await rm(workdir, { recursive: true, force: true }).catch(() => {});
     return { ok: false, notice: "Could not unpack the checkout — refresh failed." };
   }
+  console.log(`refresh ${label} @${ref}: checkout extracted`);
+  return { ok: true, workdir, checkoutDir: joinPath(workdir, "checkout"), ref };
+}
+
+function saveMap(
+  db: SqliteDb,
+  repo: MappedRepo,
+  ref: string,
+  pages: { slug: string; title: string; body: string; sortOrder: number }[],
+  at: string,
+): void {
+  db.transaction(() => {
+    for (const page of pages) {
+      upsertPage(db, repo.id, { ...page, mappedRef: ref }, at);
+    }
+    deleteStalePages(db, repo.id, pages.map((page) => page.slug));
+    setLastMapped(db, repo.id, ref, at);
+  })();
+}
+
+async function prepareIssueSource(
+  db: SqliteDb,
+  config: Config,
+  fetchImpl: FetchLike,
+  refresh: RefreshRunner,
+  now: () => number,
+  githubAppFactory: () => GithubAppClient | null,
+  job: { forge: string; origin: string; owner: string; name: string },
+): ReturnType<PrepareIssueSource> {
+  const repo = findConnectedRepo(db, job);
+  if (!repo) return { ok: false, detail: "repo is not connected" };
+  const opened = await openCheckout(db, config, fetchImpl, githubAppFactory, repo);
+  if (!opened.ok) return { ok: false, detail: opened.notice };
+  let mapped = false;
+  let pages = listAllPages(db, repo.id);
+  if (pages.length === 0) {
+    console.log(`issuebot: ${repo.owner}/${repo.name} has no map — creating one`);
+    const result = await refresh(opened.checkoutDir, `${repo.owner}/${repo.name}`, opened.ref, resolveModel(config, db, "map").value);
+    if (result.ok) {
+      saveMap(db, repo, opened.ref, result.pages, new Date(now()).toISOString());
+      pages = listAllPages(db, repo.id);
+      mapped = true;
+    } else {
+      console.log(`issuebot: could not create a map for ${repo.owner}/${repo.name} — ${result.error}`);
+    }
+  }
+  return {
+    ok: true,
+    source: {
+      dir: opened.checkoutDir,
+      pages,
+      mapped,
+      cleanup: () => rm(opened.workdir, { recursive: true, force: true }).then(() => undefined),
+    },
+  };
+}
+
+async function refreshNotice(
+  db: SqliteDb,
+  config: Config,
+  fetchImpl: FetchLike,
+  refresh: RefreshRunner,
+  now: () => number,
+  githubAppFactory: () => GithubAppClient | null,
+  repo: MappedRepo,
+): Promise<{ ok: boolean; notice: string }> {
+  const started = now();
+  const label = `${repo.owner}/${repo.name}`;
+  const opened = await openCheckout(db, config, fetchImpl, githubAppFactory, repo);
+  if (!opened.ok) return opened;
+  const { workdir, checkoutDir, ref } = opened;
   console.log(`refresh ${label} @${ref}: checkout extracted — starting OpenCode`);
 
   try {
-    const result = await refresh(
-      joinPath(workdir, "checkout"),
-      `${repo.owner}/${repo.name}`,
-      ref,
-      resolveModel(config, db, "map").value,
-    );
+    const result = await refresh(checkoutDir, `${repo.owner}/${repo.name}`, ref, resolveModel(config, db, "map").value);
     if (!result.ok) {
       console.log(`refresh failed: ${result.error}`);
       if (result.error === "unconfigured") {
@@ -1577,14 +1642,7 @@ async function refreshNotice(
       }
       return { ok: false, notice: `OpenCode could not map the checkout${detail}` };
     }
-    const at = new Date(now()).toISOString();
-    db.transaction(() => {
-      for (const page of result.pages) {
-        upsertPage(db, repo.id, { ...page, mappedRef: ref }, at);
-      }
-      deleteStalePages(db, repo.id, result.pages.map((p) => p.slug));
-      setLastMapped(db, repo.id, ref, at);
-    })();
+    saveMap(db, repo, ref, result.pages, new Date(now()).toISOString());
     console.log(`mapped ${repo.owner}/${repo.name} @${ref}: ${result.pages.length} pages in ${Math.round((now() - started) / 1000)}s`);
     return { ok: true, notice: `Mapped @${ref} — ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.` };
   } finally {

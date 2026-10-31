@@ -1985,6 +1985,7 @@ describe("refine tab", () => {
       outcome: "agent-ready",
       refined: brief,
       why: "Open questions was empty, so Eru marked this agent-ready.",
+      note: "Mailbox is in the map. Scheduler is not a name I found.",
     });
     const logId = insertWebhookLog(instance.db, {
       at: "2026-01-03T00:00:00Z",
@@ -2011,6 +2012,8 @@ describe("refine tab", () => {
     expect(html).not.toContain(">queued<");
     expect(html).not.toContain("Queued. The issue mentions");
     expect(html.match(/Open questions was empty/g)).toHaveLength(1);
+    expect(html).toContain("Mailbox is in the map. Scheduler is not a name I found.");
+    expect(html).toContain('class="issue-link" href="https://github.com/acme/box/issues/105"');
   });
 
   it("lists a delivery with no issue number by its event", async () => {

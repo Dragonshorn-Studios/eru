@@ -32,7 +32,7 @@ Threads persist across reloads — the OpenCode session id is recorded on the th
 
 ## The Refine tab
 
-Same shell, tab switched. The left column is the webhook log for the **selected repo** only: each row is the issue number and the status. A row stays queued only while the rewrite is still running. When the job finishes it becomes agent-ready, needs-info, didn't land, or skipped. The right column is why. A queued rewrite also shows the brief: why the verdict landed, the eight sections, and the original issue under **What arrived**.
+Same shell, tab switched. The left column is the webhook log for the **selected repo** only: each row is the issue number and the status. A row stays queued only while the rewrite is still running. When the job finishes it becomes agent-ready, needs-info, didn't land, or skipped. The right column is why, then a short note from Eru on whether the names in the issue match the code. If the repo has no map yet, Eru creates one before it reads the checkout. The issue number links to the forge. A queued rewrite also shows the brief: why the verdict landed, the eight sections, and the original issue under **What arrived**.
 
 **Log** sits in the top bar beside Config. `/log` lists every delivery, every repository, including pings and repos that are not selected. A catch from another repo is not listed on Refine and its Refine URL is a 404. Issue text and the model brief are untrusted and rendered as escaped markdown. Jobs finished before this tab existed say the story was not kept.
 
