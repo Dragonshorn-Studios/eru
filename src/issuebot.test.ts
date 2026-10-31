@@ -1,10 +1,12 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   enqueueIssueRefineJob,
   listIssueRefineJobs,
+  listWebhookLogs,
   openDb,
+  WEBHOOK_REJECTED_KEEP,
   upsertConnectedRepo,
 } from "./db.js";
 import {
@@ -20,6 +22,7 @@ import {
   LABEL_REFINED,
   composeIssueBody,
   createIssueBot,
+  explainWebhookDecision,
   hasIssueBotMarker,
   openQuestionsEmpty,
   parseRefinedMarkdown,
@@ -286,10 +289,14 @@ describe("enqueue filter", () => {
       enqueue: false,
       reason: "mention",
     });
-    expect(shouldEnqueueIssue(openedPayload({ action: "edited" }), opts)).toEqual({
+    expect(shouldEnqueueIssue(openedPayload({ action: "closed" }), opts)).toEqual({
       enqueue: false,
       reason: "action",
     });
+    expect(shouldEnqueueIssue(openedPayload({ action: "edited" }), opts).enqueue).toBe(true);
+    expect(
+      shouldEnqueueIssue(openedPayload({ body: "no mention here", title: "please @eru-issue-bot" }), opts).enqueue,
+    ).toBe(true);
   });
 
   it("enqueues an allowlisted bot even when author_association is NONE", () => {
@@ -302,6 +309,16 @@ describe("enqueue filter", () => {
     expect(
       shouldEnqueueIssue(openedPayload({ body: `${ISSUE_BOT_MARKER}\n\n@eru-issue-bot\n` }), opts),
     ).toEqual({ enqueue: false, reason: "marker" });
+    expect(
+      shouldEnqueueIssue(openedPayload({ title: ISSUE_BOT_MARKER, body: "please @eru-issue-bot" }), opts),
+    ).toEqual({ enqueue: false, reason: "marker" });
+  });
+
+  it("tells GitLab that only an open is rewritten", () => {
+    const facts = { owner: "acme", name: "box", issueNumber: 12, title: "", action: "update", association: "" };
+    expect(explainWebhookDecision("action", facts, "gitlab")).toContain("when it is opened");
+    expect(explainWebhookDecision("action", facts, "gitlab")).not.toContain("edited");
+    expect(explainWebhookDecision("action", facts, "github")).toContain("opened or edited");
   });
 });
 
@@ -351,6 +368,30 @@ describe("POST /webhooks/github", () => {
     const res = await postWebhook(app, payload, { "X-Hub-Signature-256": sign(JSON.stringify(payload), "wrong-secret-16++") });
     expect(res.status).toBe(401);
     expect(listIssueRefineJobs(db)).toEqual([]);
+    expect(listWebhookLogs(db)[0]).toMatchObject({ outcome: "rejected", reason: "signature" });
+    expect(listWebhookLogs(db)[0].detail).toContain("did not match");
+  });
+
+  it("keeps a signed delivery when bad signatures fill the rejected log", async () => {
+    const { app, db } = testApp({});
+    await postWebhook(app, openedPayload({ body: "no mention" }), { "X-GitHub-Delivery": "d-real" });
+    const raw = JSON.stringify(openedPayload({}));
+    for (let i = 0; i < WEBHOOK_REJECTED_KEEP + 5; i++) {
+      const res = await app.request("/webhooks/github", {
+        method: "POST",
+        body: raw,
+        headers: {
+          "Content-Type": "application/json",
+          "X-GitHub-Event": "issues",
+          "X-GitHub-Delivery": `bad-${i}`,
+          "X-Hub-Signature-256": sign(raw, "wrong-secret-16++"),
+        },
+      });
+      expect(res.status).toBe(401);
+    }
+    const logs = listWebhookLogs(db, 80);
+    expect(logs.some((entry) => entry.delivery === "d-real" && entry.reason === "mention")).toBe(true);
+    expect(logs.filter((entry) => entry.outcome === "rejected")).toHaveLength(WEBHOOK_REJECTED_KEEP);
   });
 
   it("ignores a second webhook for the same issue", async () => {
@@ -360,7 +401,9 @@ describe("POST /webhooks/github", () => {
     const second = await postWebhook(app, payload, { "X-GitHub-Delivery": "deliv-b" });
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
+    expect(await second.json()).toMatchObject({ outcome: "ignored", reason: "duplicate", repo: "acme/box", issue: 12 });
     expect(listIssueRefineJobs(db)).toHaveLength(1);
+    expect(listWebhookLogs(db).some((entry) => entry.reason === "duplicate")).toBe(true);
   });
 
   it("rejects a payload larger than ISSUE_BOT_MAX_BODY_BYTES", async () => {
@@ -471,8 +514,95 @@ describe("POST /webhooks/github", () => {
       "X-GitHub-Delivery": "d-unconnected",
     });
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "github",
+      repo: "other/lamp",
+      issue: 12,
+      event: "issues",
+      action: "opened",
+      delivery: "d-unconnected",
+      jobId: null,
+    });
     expect(listIssueRefineJobs(db)).toEqual([]);
+    expect(listWebhookLogs(db)[0].detail).toContain("not connected");
+  });
+
+  it("puts the decision and repo on the 202 body and on the server log", async () => {
+    const { app, db } = testApp({});
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => {
+      if (typeof line === "string" && line.startsWith("issuebot webhook")) lines.push(line);
+    });
+    try {
+      const missed = await postWebhook(app, openedPayload({ body: "no mention", title: "Lamp" }), {
+        "X-GitHub-Delivery": "d-mention",
+      });
+      expect(missed.status).toBe(202);
+      const missedBody = (await missed.json()) as Record<string, unknown>;
+      expect(missedBody).toMatchObject({
+        ok: true,
+        outcome: "ignored",
+        reason: "mention",
+        forge: "github",
+        repo: "acme/box",
+        issue: 12,
+        event: "issues",
+        action: "opened",
+        delivery: "d-mention",
+        jobId: null,
+      });
+      expect(missedBody.detail).toEqual(expect.stringContaining("@eru-issue-bot"));
+      expect(JSON.stringify(missedBody)).not.toContain("no mention");
+
+      const queued = await postWebhook(app, openedPayload({}), { "X-GitHub-Delivery": "d-queue" });
+      const queuedBody = (await queued.json()) as { jobId: number; detail: string };
+      expect(queuedBody).toMatchObject({
+        ok: true,
+        outcome: "queued",
+        reason: "queued",
+        forge: "github",
+        repo: "acme/box",
+        issue: 12,
+        delivery: "d-queue",
+      });
+      expect(queuedBody.jobId).toBe(listIssueRefineJobs(db)[0]?.id);
+      expect(queuedBody.detail).toContain("acme/box");
+      expect(JSON.stringify(queuedBody)).not.toContain("hallway");
+
+      const pingRaw = JSON.stringify({ zen: "keep it logically awesome" });
+      const ping = await app.request("/webhooks/github", {
+        method: "POST",
+        body: pingRaw,
+        headers: {
+          "Content-Type": "application/json",
+          "X-GitHub-Event": "ping",
+          "X-GitHub-Delivery": "d-ping",
+          "X-Hub-Signature-256": sign(pingRaw),
+        },
+      });
+      expect(ping.status).toBe(202);
+      expect(await ping.json()).toMatchObject({
+        ok: true,
+        outcome: "ignored",
+        reason: "event",
+        forge: "github",
+        repo: null,
+        issue: null,
+        event: "ping",
+        delivery: "d-ping",
+        jobId: null,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.some((line) => line.includes("repo=acme/box#12") && line.includes("reason=mention"))).toBe(true);
+    expect(lines.some((line) => line.includes("outcome=queued") && line.includes("reason=queued"))).toBe(true);
+    expect(lines.some((line) => line.includes("event=ping") && line.includes("reason=event"))).toBe(true);
+    expect(lines.join("\n")).not.toContain(WEBHOOK_SECRET);
+    expect(lines.join("\n")).not.toContain("hallway");
   });
 
   it("enqueues a connected repo even when owner and name casing differ", async () => {
@@ -707,7 +837,7 @@ describe("issue refine worker", () => {
 });
 
 function gitlabOpened(
-  opts: { description?: string; action?: string; iid?: number; path?: string } = {},
+  opts: { description?: string; action?: string; iid?: number; path?: string; title?: string } = {},
 ): Record<string, unknown> {
   return {
     object_kind: "issue",
@@ -716,14 +846,14 @@ function gitlabOpened(
     object_attributes: {
       action: opts.action ?? "open",
       iid: opts.iid ?? 12,
-      title: "The lights flicker",
+      title: opts.title ?? "The lights flicker",
       description: opts.description ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
     },
   };
 }
 
 function forgejoOpened(
-  opts: { body?: string; action?: string; number?: number; owner?: string; repo?: string } = {},
+  opts: { body?: string; action?: string; number?: number; owner?: string; repo?: string; title?: string } = {},
 ): Record<string, unknown> {
   return {
     action: opts.action ?? "opened",
@@ -731,7 +861,7 @@ function forgejoOpened(
     repository: { name: opts.repo ?? "box", owner: { login: opts.owner ?? "acme" } },
     issue: {
       number: opts.number ?? 12,
-      title: "The lights flicker",
+      title: opts.title ?? "The lights flicker",
       body: opts.body ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
     },
   };
@@ -752,7 +882,16 @@ describe("gitlab and forgejo enqueue filters", () => {
         body: "The hallway lamp is dead.\n\n@eru-issue-bot\n",
       },
     });
-    expect(shouldEnqueueGitlabIssue(gitlabOpened({ action: "update" }), { trustedBotIds: [] }).enqueue).toBe(false);
+    expect(shouldEnqueueGitlabIssue(gitlabOpened({ action: "update" }), { trustedBotIds: [] })).toEqual({
+      enqueue: false,
+      reason: "action",
+    });
+    expect(
+      shouldEnqueueGitlabIssue(
+        gitlabOpened({ title: ISSUE_BOT_MARKER, description: "please @eru-issue-bot" }),
+        { trustedBotIds: [] },
+      ),
+    ).toEqual({ enqueue: false, reason: "marker" });
     expect(shouldEnqueueGitlabIssue(gitlabOpened({ description: "no mention" }), { trustedBotIds: [] }).enqueue).toBe(
       false,
     );
@@ -763,6 +902,11 @@ describe("gitlab and forgejo enqueue filters", () => {
     expect(decision.enqueue).toBe(true);
     if (decision.enqueue) expect(decision.target.forge).toBe("forgejo");
     expect(shouldEnqueueForgejoIssue(forgejoOpened({ action: "closed" }), { trustedBotIds: [] }).enqueue).toBe(false);
+    expect(
+      shouldEnqueueForgejoIssue(forgejoOpened({ title: ISSUE_BOT_MARKER, body: "please @eru-issue-bot" }), {
+        trustedBotIds: [],
+      }),
+    ).toEqual({ enqueue: false, reason: "marker" });
   });
 });
 
@@ -816,6 +960,7 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
       headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": "nope-nope-nope-nope" },
     });
     expect(bad.status).toBe(401);
+    expect(listWebhookLogs(db)[0]).toMatchObject({ forge: "gitlab", outcome: "rejected", reason: "signature" });
     const good = await app.request("/webhooks/gitlab", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -847,6 +992,15 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
       headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
     });
     expect(gitlab.status).toBe(202);
+    const gitlabBody = (await gitlab.json()) as { detail: string };
+    expect(gitlabBody).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "gitlab",
+      repo: "other/lamp",
+    });
+    expect(gitlabBody.detail).not.toContain("edit");
     const payload = JSON.stringify(forgejoOpened({ owner: "other", repo: "lamp" }));
     const sig = createHmac("sha256", FORGEJO_SECRET).update(payload).digest("hex");
     const forgejo = await app.request("/webhooks/forgejo", {
@@ -855,7 +1009,52 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
       headers: { "Content-Type": "application/json", "X-Gitea-Event": "issues", "X-Gitea-Signature": sig },
     });
     expect(forgejo.status).toBe(202);
+    expect(await forgejo.json()).toMatchObject({
+      ok: true,
+      outcome: "ignored",
+      reason: "unconnected",
+      forge: "forgejo",
+      repo: "other/lamp",
+    });
     expect(listIssueRefineJobs(db)).toEqual([]);
+  });
+
+  it("logs GitLab and Forgejo deliveries that are not issue events", async () => {
+    const { app, db } = instanceApp();
+    const push = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: "{}",
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Push Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(push.status).toBe(202);
+    expect(await push.json()).toMatchObject({ outcome: "ignored", reason: "event", forge: "gitlab", event: "Push Hook" });
+    const raw = "{}";
+    const sig = createHmac("sha256", FORGEJO_SECRET).update(raw).digest("hex");
+    const forgejo = await app.request("/webhooks/forgejo", {
+      method: "POST",
+      body: raw,
+      headers: { "Content-Type": "application/json", "X-Gitea-Event": "push", "X-Gitea-Signature": sig },
+    });
+    expect(forgejo.status).toBe(202);
+    expect(await forgejo.json()).toMatchObject({ outcome: "ignored", reason: "event", forge: "forgejo", event: "push" });
+    const badJson = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: "not-json",
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(badJson.status).toBe(202);
+    expect(await badJson.json()).toMatchObject({ outcome: "ignored", reason: "json", forge: "gitlab" });
+    const update = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(gitlabOpened({ action: "update" })),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(update.status).toBe(202);
+    const updateBody = (await update.json()) as { detail: string };
+    expect(updateBody.detail).toContain("when it is opened");
+    expect(updateBody.detail).not.toContain("edited");
+    expect(listIssueRefineJobs(db)).toEqual([]);
+    expect(listWebhookLogs(db).map((entry) => entry.reason).sort()).toEqual(["action", "event", "event", "json"]);
   });
 
   it("returns 404 when GitLab or Forgejo webhook secrets are missing", async () => {

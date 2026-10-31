@@ -18,6 +18,11 @@ import {
   getPrimaryRepo,
   getRepo,
   getSetting,
+  getWebhookLog,
+  insertWebhookLog,
+  listWebhookLogs,
+  WEBHOOK_LOG_KEEP,
+  WEBHOOK_REJECTED_KEEP,
   listPages,
   migrate,
   openDb,
@@ -53,7 +58,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(10);
+    expect(migrations.n).toBe(11);
     again.close();
   });
 
@@ -98,7 +103,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(10);
+    expect(migrations.n).toBe(11);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -107,7 +112,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(10);
+    expect(after.n).toBe(11);
     legacy.close();
   });
 });
@@ -521,5 +526,48 @@ describe("issue refine jobs", () => {
     );
     expect(hostB).not.toBe(1);
     legacy.close();
+  });
+});
+
+describe("webhook log", () => {
+  function row(detail: string, outcome: "queued" | "ignored" | "rejected" = "ignored") {
+    return {
+      at: "2026-01-01T00:00:00Z",
+      forge: "github",
+      outcome,
+      reason: outcome === "rejected" ? "signature" : "mention",
+      detail,
+      title: "  lights\n flicker  ",
+      owner: "o".repeat(250),
+    };
+  }
+
+  it("truncates title, owner, and detail, and collapses title whitespace", () => {
+    const db = openDb(":memory:");
+    const id = insertWebhookLog(db, { ...row("d".repeat(600)), title: "  lights\n flicker  " });
+    const entry = getWebhookLog(db, id);
+    expect(entry?.title).toBe("lights flicker");
+    expect(entry?.owner).toHaveLength(200);
+    expect(entry?.detail).toHaveLength(500);
+    expect(getWebhookLog(db, id + 50)).toBeUndefined();
+  });
+
+  it("keeps signed deliveries when rejected signatures fill their own cap", () => {
+    const db = openDb(":memory:");
+    const kept = insertWebhookLog(db, row("signed-delivery"));
+    for (let i = 0; i < WEBHOOK_REJECTED_KEEP + 15; i++) insertWebhookLog(db, row(`bad-${i}`, "rejected"));
+    for (let i = 0; i < WEBHOOK_LOG_KEEP + 5; i++) insertWebhookLog(db, row(`later-${i}`));
+    expect(getWebhookLog(db, kept)).toBeUndefined();
+    const all = listWebhookLogs(db, WEBHOOK_LOG_KEEP);
+    expect(all.filter((entry) => entry.outcome === "rejected")).toHaveLength(0);
+    expect(listWebhookLogs(db, 1)).toHaveLength(1);
+    expect(listWebhookLogs(db, 10_000)).toHaveLength(WEBHOOK_LOG_KEEP);
+    const rejected = db.prepare(`SELECT COUNT(*) AS n FROM webhook_log WHERE outcome = 'rejected'`).get() as { n: number };
+    const signed = db.prepare(`SELECT COUNT(*) AS n FROM webhook_log WHERE outcome != 'rejected'`).get() as { n: number };
+    expect(rejected.n).toBe(WEBHOOK_REJECTED_KEEP);
+    expect(signed.n).toBe(WEBHOOK_LOG_KEEP);
+    expect(db.prepare(`SELECT detail FROM webhook_log WHERE outcome != 'rejected' ORDER BY id ASC LIMIT 1`).get()).toEqual({
+      detail: "later-5",
+    });
   });
 });

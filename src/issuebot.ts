@@ -20,6 +20,7 @@ import {
   enqueueIssueRefineJob,
   failIssueRefineJob,
   findConnectedRepo,
+  insertWebhookLog,
   recoverIssueRefineJobs,
   retryIssueRefineJob,
   type IssueRefineJob,
@@ -141,6 +142,10 @@ export function bodyMentionsIssueBot(body: string): boolean {
   return MENTION_RE.test(body);
 }
 
+export function textMentionsIssueBot(title: string, body: string): boolean {
+  return bodyMentionsIssueBot(title) || bodyMentionsIssueBot(body);
+}
+
 export function hasIssueBotMarker(body: string): boolean {
   return body.includes(ISSUE_BOT_MARKER);
 }
@@ -161,6 +166,133 @@ export interface EnqueueTarget {
 
 export type EnqueueDecision = { enqueue: true; target: EnqueueTarget } | { enqueue: false; reason: string };
 
+export interface WebhookFacts {
+  owner: string;
+  name: string;
+  issueNumber: number | null;
+  title: string;
+  action: string;
+  association: string;
+}
+
+export function emptyWebhookFacts(): WebhookFacts {
+  return { owner: "", name: "", issueNumber: null, title: "", action: "", association: "" };
+}
+
+function clipFact(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+/** What GitHub, GitLab, and Forgejo store on the delivery. No issue body and no secret. */
+export interface WebhookAck {
+  ok: true;
+  outcome: "queued" | "ignored" | "rejected";
+  reason: string;
+  detail: string;
+  forge: string;
+  repo: string | null;
+  issue: number | null;
+  event: string | null;
+  action: string | null;
+  delivery: string | null;
+  jobId: number | null;
+}
+
+/** Operator sentence. No issue body and no webhook secret. */
+export function explainWebhookDecision(
+  reason: string,
+  facts: WebhookFacts = emptyWebhookFacts(),
+  forge = "",
+): string {
+  const where = facts.owner && facts.name ? `${facts.owner}/${facts.name}` : "this repository";
+  const action = clipFact(facts.action) || "unknown";
+  const association = clipFact(facts.association) || "unknown";
+  switch (reason) {
+    case "queued":
+      return `Queued. The issue mentions @eru-issue-bot and ${where} is connected.`;
+    case "duplicate":
+      return "Ignored. This issue is already queued.";
+    case "unconnected": {
+      const again = forge === FORGE_GITLAB ? "open an issue" : "open or edit an issue";
+      return `Ignored. ${where} is not connected in Eru. Connect the repo, then ${again} that mentions @eru-issue-bot.`;
+    }
+    case "mention":
+      return "Ignored. Neither the title nor the body mentions @eru-issue-bot. The GitHub App name is not the mention.";
+    case "action":
+      if (forge === FORGE_GITLAB) {
+        return `Ignored. The action was “${action}”. Eru rewrites a GitLab issue when it is opened and mentions @eru-issue-bot.`;
+      }
+      return `Ignored. The action was “${action}”. Eru rewrites an issue when it is opened or edited and mentions @eru-issue-bot.`;
+    case "author":
+      return `Ignored. GitHub author association was ${association}, not owner, member, or collaborator.`;
+    case "own-bot":
+      return "Ignored. The sender is the issue bot, so refining it would loop.";
+    case "marker":
+      return "Ignored. The issue already has the Eru rewrite marker.";
+    case "cap":
+      return `Ignored. ${where} is over the hourly refine cap.`;
+    case "event":
+      return `Ignored. The delivery was “${action}”, not an issue event.`;
+    case "signature":
+      return "Rejected. The webhook signature or token did not match.";
+    case "delivery":
+      return "Rejected. The delivery id was missing.";
+    case "json":
+      return "Ignored. The body was not JSON.";
+    default:
+      return `Ignored. The payload was not a usable issue (${clipFact(reason) || "unknown"}).`;
+  }
+}
+
+export function githubWebhookFacts(payload: unknown): WebhookFacts {
+  const facts = emptyWebhookFacts();
+  if (payload == null || typeof payload !== "object") return facts;
+  const body = payload as Record<string, unknown>;
+  facts.action = typeof body.action === "string" ? body.action : "";
+  const issue = asRecord(body.issue);
+  if (typeof issue?.title === "string") facts.title = issue.title;
+  if (typeof issue?.author_association === "string") facts.association = issue.author_association;
+  facts.issueNumber = asPositiveInt(issue?.number) ?? null;
+  const repo = asRecord(body.repository);
+  const owner = asRecord(repo?.owner);
+  if (typeof owner?.login === "string") facts.owner = owner.login;
+  if (typeof repo?.name === "string") facts.name = repo.name;
+  return facts;
+}
+
+export function gitlabWebhookFacts(payload: unknown): WebhookFacts {
+  const facts = emptyWebhookFacts();
+  if (payload == null || typeof payload !== "object") return facts;
+  const body = payload as Record<string, unknown>;
+  const attrs = asRecord(body.object_attributes);
+  facts.action = typeof attrs?.action === "string" ? attrs.action : "";
+  if (typeof attrs?.title === "string") facts.title = attrs.title;
+  facts.issueNumber = asPositiveInt(attrs?.iid) ?? null;
+  const project = asRecord(body.project);
+  const path = typeof project?.path_with_namespace === "string" ? splitNamespace(project.path_with_namespace) : undefined;
+  if (path) {
+    facts.owner = path.owner;
+    facts.name = path.name;
+  }
+  return facts;
+}
+
+export function forgejoWebhookFacts(payload: unknown): WebhookFacts {
+  const facts = emptyWebhookFacts();
+  if (payload == null || typeof payload !== "object") return facts;
+  const body = payload as Record<string, unknown>;
+  facts.action = typeof body.action === "string" ? body.action : "";
+  const issue = asRecord(body.issue);
+  if (typeof issue?.title === "string") facts.title = issue.title;
+  facts.issueNumber = asPositiveInt(issue?.number) ?? null;
+  const repo = asRecord(body.repository);
+  const owner = asRecord(repo?.owner);
+  facts.owner =
+    (typeof owner?.login === "string" && owner.login) || (typeof owner?.username === "string" && owner.username) || "";
+  if (typeof repo?.name === "string") facts.name = repo.name;
+  return facts;
+}
+
 /** Filter for `issues` `opened` events. Everything else is ignored. */
 export function shouldEnqueueIssue(
   payload: unknown,
@@ -168,13 +300,14 @@ export function shouldEnqueueIssue(
 ): EnqueueDecision {
   if (payload == null || typeof payload !== "object") return { enqueue: false, reason: "payload" };
   const body = payload as Record<string, unknown>;
-  if (body.action !== "opened") return { enqueue: false, reason: "action" };
+  if (body.action !== "opened" && body.action !== "edited") return { enqueue: false, reason: "action" };
 
   const issue = asRecord(body.issue);
   if (!issue) return { enqueue: false, reason: "issue" };
+  const issueTitle = typeof issue.title === "string" ? issue.title : "";
   const issueBody = typeof issue.body === "string" ? issue.body : "";
-  if (!bodyMentionsIssueBot(issueBody)) return { enqueue: false, reason: "mention" };
-  if (hasIssueBotMarker(issueBody)) return { enqueue: false, reason: "marker" };
+  if (!textMentionsIssueBot(issueTitle, issueBody)) return { enqueue: false, reason: "mention" };
+  if (hasIssueBotMarker(issueBody) || hasIssueBotMarker(issueTitle)) return { enqueue: false, reason: "marker" };
 
   const sender = asRecord(body.sender);
   const senderId = asPositiveInt(sender?.id);
@@ -223,9 +356,10 @@ export function shouldEnqueueGitlabIssue(
   const attrs = asRecord(body.object_attributes);
   if (!attrs) return { enqueue: false, reason: "issue" };
   if (attrs.action !== "open") return { enqueue: false, reason: "action" };
+  const issueTitle = typeof attrs.title === "string" ? attrs.title : "";
   const issueBody = typeof attrs.description === "string" ? attrs.description : "";
-  if (!bodyMentionsIssueBot(issueBody)) return { enqueue: false, reason: "mention" };
-  if (hasIssueBotMarker(issueBody)) return { enqueue: false, reason: "marker" };
+  if (!textMentionsIssueBot(issueTitle, issueBody)) return { enqueue: false, reason: "mention" };
+  if (hasIssueBotMarker(issueBody) || hasIssueBotMarker(issueTitle)) return { enqueue: false, reason: "marker" };
   const user = asRecord(body.user);
   const senderId = asPositiveInt(user?.id);
   if (senderId === undefined) return { enqueue: false, reason: "sender" };
@@ -256,12 +390,13 @@ export function shouldEnqueueForgejoIssue(
 ): EnqueueDecision {
   if (payload == null || typeof payload !== "object") return { enqueue: false, reason: "payload" };
   const body = payload as Record<string, unknown>;
-  if (body.action !== "opened") return { enqueue: false, reason: "action" };
+  if (body.action !== "opened" && body.action !== "edited") return { enqueue: false, reason: "action" };
   const issue = asRecord(body.issue);
   if (!issue) return { enqueue: false, reason: "issue" };
+  const issueTitle = typeof issue.title === "string" ? issue.title : "";
   const issueBody = typeof issue.body === "string" ? issue.body : "";
-  if (!bodyMentionsIssueBot(issueBody)) return { enqueue: false, reason: "mention" };
-  if (hasIssueBotMarker(issueBody)) return { enqueue: false, reason: "marker" };
+  if (!textMentionsIssueBot(issueTitle, issueBody)) return { enqueue: false, reason: "mention" };
+  if (hasIssueBotMarker(issueBody) || hasIssueBotMarker(issueTitle)) return { enqueue: false, reason: "marker" };
   const sender = asRecord(body.sender);
   const senderId = asPositiveInt(sender?.id);
   if (senderId === undefined) return { enqueue: false, reason: "sender" };
@@ -427,27 +562,85 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     return Boolean(findConnectedRepo(db, { forge, owner, name, origin: connectedOrigin(forge) }));
   }
 
-  async function acceptJob(decision: EnqueueDecision): Promise<Response> {
-    if (!decision.enqueue) return jsonOk();
+  function recordWebhook(row: {
+    forge: string;
+    outcome: "queued" | "ignored" | "rejected";
+    reason: string;
+    facts?: WebhookFacts;
+    event?: string;
+    delivery?: string;
+    jobId?: number | null;
+  }): WebhookAck {
+    const facts = row.facts ?? emptyWebhookFacts();
+    const detail = explainWebhookDecision(row.reason, facts, row.forge).slice(0, 500);
+    const repo =
+      facts.owner && facts.name ? `${facts.owner.slice(0, 200)}/${facts.name.slice(0, 200)}` : null;
+    const event = clipFact(row.event ?? "") || null;
+    const action = clipFact(facts.action) || null;
+    const delivery = clipFact(row.delivery ?? "") || null;
+    insertWebhookLog(db, {
+      at: iso(),
+      forge: row.forge,
+      origin: connectedOrigin(row.forge),
+      owner: facts.owner,
+      name: facts.name,
+      issueNumber: facts.issueNumber,
+      delivery: row.delivery,
+      event: row.event,
+      action: facts.action,
+      outcome: row.outcome,
+      reason: row.reason,
+      detail,
+      title: facts.title,
+      jobId: row.jobId,
+    });
+    const ack: WebhookAck = {
+      ok: true,
+      outcome: row.outcome,
+      reason: row.reason,
+      detail,
+      forge: row.forge,
+      repo,
+      issue: facts.issueNumber,
+      event,
+      action,
+      delivery,
+      jobId: row.jobId ?? null,
+    };
+    const where = repo ? `${repo}${facts.issueNumber ? `#${facts.issueNumber}` : ""}` : "-";
+    console.log(
+      `issuebot webhook forge=${row.forge} repo=${where} event=${event ?? "-"} action=${action ?? "-"} outcome=${row.outcome} reason=${row.reason} delivery=${delivery ?? "-"} — ${detail}`,
+    );
+    return ack;
+  }
+
+  async function acceptJob(
+    decision: EnqueueDecision,
+    ctx: { forge: string; event: string; delivery: string; facts: WebhookFacts },
+  ): Promise<Response> {
+    if (!decision.enqueue) {
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: decision.reason }));
+    }
     const parsed = decision.target;
     if (!isConnected(parsed.forge, parsed.owner, parsed.name)) {
-      console.log(`issuebot: ignored unconnected ${parsed.forge}:${parsed.owner}/${parsed.name}`);
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "unconnected" }));
     }
     const at = iso();
     const hourAgo = iso(now() - 60 * 60 * 1000);
     if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo, parsed.forge) >= hourlyCap) {
-      console.log(`issuebot: hourly cap ${parsed.forge}:${parsed.owner}/${parsed.name}`);
-      return jsonOk();
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "cap" }));
     }
     const id = enqueueIssueRefineJob(db, { ...parsed, origin: connectedOrigin(parsed.forge) }, at);
-    if (id) console.log(`issuebot: queued ${parsed.forge}:${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
-    if (id && !stopped) void processDue();
-    return jsonOk();
+    if (!id) {
+      return jsonOk(recordWebhook({ ...ctx, outcome: "ignored", reason: "duplicate" }));
+    }
+    const ack = recordWebhook({ ...ctx, outcome: "queued", reason: "queued", jobId: id });
+    if (!stopped) void processDue();
+    return jsonOk(ack);
   }
 
-  function jsonOk(): Response {
-    return new Response(JSON.stringify({ ok: true }), {
+  function jsonOk(ack: WebhookAck): Response {
+    return new Response(JSON.stringify(ack), {
       status: 202,
       headers: { "content-type": "application/json" },
     });
@@ -458,25 +651,39 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     const raw = await c.req.text();
     const signature = c.req.header("x-hub-signature-256") ?? c.req.header("X-Hub-Signature-256");
     if (!verifyGithubWebhookSignature(config.webhookSecret, raw, signature)) {
+      recordWebhook({ forge: FORGE_GITHUB, outcome: "rejected", reason: "signature" });
       return c.text("unauthorized", 401);
     }
     const deliveryId = (c.req.header("x-github-delivery") ?? c.req.header("X-GitHub-Delivery") ?? "").trim();
-    if (!deliveryId) return c.text("missing delivery", 400);
+    if (!deliveryId) {
+      recordWebhook({ forge: FORGE_GITHUB, outcome: "rejected", reason: "delivery" });
+      return c.text("missing delivery", 400);
+    }
     const event = (c.req.header("x-github-event") ?? c.req.header("X-GitHub-Event") ?? "").trim();
     if (event !== "issues") {
-      return c.json({ ok: true }, 202);
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_GITHUB,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          delivery: deliveryId,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
     }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_GITHUB, outcome: "ignored", reason: "json", event, delivery: deliveryId }));
     }
     return acceptJob(
       shouldEnqueueIssue(payload, {
         botUserId: config.botUserId,
         trustedBotIds: config.trustedBotIds,
       }),
+      { forge: FORGE_GITHUB, event, delivery: deliveryId, facts: githubWebhookFacts(payload) },
     );
   }
 
@@ -486,19 +693,33 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     const raw = await c.req.text();
     const token = c.req.header("x-gitlab-token") ?? c.req.header("X-Gitlab-Token");
     if (!verifyGitlabWebhookToken(gitlab.webhookSecret, token)) {
+      recordWebhook({ forge: FORGE_GITLAB, outcome: "rejected", reason: "signature" });
       return c.text("unauthorized", 401);
     }
     const event = (c.req.header("x-gitlab-event") ?? c.req.header("X-Gitlab-Event") ?? "").trim();
     if (event && event !== "Issue Hook" && event !== "Confidential Issue Hook") {
-      return c.json({ ok: true }, 202);
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_GITLAB,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
     }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_GITLAB, outcome: "ignored", reason: "json", event }));
     }
-    return acceptJob(shouldEnqueueGitlabIssue(payload, { trustedBotIds }));
+    return acceptJob(shouldEnqueueGitlabIssue(payload, { trustedBotIds }), {
+      forge: FORGE_GITLAB,
+      event: event || "Issue Hook",
+      delivery: "",
+      facts: gitlabWebhookFacts(payload),
+    });
   }
 
   async function handleForgejoWebhook(c: Context): Promise<Response> {
@@ -513,6 +734,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       c.req.header("x-forgejo-signature") ??
       c.req.header("X-Forgejo-Signature");
     if (!verifyForgejoWebhookSignature(forgejo.webhookSecret, raw, signature)) {
+      recordWebhook({ forge: FORGE_FORGEJO, outcome: "rejected", reason: "signature" });
       return c.text("unauthorized", 401);
     }
     const event = (
@@ -522,14 +744,29 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       c.req.header("X-Forgejo-Event") ??
       ""
     ).trim();
-    if (event && event !== "issues") return c.json({ ok: true }, 202);
+    if (event && event !== "issues") {
+      return jsonOk(
+        recordWebhook({
+          forge: FORGE_FORGEJO,
+          outcome: "ignored",
+          reason: "event",
+          event,
+          facts: { ...emptyWebhookFacts(), action: event },
+        }),
+      );
+    }
     let payload: unknown;
     try {
       payload = JSON.parse(raw) as unknown;
     } catch {
-      return c.json({ ok: true }, 202);
+      return jsonOk(recordWebhook({ forge: FORGE_FORGEJO, outcome: "ignored", reason: "json", event }));
     }
-    return acceptJob(shouldEnqueueForgejoIssue(payload, { trustedBotIds }));
+    return acceptJob(shouldEnqueueForgejoIssue(payload, { trustedBotIds }), {
+      forge: FORGE_FORGEJO,
+      event: event || "issues",
+      delivery: "",
+      facts: forgejoWebhookFacts(payload),
+    });
   }
 
   async function processDue(): Promise<void> {

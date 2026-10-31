@@ -32,7 +32,7 @@ Threads persist across reloads — the OpenCode session id is recorded on the th
 
 ## The Refine tab
 
-Same shell, tab switched. The left column lists webhooks Eru caught for the **selected** repo — issue number, title, and a pill (`caught`, `rewriting`, `agent-ready`, `needs-info`, `didn't land`, `skipped`). The right column is the story: why that verdict landed, the brief split into the eight sections, and the original issue collapsed under **What arrived**.
+Same shell, tab switched. The left column is the webhook log: every delivery Eru accepted, including ones it ignored, with the reason (no `@eru-issue-bot` mention, repo not connected, author not trusted, already queued). The right column is that decision. A queued rewrite also shows the brief: why the verdict landed, the eight sections, and the original issue under **What arrived**.
 
 A catch from another repo is not listed and its URL is a 404. Issue text and the model brief are untrusted and rendered as escaped markdown. Jobs finished before this tab existed say the story was not kept.
 

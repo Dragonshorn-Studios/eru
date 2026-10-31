@@ -208,6 +208,12 @@ const MIGRATIONS: Migration[] = [
       if (!names.has("why")) db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN why TEXT`);
     },
   },
+  {
+    name: "0011_webhook_log.sql",
+    apply(db) {
+      db.exec(WEBHOOK_LOG_SQL);
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -248,6 +254,27 @@ CREATE TABLE IF NOT EXISTS issue_refine_jobs (
 );
 CREATE INDEX IF NOT EXISTS issue_refine_jobs_poll_idx ON issue_refine_jobs (status, run_after, id);
 CREATE INDEX IF NOT EXISTS issue_refine_jobs_repo_idx ON issue_refine_jobs (forge, owner, name, created_at);
+`;
+
+const WEBHOOK_LOG_SQL = `
+CREATE TABLE IF NOT EXISTS webhook_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  forge TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT '',
+  owner TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  issue_number INTEGER,
+  delivery TEXT NOT NULL DEFAULT '',
+  event TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  job_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS webhook_log_at_idx ON webhook_log (id DESC);
 `;
 
 export function openDb(path: string): SqliteDb {
@@ -631,6 +658,109 @@ export function retryIssueRefineJob(db: SqliteDb, id: number, at: string, runAft
 }
 
 /** Jobs left `running` after a crash go back on the queue. */
+export type WebhookLogOutcome = "queued" | "ignored" | "rejected";
+
+export interface WebhookLogEntry {
+  id: number;
+  at: string;
+  forge: string;
+  origin: string;
+  owner: string;
+  name: string;
+  issueNumber: number | null;
+  delivery: string;
+  event: string;
+  action: string;
+  outcome: WebhookLogOutcome;
+  reason: string;
+  detail: string;
+  title: string;
+  jobId: number | null;
+}
+
+const WEBHOOK_LOG_COLUMNS = `id, at, forge, origin, owner, name, issue_number AS issueNumber, delivery, event, action, outcome, reason, detail, title, job_id AS jobId`;
+/** Signed deliveries (queued and ignored). Rejected rows use a separate cap. */
+export const WEBHOOK_LOG_KEEP = 200;
+/** Bad signatures are unauthenticated. They must not evict signed deliveries. */
+export const WEBHOOK_REJECTED_KEEP = 40;
+
+/** Operator-visible decision. Title is truncated; the issue body and the signature are never stored. */
+export function insertWebhookLog(
+  db: SqliteDb,
+  row: {
+    at: string;
+    forge: string;
+    origin?: string;
+    owner?: string;
+    name?: string;
+    issueNumber?: number | null;
+    delivery?: string;
+    event?: string;
+    action?: string;
+    outcome: WebhookLogOutcome;
+    reason: string;
+    detail: string;
+    title?: string;
+    jobId?: number | null;
+  },
+): number {
+  const inserted = db
+    .prepare(
+      `INSERT INTO webhook_log (
+         at, forge, origin, owner, name, issue_number, delivery, event, action,
+         outcome, reason, detail, title, job_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      row.at,
+      row.forge,
+      row.origin ?? "",
+      (row.owner ?? "").slice(0, 200),
+      (row.name ?? "").slice(0, 200),
+      row.issueNumber ?? null,
+      (row.delivery ?? "").slice(0, 80),
+      (row.event ?? "").slice(0, 80),
+      (row.action ?? "").slice(0, 80),
+      row.outcome,
+      row.reason.slice(0, 40),
+      row.detail.slice(0, 500),
+      (row.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200),
+      row.jobId ?? null,
+    );
+  pruneWebhookLog(db, row.outcome);
+  return Number(inserted.lastInsertRowid);
+}
+
+function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
+  if (outcome === "rejected") {
+    db.prepare(
+      `DELETE FROM webhook_log
+        WHERE outcome = 'rejected'
+          AND id NOT IN (
+            SELECT id FROM webhook_log WHERE outcome = 'rejected' ORDER BY id DESC LIMIT ?
+          )`,
+    ).run(WEBHOOK_REJECTED_KEEP);
+    return;
+  }
+  db.prepare(
+    `DELETE FROM webhook_log
+      WHERE outcome != 'rejected'
+        AND id NOT IN (
+          SELECT id FROM webhook_log WHERE outcome != 'rejected' ORDER BY id DESC LIMIT ?
+        )`,
+  ).run(WEBHOOK_LOG_KEEP);
+}
+
+export function listWebhookLogs(db: SqliteDb, limit = 80): WebhookLogEntry[] {
+  return db
+    .prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log ORDER BY id DESC LIMIT ?`)
+    .all(Math.max(1, Math.min(limit, WEBHOOK_LOG_KEEP))) as WebhookLogEntry[];
+}
+
+export function getWebhookLog(db: SqliteDb, id: number): WebhookLogEntry | undefined {
+  return db.prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log WHERE id = ?`).get(id) as WebhookLogEntry | undefined;
+}
+
 export function recoverIssueRefineJobs(db: SqliteDb, at: string): number {
   const result = db
     .prepare(`UPDATE issue_refine_jobs SET status = 'pending', updated_at = ? WHERE status = 'running'`)

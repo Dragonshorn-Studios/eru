@@ -363,6 +363,12 @@ a:hover { color: var(--ink); }
   min-width: 0;
   line-height: 1.35;
 }
+.refine-where {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: color-mix(in srgb, var(--ink) 45%, white);
+}
 .refine-kicker {
   font-size: 0.72rem;
   letter-spacing: 0.18em;
