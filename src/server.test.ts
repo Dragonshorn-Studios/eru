@@ -626,7 +626,7 @@ describe("ask threads and proxy", () => {
 
     // Allowlisted session call: directory injected server-side, cookie never
     // forwarded, client-supplied directory stripped.
-    const res = await api(instance, auth, `/ask/oc/${thread.id}/session?directory=/etc&x=1`, {
+    const res = await api(instance, auth, `/ask/oc/${thread.id}/session?directory=/etc&location%5Bdirectory%5D=/etc&x=1`, {
       headers: { cookie: "smuggled=1", authorization: "Basic fake" },
     });
     expect(res.status).toBe(200);
@@ -635,9 +635,21 @@ describe("ask threads and proxy", () => {
     const target = new URL(calls[0].url);
     expect(target.pathname).toBe("/api/session");
     expect(target.searchParams.get("directory")).toBe(join(instance.askWorkdir, thread.id));
+    expect(target.searchParams.get("location[directory]")).toBe(join(instance.askWorkdir, thread.id));
     expect(target.searchParams.get("x")).toBe("1");
     expect(calls[0].cookie).toBeNull();
     expect(calls[0].auth).toBe(`Basic ${Buffer.from("opencode:oc-test-password").toString("base64")}`);
+
+    calls.length = 0;
+    const created = await api(instance, auth, `/ask/oc/${thread.id}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(created.status).toBe(200);
+    const createdUrl = new URL(calls[0].url);
+    expect(createdUrl.searchParams.get("location[directory]")).toBe(join(instance.askWorkdir, thread.id));
+    expect(JSON.parse(calls[0].body)).toEqual({ location: { directory: join(instance.askWorkdir, thread.id) } });
 
     calls.length = 0;
     const alreadyPrefixed = await api(instance, auth, `/ask/oc/${thread.id}/api/session`);

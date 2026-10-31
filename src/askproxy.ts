@@ -67,6 +67,34 @@ export function isAskEventStream(path: string): boolean {
   return path === "/event" || path === "/api/event";
 }
 
+/** Flat `directory` for older routes, plus the OC2 location object. */
+export function pinWorkspaceQuery(target: URL, workspace: string): void {
+  target.searchParams.delete("directory");
+  target.searchParams.delete("location[directory]");
+  target.searchParams.delete("instance[directory]");
+  target.searchParams.set("directory", workspace);
+  target.searchParams.set("location[directory]", workspace);
+}
+
+/** Session create always uses the thread workspace. A client directory is not forwarded. */
+export function withSessionLocation(raw: ArrayBuffer | Uint8Array, workspace: string): Uint8Array {
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  const text = new TextDecoder().decode(bytes).trim();
+  let body: Record<string, unknown> = {};
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      body = {};
+    }
+  }
+  body.location = { directory: workspace };
+  return new TextEncoder().encode(JSON.stringify(body));
+}
+
 export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response> {
   const threadId = c.req.param("threadId") ?? "";
   const prefix = `/ask/oc/${threadId}`;
@@ -99,19 +127,25 @@ export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response
   }
   // The workspace directory is authoritative and server-side: a client may
   // never point a session at another directory on this host.
-  target.searchParams.delete("directory");
-  target.searchParams.set("directory", workspace);
+  // OC2 /api routes take a location object (`location[directory]`). A flat
+  // `directory` leaves that object undefined, and the server answers
+  // "Expected object, got undefined". The browser never sees the /api prefix,
+  // so the SDK does not add the location param itself.
+  pinWorkspaceQuery(target, workspace);
 
   const headers = new Headers();
   for (const [key, value] of c.req.raw.headers) {
     if (!STRIP_REQUEST_HEADERS.has(key.toLowerCase())) headers.set(key, value);
   }
+  headers.delete("x-opencode-directory");
+  headers.set("x-opencode-directory", workspace);
   headers.set("authorization", `Basic ${Buffer.from(`opencode:${deps.server.password()}`).toString("base64")}`);
 
   const method = c.req.method.toUpperCase();
   const init: RequestInit = { method, headers, redirect: "manual" };
   if (isMutating(method)) {
-    init.body = await c.req.arrayBuffer();
+    const raw = await c.req.arrayBuffer();
+    init.body = method === "POST" && /\/session\/?$/.test(forwardedPath) ? withSessionLocation(raw, workspace) : raw;
   }
   const signals = [c.req.raw.signal];
   if (!isAskEventStream(upstreamPath) && deps.timeoutMs) {
