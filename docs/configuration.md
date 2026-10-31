@@ -48,10 +48,10 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_GITHUB_APP_ADMIN_IDS` | — | Comma-separated numeric GitHub user ids allowed to sign in (`ERU_OAUTH_ADMIN_IDS` is an alias) |
 | `ERU_GITHUB_APP_WEBHOOK_SECRET` | — | HMAC secret for `POST /webhooks/github` (`ERU_ISSUE_BOT_WEBHOOK_SECRET` is an alias) |
 | `ERU_GITHUB_APP_BOT_USER_ID` | — | GitHub user id of `your-app[bot]` (`ERU_ISSUE_BOT_USER_ID` is an alias) |
-| `ERU_ISSUE_BOT_APP_ID` | — | Optional dedicated issue-bot App ID (overrides the mapping App) |
+| `ERU_ISSUE_BOT_APP_ID` | — | Optional dedicated issue-bot App ID. Any dedicated App ID or PEM requires the full dedicated set (ID + PEM + `ERU_ISSUE_BOT_WEBHOOK_SECRET` + `ERU_ISSUE_BOT_USER_ID`) with no mapping-App fallback |
 | `ERU_ISSUE_BOT_PRIVATE_KEY` / `ERU_ISSUE_BOT_PRIVATE_KEY_FILE` | — | Optional dedicated issue-bot PEM |
-| `ERU_ISSUE_BOT_WEBHOOK_SECRET` | — | Alias for the GitHub webhook HMAC secret |
-| `ERU_ISSUE_BOT_USER_ID` | — | Alias for the GitHub bot user id |
+| `ERU_ISSUE_BOT_WEBHOOK_SECRET` | — | Dedicated webhook HMAC secret when a dedicated App is set; otherwise an alias for `ERU_GITHUB_APP_WEBHOOK_SECRET` |
+| `ERU_ISSUE_BOT_USER_ID` | — | Dedicated bot user id when a dedicated App is set; otherwise an alias for `ERU_GITHUB_APP_BOT_USER_ID` |
 | `ERU_TRUSTED_BOT_IDS` | — | Comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER/MEMBER/COLLABORATOR |
 | `ERU_ISSUE_BOT_HOURLY_CAP` | `20` | Max refine jobs enqueued per owner/repo per hour |
 | `ERU_GITLAB_URL` / `ERU_GITLAB_TOKEN` | — | Self-hosted GitLab origin + PAT (also settable on `/config`) |
@@ -83,4 +83,4 @@ Set a base URL and API token on `/config` (or `ERU_GITLAB_*` / `ERU_FORGEJO_*`).
 
 ## eru-issue-bot
 
-Optional. One GitHub App is enough (`ERU_GITHUB_APP_*` plus webhook secret and bot user id); dedicated `ERU_ISSUE_BOT_*` vars override that App if you still want a split. When App ID, private key, webhook secret, and bot user id all resolve, Eru accepts GitHub `issues` webhooks at `POST /webhooks/github` and rewrites newly opened issues that mention `@eru-issue-bot`. GitLab and Forgejo use `/webhooks/gitlab` and `/webhooks/forgejo` once their instance webhook secret is set. Setup steps live in the [README](../README.md#github-app-mapping--login--issue-bot). Partial env config fails closed at boot. The webhook secret, private key, and minted installation tokens are never logged or rendered back.
+Optional. One GitHub App is enough (`ERU_GITHUB_APP_*` plus webhook secret and bot user id); a dedicated `ERU_ISSUE_BOT_*` App is an optional split and must be complete (App ID, PEM, webhook secret, bot user id) — a dedicated App ID is never paired with the mapping App's PEM or webhook secret. When App ID, private key, webhook secret, and bot user id all resolve, Eru accepts GitHub `issues` webhooks at `POST /webhooks/github` and rewrites newly opened issues that mention `@eru-issue-bot`. GitLab and Forgejo use `/webhooks/gitlab` and `/webhooks/forgejo` once their instance webhook secret is set. Setup steps live in the [README](../README.md#github-app-mapping--login--issue-bot). Partial env config fails closed at boot. The webhook secret, private key, and minted installation tokens are never logged or rendered back.

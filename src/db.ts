@@ -38,13 +38,14 @@ CREATE TABLE IF NOT EXISTS repos (
   forge TEXT NOT NULL DEFAULT 'github',
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT '',
   auth_source TEXT NOT NULL DEFAULT 'manual',
   default_branch TEXT,
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
   connected_at TEXT,
   created_at TEXT NOT NULL,
-  UNIQUE (forge, owner, name)
+  UNIQUE (forge, owner, name, origin)
 );
 
 ${FORGE_CREDENTIALS_SQL}
@@ -66,6 +67,8 @@ ${SETTINGS_SQL}
 interface Migration {
   name: string;
   apply: (db: SqliteDb) => void;
+  /** Table rebuilds that need PRAGMA foreign_keys=OFF cannot run inside a transaction. */
+  unlocked?: boolean;
 }
 
 // For databases created before forge connect landed: add repos.connected_at
@@ -159,6 +162,40 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    name: "0009_repo_origin.sql",
+    unlocked: true,
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (columns.some((col) => col.name === "origin")) return;
+      db.exec(`
+        CREATE TABLE repos_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          forge TEXT NOT NULL DEFAULT 'github',
+          owner TEXT NOT NULL,
+          name TEXT NOT NULL,
+          origin TEXT NOT NULL DEFAULT '',
+          auth_source TEXT NOT NULL DEFAULT 'manual',
+          default_branch TEXT,
+          last_mapped_ref TEXT,
+          last_mapped_at TEXT,
+          connected_at TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE (forge, owner, name, origin)
+        );
+        INSERT INTO repos_new (
+          id, forge, owner, name, origin, auth_source, default_branch,
+          last_mapped_ref, last_mapped_at, connected_at, created_at
+        )
+        SELECT
+          id, forge, owner, name, '', COALESCE(auth_source, 'manual'), default_branch,
+          last_mapped_ref, last_mapped_at, connected_at, created_at
+        FROM repos;
+        DROP TABLE repos;
+        ALTER TABLE repos_new RENAME TO repos;
+      `);
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -223,10 +260,20 @@ export function migrate(db: SqliteDb): void {
       n: number;
     };
     if (applied.n === 0) {
-      db.transaction(() => {
+      const run = () => {
         migration.apply(db);
         recordMigration(db, migration.name);
-      })();
+      };
+      if (migration.unlocked) {
+        db.pragma("foreign_keys = OFF");
+        try {
+          run();
+        } finally {
+          db.pragma("foreign_keys = ON");
+        }
+      } else {
+        db.transaction(run)();
+      }
     }
   }
 }
@@ -243,6 +290,7 @@ export interface MappedRepo {
   forge: string;
   owner: string;
   name: string;
+  origin: string;
   authSource: string;
   defaultBranch: string | null;
   lastMappedRef: string | null;
@@ -251,7 +299,7 @@ export interface MappedRepo {
 
 export type RepoAuthSource = "manual" | "app" | "instance";
 
-const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
+const MAPPED_REPO_COLUMNS = `id, forge, owner, name, origin, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
 
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
@@ -272,21 +320,22 @@ export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
 
 export function upsertConnectedRepo(
   db: SqliteDb,
-  repo: { forge: string; owner: string; name: string; defaultBranch?: string },
+  repo: { forge: string; owner: string; name: string; defaultBranch?: string; origin?: string },
   at: string,
   authSource: RepoAuthSource = "manual",
 ): number {
+  const origin = repo.origin ?? "";
   const row = db
     .prepare(
-      `INSERT INTO repos (forge, owner, name, auth_source, default_branch, connected_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (forge, owner, name) DO UPDATE SET
+      `INSERT INTO repos (forge, owner, name, origin, auth_source, default_branch, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (forge, owner, name, origin) DO UPDATE SET
          connected_at = excluded.connected_at,
          auth_source = excluded.auth_source,
          default_branch = COALESCE(excluded.default_branch, repos.default_branch)
        RETURNING id`,
     )
-    .get(repo.forge, repo.owner, repo.name, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
+    .get(repo.forge, repo.owner, repo.name, origin, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
   return row.id;
 }
 

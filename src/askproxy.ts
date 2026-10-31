@@ -62,6 +62,11 @@ export function proxyPathAllowed(rest: string): boolean {
   return ALLOWED_UPSTREAM.test(rest);
 }
 
+/** OC1 `/event` and OC2 `/api/event` are long-lived SSE — never attach a request timeout. */
+export function isAskEventStream(path: string): boolean {
+  return path === "/event" || path === "/api/event";
+}
+
 export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response> {
   const threadId = c.req.param("threadId") ?? "";
   const prefix = `/ask/oc/${threadId}`;
@@ -109,7 +114,7 @@ export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response
     init.body = await c.req.arrayBuffer();
   }
   const signals = [c.req.raw.signal];
-  if (upstreamPath !== "/event" && deps.timeoutMs) {
+  if (!isAskEventStream(upstreamPath) && deps.timeoutMs) {
     signals.push(AbortSignal.timeout(deps.timeoutMs()));
   }
   init.signal = AbortSignal.any(signals);

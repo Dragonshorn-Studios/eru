@@ -199,6 +199,7 @@ describe("issue bot config", () => {
       botUserId: 9001,
       trustedBotIds: [7, 8],
       hourlyCap: 15,
+      dedicated: true,
     });
     expect(loadConfig({ ...secrets }).issueBot).toBeUndefined();
   });
@@ -230,17 +231,65 @@ describe("issue bot config", () => {
       appId: "12345",
       webhookSecret: "webhook-secret-16+",
       botUserId: 9001,
+      dedicated: false,
     });
-    const withDedicated = loadConfig({
+    const aliased = loadConfig({
       ...secrets,
       ERU_GITHUB_APP_ID: "12345",
       ERU_GITHUB_APP_PRIVATE_KEY: PEM,
-      ERU_ISSUE_BOT_APP_ID: "99",
-      ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
       ERU_ISSUE_BOT_WEBHOOK_SECRET: "webhook-secret-16+",
       ERU_ISSUE_BOT_USER_ID: "9001",
     });
-    expect(withDedicated.issueBot?.appId).toBe("99");
+    expect(aliased.issueBot).toMatchObject({ appId: "12345", dedicated: false, botUserId: 9001 });
+  });
+
+  it("fails closed when a dedicated App ID is mixed with mapping App credentials", () => {
+    const mapping = {
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_GITHUB_APP_WEBHOOK_SECRET: "mapping-webhook-16",
+      ERU_GITHUB_APP_BOT_USER_ID: "111",
+    };
+    expect(() => loadConfig({ ...secrets, ...mapping, ERU_ISSUE_BOT_APP_ID: "99" })).toThrow(
+      /ERU_ISSUE_BOT_PRIVATE_KEY/,
+    );
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ...mapping,
+        ERU_ISSUE_BOT_APP_ID: "99",
+        ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+      }),
+    ).toThrow(/ERU_ISSUE_BOT_WEBHOOK_SECRET/);
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ...mapping,
+        ERU_ISSUE_BOT_APP_ID: "99",
+        ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+        ERU_ISSUE_BOT_WEBHOOK_SECRET: "dedicated-hook-16",
+      }),
+    ).toThrow(/ERU_ISSUE_BOT_USER_ID/);
+  });
+
+  it("keeps a dedicated App's webhook secret and bot id when mapping App env is also set", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_GITHUB_APP_WEBHOOK_SECRET: "mapping-webhook-16",
+      ERU_GITHUB_APP_BOT_USER_ID: "111",
+      ERU_ISSUE_BOT_APP_ID: "99",
+      ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+      ERU_ISSUE_BOT_WEBHOOK_SECRET: "dedicated-hook-16",
+      ERU_ISSUE_BOT_USER_ID: "9001",
+    });
+    expect(cfg.issueBot).toMatchObject({
+      appId: "99",
+      webhookSecret: "dedicated-hook-16",
+      botUserId: 9001,
+      dedicated: true,
+    });
   });
 });
 

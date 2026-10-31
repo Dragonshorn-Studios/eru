@@ -1056,6 +1056,9 @@ function resolveOAuth(config: Config, db: SqliteDb): ResolvedOAuth | null {
 }
 
 function resolveGithubIssueBot(config: Config, db: SqliteDb): IssueBotConfig | undefined {
+  // A dedicated issue-bot App is env-only: stored mapping-App fields must not
+  // replace its PEM, webhook secret, or bot user id.
+  if (config.issueBot?.dedicated) return config.issueBot;
   const app = resolveGithubApp(config, db);
   const webhook = decryptStored(config, getSetting(db, SETTING_APP_WEBHOOK)) || config.issueBot?.webhookSecret;
   const storedBot = getSetting(db, SETTING_APP_BOT_USER);
@@ -1070,6 +1073,7 @@ function resolveGithubIssueBot(config: Config, db: SqliteDb): IssueBotConfig | u
     botUserId,
     trustedBotIds: config.issueBot?.trustedBotIds ?? [],
     hourlyCap: config.issueBot?.hourlyCap ?? DEFAULT_ISSUE_BOT_HOURLY_CAP,
+    dedicated: false,
   };
 }
 
@@ -1101,7 +1105,7 @@ async function verifyForgeRepo(
   config: Config,
   db: SqliteDb,
   fetchImpl: FetchLike,
-): Promise<({ ok: true; repo: { forge: string; owner: string; name: string; defaultBranch?: string }; usedInstance: boolean } | { ok: false; error: VerifyError })> {
+): Promise<({ ok: true; repo: { forge: string; owner: string; name: string; defaultBranch?: string; origin?: string }; usedInstance: boolean } | { ok: false; error: VerifyError })> {
   if (forge === FORGE_GITLAB) {
     const instance = resolveGitlab(config, db);
     const use = token || instance?.token || "";

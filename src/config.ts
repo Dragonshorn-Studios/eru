@@ -61,6 +61,11 @@ export interface IssueBotConfig {
   botUserId: number;
   trustedBotIds: number[];
   hourlyCap: number;
+  /**
+   * True when `ERU_ISSUE_BOT_APP_ID` or a dedicated PEM is set. Dedicated
+   * credentials never mix with the mapping App's PEM, webhook secret, or bot id.
+   */
+  dedicated: boolean;
 }
 
 /** Self-hosted GitLab or Forgejo instance. Token is a PAT / access token, not OAuth. */
@@ -230,6 +235,34 @@ function loadPem(env: NodeJS.ProcessEnv, inlineKey: string, fileKey: string): st
   return inline;
 }
 
+function requireWebhookSecret(value: string | undefined, key: string): string {
+  if (!value) {
+    throw new Error(`eru: issue bot needs ${key}`);
+  }
+  if (value.length < MIN_WEBHOOK_SECRET) {
+    throw new Error("eru: webhook secret is too short");
+  }
+  return value;
+}
+
+function requireBotUserId(raw: string | undefined, key: string): number {
+  if (!raw) {
+    throw new Error(`eru: issue bot needs ${key}`);
+  }
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`eru: ${key} is not a number`);
+  }
+  return Number(raw);
+}
+
+function issueBotHourlyCap(env: NodeJS.ProcessEnv): number {
+  const hourlyCap = parseInteger(env.ERU_ISSUE_BOT_HOURLY_CAP, DEFAULT_ISSUE_BOT_HOURLY_CAP);
+  if (!Number.isInteger(hourlyCap) || hourlyCap < 1 || hourlyCap > ISSUE_BOT_HOURLY_CAP_MAX) {
+    throw new Error("eru: ERU_ISSUE_BOT_HOURLY_CAP is invalid");
+  }
+  return hourlyCap;
+}
+
 function loadIssueBotConfig(
   env: NodeJS.ProcessEnv,
   githubAppId?: string,
@@ -237,50 +270,57 @@ function loadIssueBotConfig(
 ): IssueBotConfig | undefined {
   const dedicatedAppId = optionalDigits(env, "ERU_ISSUE_BOT_APP_ID");
   const dedicatedKey = loadPem(env, "ERU_ISSUE_BOT_PRIVATE_KEY", "ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
-  const appId = dedicatedAppId ?? githubAppId;
-  const privateKey = dedicatedKey ?? githubAppPrivateKey;
-  const webhookSecret =
-    env.ERU_GITHUB_APP_WEBHOOK_SECRET?.trim() || env.ERU_ISSUE_BOT_WEBHOOK_SECRET?.trim() || undefined;
-  const botUserRaw = env.ERU_GITHUB_APP_BOT_USER_ID?.trim() || env.ERU_ISSUE_BOT_USER_ID?.trim();
-  const hourlyRaw = env.ERU_ISSUE_BOT_HOURLY_CAP?.trim();
-  const any =
-    Boolean(dedicatedAppId) ||
-    Boolean(dedicatedKey) ||
-    Boolean(webhookSecret) ||
-    Boolean(botUserRaw) ||
-    Boolean(env.ERU_TRUSTED_BOT_IDS?.trim()) ||
-    Boolean(hourlyRaw);
+  const dedicatedWebhook = env.ERU_ISSUE_BOT_WEBHOOK_SECRET?.trim() || undefined;
+  const dedicatedBotUser = env.ERU_ISSUE_BOT_USER_ID?.trim() || undefined;
+  const mappingWebhook = env.ERU_GITHUB_APP_WEBHOOK_SECRET?.trim() || undefined;
+  const mappingBotUser = env.ERU_GITHUB_APP_BOT_USER_ID?.trim() || undefined;
+  const extras = Boolean(env.ERU_TRUSTED_BOT_IDS?.trim()) || Boolean(env.ERU_ISSUE_BOT_HOURLY_CAP?.trim());
+
+  // Any dedicated App ID or PEM means the dedicated App is in play: require
+  // its own PEM, webhook secret, and bot user id. Mapping-App fields must not
+  // silently pair with a different App ID.
+  if (dedicatedAppId || dedicatedKey) {
+    if (!dedicatedAppId) {
+      throw new Error("eru: issue bot needs ERU_ISSUE_BOT_APP_ID");
+    }
+    if (!dedicatedKey) {
+      throw new Error("eru: issue bot needs ERU_ISSUE_BOT_PRIVATE_KEY or ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
+    }
+    return {
+      appId: dedicatedAppId,
+      privateKey: dedicatedKey,
+      webhookSecret: requireWebhookSecret(dedicatedWebhook, "ERU_ISSUE_BOT_WEBHOOK_SECRET"),
+      botUserId: requireBotUserId(dedicatedBotUser, "ERU_ISSUE_BOT_USER_ID"),
+      trustedBotIds: parseIdList(env.ERU_TRUSTED_BOT_IDS, "ERU_TRUSTED_BOT_IDS"),
+      hourlyCap: issueBotHourlyCap(env),
+      dedicated: true,
+    };
+  }
+
+  const webhookSecret = mappingWebhook || dedicatedWebhook;
+  const botUserRaw = mappingBotUser || dedicatedBotUser;
+  const any = Boolean(webhookSecret) || Boolean(botUserRaw) || extras;
   if (!any) return undefined;
-  if (!appId) {
+  if (!githubAppId) {
     throw new Error("eru: issue bot needs ERU_GITHUB_APP_ID (or ERU_ISSUE_BOT_APP_ID)");
   }
-  if (!privateKey) {
+  if (!githubAppPrivateKey) {
     throw new Error("eru: issue bot needs the GitHub App private key (or ERU_ISSUE_BOT_PRIVATE_KEY/_FILE)");
   }
-  if (!webhookSecret) {
-    throw new Error("eru: issue bot needs ERU_GITHUB_APP_WEBHOOK_SECRET (or ERU_ISSUE_BOT_WEBHOOK_SECRET)");
-  }
-  if (webhookSecret.length < MIN_WEBHOOK_SECRET) {
-    throw new Error("eru: webhook secret is too short");
-  }
-  if (!botUserRaw) {
-    throw new Error("eru: issue bot needs ERU_GITHUB_APP_BOT_USER_ID (or ERU_ISSUE_BOT_USER_ID)");
-  }
-  if (!/^\d+$/.test(botUserRaw)) {
-    throw new Error("eru: ERU_GITHUB_APP_BOT_USER_ID (or ERU_ISSUE_BOT_USER_ID) is not a number");
-  }
-  const botUserId = Number(botUserRaw);
-  const hourlyCap = parseInteger(env.ERU_ISSUE_BOT_HOURLY_CAP, DEFAULT_ISSUE_BOT_HOURLY_CAP);
-  if (!Number.isInteger(hourlyCap) || hourlyCap < 1 || hourlyCap > ISSUE_BOT_HOURLY_CAP_MAX) {
-    throw new Error("eru: ERU_ISSUE_BOT_HOURLY_CAP is invalid");
-  }
   return {
-    appId,
-    privateKey,
-    webhookSecret,
-    botUserId,
+    appId: githubAppId,
+    privateKey: githubAppPrivateKey,
+    webhookSecret: requireWebhookSecret(
+      webhookSecret,
+      "ERU_GITHUB_APP_WEBHOOK_SECRET (or ERU_ISSUE_BOT_WEBHOOK_SECRET)",
+    ),
+    botUserId: requireBotUserId(
+      botUserRaw,
+      mappingBotUser ? "ERU_GITHUB_APP_BOT_USER_ID" : "ERU_GITHUB_APP_BOT_USER_ID (or ERU_ISSUE_BOT_USER_ID)",
+    ),
     trustedBotIds: parseIdList(env.ERU_TRUSTED_BOT_IDS, "ERU_TRUSTED_BOT_IDS"),
-    hourlyCap,
+    hourlyCap: issueBotHourlyCap(env),
+    dedicated: false,
   };
 }
 

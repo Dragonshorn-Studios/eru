@@ -75,7 +75,7 @@ Self-hosted GitLab and Forgejo are configured on `/config` (or `ERU_GITLAB_*` / 
 
 Rewrites newly opened issues mentioning `@eru-issue-bot` into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it.
 
-On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` App is an optional override. Partial env config fails closed at boot; the webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve (GitLab/Forgejo need URL + token + webhook secret).
+On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` App is an optional override and must be set as a complete set (App ID, PEM, webhook secret, bot user id) — mixing a dedicated App ID with the mapping App's PEM or webhook secret fails closed at boot. The webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve (GitLab/Forgejo need URL + token + webhook secret).
 
 ### One-time GitHub App setup
 

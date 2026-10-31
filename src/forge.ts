@@ -58,6 +58,8 @@ export interface ConnectedRepo {
   owner: string;
   name: string;
   defaultBranch?: string;
+  /** Instance origin for GitLab/Forgejo; empty/omitted for GitHub. */
+  origin?: string;
 }
 
 export type VerifyError = "invalid" | "notfound" | "auth" | "unreachable";

@@ -6,7 +6,9 @@ import {
   fetchGitlabArchive,
   forgeApiRoot,
   forgejoAddLabels,
+  forgejoEnsureComment,
   forgejoGetIssue,
+  gitlabEnsureNote,
   gitlabGetIssue,
   listForgejoRepos,
   listGitlabRepos,
@@ -29,6 +31,8 @@ describe("owner and name validation", () => {
   it("accepts GitHub-style owners and GitLab nested groups", () => {
     expect(validOwner("github", "acme")).toBe(true);
     expect(validOwner("forgejo", "acme")).toBe(true);
+    expect(validOwner("forgejo", "my.org")).toBe(true);
+    expect(validOwner("github", "my.org")).toBe(false);
     expect(validOwner("gitlab", "group/sub")).toBe(true);
     expect(validOwner("gitlab", "acme")).toBe(true);
     expect(validRepoName("eru")).toBe(true);
@@ -96,6 +100,7 @@ describe("verify gitlab / forgejo repos", () => {
         owner: "group/sub",
         name: "box",
         defaultBranch: "trunk",
+        origin: "https://git.example",
       });
     }
     expect(seenUrl).toBe("https://git.example/api/v4/projects/group%2Fsub%2Fbox");
@@ -114,7 +119,14 @@ describe("verify gitlab / forgejo repos", () => {
     };
     const res = await verifyForgejoRepo("https://git.example", "acme", "box", "tok", spy);
     expect(res.ok).toBe(true);
-    if (res.ok) expect(res.repo).toEqual({ forge: "forgejo", owner: "Acme", name: "box", defaultBranch: "main" });
+    if (res.ok)
+      expect(res.repo).toEqual({
+        forge: "forgejo",
+        owner: "Acme",
+        name: "box",
+        defaultBranch: "main",
+        origin: "https://git.example",
+      });
     expect(seenAuth).toBe("token tok");
   });
 
@@ -255,5 +267,48 @@ describe("issue writes", () => {
     expect((create[0].body as { color: string }).color).toBe("a8b99a");
     const attach = calls.find((c) => c.method === "POST" && c.url.includes("/issues/12/labels"));
     expect(attach?.body).toEqual({ labels: [11, 12] });
+  });
+
+  it("pages GitLab notes before posting so a later-page bot comment is not duplicated", async () => {
+    const calls: { method: string; url: string }[] = [];
+    const spy: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, url });
+      if (url.includes("/notes") && method === "GET") {
+        const page = new URL(url).searchParams.get("page");
+        if (page === "1") {
+          return jsonFetch(
+            200,
+            Array.from({ length: 100 }, (_, i) => ({ body: `old-${i}` })),
+          )(url, init ?? {});
+        }
+        return jsonFetch(200, [{ body: "bot already said this" }])(url, init ?? {});
+      }
+      return jsonFetch(201, { id: 1 })(url, init ?? {});
+    };
+    await gitlabEnsureNote("https://git.example", "tok", "acme", "box", 12, "bot already said this", spy);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(2);
+  });
+
+  it("pages Forgejo comments before posting", async () => {
+    const calls: { method: string; url: string }[] = [];
+    const spy: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, url });
+      if (url.includes("/comments") && method === "GET") {
+        const page = new URL(url).searchParams.get("page");
+        if (page === "1") {
+          return jsonFetch(
+            200,
+            Array.from({ length: 50 }, (_, i) => ({ body: `old-${i}` })),
+          )(url, init ?? {});
+        }
+        return jsonFetch(200, [{ body: "done" }])(url, init ?? {});
+      }
+      return jsonFetch(201, { id: 1 })(url, init ?? {});
+    };
+    await forgejoEnsureComment("https://git.example", "tok", "acme", "box", 12, "done", spy);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 });

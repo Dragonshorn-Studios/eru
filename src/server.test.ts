@@ -676,6 +676,35 @@ describe("ask threads and proxy", () => {
     });
     expect(post.status).toBe(403);
   });
+
+  it("does not attach a request timeout to OC2 /api/event streams", async () => {
+    const seen: { path: string; abortedAfter: boolean }[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname;
+      await new Promise((r) => setTimeout(r, 120));
+      seen.push({ path, abortedAfter: Boolean(init.signal?.aborted) });
+      if (init.signal?.aborted) {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      return new Response("ok", { status: 200 });
+    };
+    const instance = app({ openCodeTimeoutMs: 50 }, fetchImpl, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    const { thread } = (await (await api(instance, auth, "/ask/api/threads", { method: "POST" })).json()) as {
+      thread: { id: string };
+    };
+    seen.length = 0;
+    const event = await api(instance, auth, `/ask/oc/${thread.id}/api/event`);
+    expect(event.status).toBe(200);
+    expect(seen[0]).toEqual({ path: "/api/event", abortedAfter: false });
+    const session = await api(instance, auth, `/ask/oc/${thread.id}/session`);
+    expect(session.status).toBe(499);
+    expect(seen[1].path).toBe("/api/session");
+    expect(seen[1].abortedAfter).toBe(true);
+  });
 });
 
 describe("refresh map", () => {
@@ -1297,7 +1326,13 @@ describe("gitlab and forgejo from /config", () => {
     });
     expect(res.status).toBe(302);
     const repo = getPrimaryRepo(instance.db)!;
-    expect(repo).toMatchObject({ forge: "gitlab", owner: "acme", name: "box", authSource: "instance" });
+    expect(repo).toMatchObject({
+      forge: "gitlab",
+      owner: "acme",
+      name: "box",
+      origin: "https://git.example",
+      authSource: "instance",
+    });
     expect(getForgeCredential(instance.db, repo.id)).toBeUndefined();
     expect(seen.some((u) => u.includes("/api/v4/projects"))).toBe(true);
   });
@@ -1328,6 +1363,92 @@ describe("gitlab and forgejo from /config", () => {
     const state = await waitRefreshNotice(instance, cookie);
     expect(state.notice).toContain("Mapped @main");
     expect(archiveUrl).toContain("https://git.example/api/v4/projects/acme%2Fbox/repository/archive.tar.gz");
+  });
+
+  it("saves Forgejo from /config, lists and connects via instance, and refreshes the archive", async () => {
+    const tar = await fakeTarball();
+    const seen: string[] = [];
+    let archiveUrl = "";
+    const fetchImpl = async (url: string) => {
+      seen.push(url);
+      if (url.includes("/user/repos")) {
+        return new Response(
+          JSON.stringify([{ owner: { username: "acme" }, name: "box", private: false, default_branch: "dev" }]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/repos/acme/box") && url.includes("/archive/")) {
+        archiveUrl = url;
+        return new Response(new Uint8Array(tar));
+      }
+      if (url.includes("/repos/acme/box")) {
+        return new Response(
+          JSON.stringify({ owner: { login: "acme" }, name: "box", default_branch: "dev" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const instance = app({}, fetchImpl, undefined, async () => ({
+      ok: true as const,
+      pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }],
+    }));
+    const save = await post(instance, "/config/forgejo", {
+      base_url: "https://git.example",
+      token: "fj-secret",
+      webhook_secret: "forgejo-webhook-16+",
+    });
+    expect(save.status).toBe(302);
+    expect(getSetting(instance.db, "forgejo.base_url")).toBe("https://git.example");
+    const stored = getSetting(instance.db, "forgejo.token")!;
+    expect(stored).toMatch(/^v1\./);
+    expect(decryptForgeToken(instance.config.sessionSecret, stored)).toBe("fj-secret");
+
+    const { cookie, csrf } = await authed(instance);
+    const page = await (await instance.app.request("/connect", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("From Forgejo");
+    expect(page).toContain("acme/box");
+    expect(page).toContain('action="/connect/instance"');
+
+    const res = await instance.app.request("/connect/instance", {
+      method: "POST",
+      body: new URLSearchParams({ forge: "forgejo", owner: "acme", name: "box", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const repo = getPrimaryRepo(instance.db)!;
+    expect(repo).toMatchObject({
+      forge: "forgejo",
+      owner: "acme",
+      name: "box",
+      origin: "https://git.example",
+      authSource: "instance",
+    });
+
+    await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.notice).toContain("Mapped @dev");
+    expect(archiveUrl).toContain("https://git.example/api/v1/repos/acme/box/archive/dev.tar.gz");
+  });
+
+  it("removes a saved GitLab instance from /config", async () => {
+    const instance = app({ gitlab: { origin: "https://git.example", token: "glpat-x" } });
+    await post(instance, "/config/gitlab", {
+      base_url: "https://git.example",
+      token: "glpat-secret",
+      webhook_secret: "gitlab-webhook-16+",
+    });
+    expect(getSetting(instance.db, "gitlab.base_url")).toBe("https://git.example");
+    const res = await post(instance, "/config/gitlab/remove", {});
+    expect(res.status).toBe(302);
+    expect(getSetting(instance.db, "gitlab.base_url")).toBeUndefined();
+    expect(getSetting(instance.db, "gitlab.token")).toBeUndefined();
+    expect(getSetting(instance.db, "gitlab.webhook_secret")).toBeUndefined();
   });
 });
 

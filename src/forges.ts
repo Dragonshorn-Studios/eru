@@ -19,8 +19,9 @@ export function isForgeKind(value: string): value is ForgeKind {
   return value === FORGE_GITHUB || value === FORGE_GITLAB || value === FORGE_FORGEJO;
 }
 
-// GitHub-style owner (also Forgejo users/orgs). Nested GitLab groups allow `/`.
+// GitHub-style owner. Forgejo/Gitea usernames and orgs may contain dots.
 const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const FORGEJO_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38}[A-Za-z0-9])?$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const NAME_REJECT = new Set([".", ".."]);
 const GITLAB_OWNER_RE = /^(?!.*\/\/)[A-Za-z0-9._-](?:[A-Za-z0-9._\-\/]{0,198}[A-Za-z0-9._-])?$/;
@@ -35,6 +36,7 @@ export function validOwner(forge: string, owner: string): boolean {
     if (!GITLAB_OWNER_RE.test(owner)) return false;
     return owner.split("/").every((part) => part.length > 0 && !NAME_REJECT.has(part));
   }
+  if (forge === FORGE_FORGEJO) return FORGEJO_OWNER_RE.test(owner);
   return GITHUB_OWNER_RE.test(owner);
 }
 
@@ -130,7 +132,7 @@ export async function verifyGitlabRepo(
     return { ok: false, error: "notfound" };
   }
   const defaultBranch = typeof body.default_branch === "string" && body.default_branch ? body.default_branch : undefined;
-  return { ok: true, repo: { forge: FORGE_GITLAB, owner: split.owner, name: split.name, defaultBranch } };
+  return { ok: true, repo: { forge: FORGE_GITLAB, owner: split.owner, name: split.name, defaultBranch, origin } };
 }
 
 export async function verifyForgejoRepo(
@@ -158,7 +160,7 @@ export async function verifyForgejoRepo(
   const defaultBranch = typeof body.default_branch === "string" && body.default_branch ? body.default_branch : undefined;
   return {
     ok: true,
-    repo: { forge: FORGE_FORGEJO, owner: canonicalOwner, name: canonicalName, defaultBranch },
+    repo: { forge: FORGE_FORGEJO, owner: canonicalOwner, name: canonicalName, defaultBranch, origin },
   };
 }
 
@@ -393,6 +395,8 @@ export async function gitlabAddLabels(
   await gitlabWrite(origin, token, owner, name, iid, "PUT", "", { add_labels: labels.join(",") }, fetchImpl);
 }
 
+const COMMENT_PAGE_CAP = 20;
+
 export async function gitlabEnsureNote(
   origin: string,
   token: string,
@@ -403,14 +407,17 @@ export async function gitlabEnsureNote(
   fetchImpl: FetchLike,
 ): Promise<void> {
   const path = encodeURIComponent(`${owner}/${name}`);
-  const res = await jsonFetch(
-    fetchImpl,
-    `${forgeApiRoot(origin, "gitlab")}/projects/${path}/issues/${iid}/notes`,
-    gitlabHeaders(token),
-  );
-  if ("error" in res || !res.status || res.status >= 400) throw new Error("gitlab:notes");
-  const notes = Array.isArray(res.body) ? res.body : [];
-  if (notes.some((note) => (note as { body?: unknown }).body === body)) return;
+  for (let page = 1; page <= COMMENT_PAGE_CAP; page++) {
+    const res = await jsonFetch(
+      fetchImpl,
+      `${forgeApiRoot(origin, "gitlab")}/projects/${path}/issues/${iid}/notes?per_page=100&page=${page}`,
+      gitlabHeaders(token),
+    );
+    if ("error" in res || !res.status || res.status >= 400) throw new Error("gitlab:notes");
+    const notes = Array.isArray(res.body) ? res.body : [];
+    if (notes.some((note) => (note as { body?: unknown }).body === body)) return;
+    if (notes.length < 100) break;
+  }
   await gitlabWrite(origin, token, owner, name, iid, "POST", "/notes", { body }, fetchImpl);
 }
 
@@ -551,14 +558,14 @@ export async function forgejoEnsureComment(
   body: string,
   fetchImpl: FetchLike,
 ): Promise<void> {
-  const res = await jsonFetch(
-    fetchImpl,
-    `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${number}/comments`,
-    forgejoHeaders(token),
-  );
-  if ("error" in res || !res.status || res.status >= 400) throw new Error("forgejo:comments");
-  const comments = Array.isArray(res.body) ? res.body : [];
-  if (comments.some((comment) => (comment as { body?: unknown }).body === body)) return;
+  const root = `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${number}/comments`;
+  for (let page = 1; page <= COMMENT_PAGE_CAP; page++) {
+    const res = await jsonFetch(fetchImpl, `${root}?limit=50&page=${page}`, forgejoHeaders(token));
+    if ("error" in res || !res.status || res.status >= 400) throw new Error("forgejo:comments");
+    const comments = Array.isArray(res.body) ? res.body : [];
+    if (comments.some((comment) => (comment as { body?: unknown }).body === body)) return;
+    if (comments.length < 50) break;
+  }
   await forgejoWrite(origin, token, owner, name, number, "POST", "/comments", { body }, fetchImpl);
 }
 

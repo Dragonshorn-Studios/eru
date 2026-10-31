@@ -196,12 +196,16 @@ function testApp(opts: {
   fetchImpl?: FetchLike;
   refine?: (input: { title: string; body: string }) => Promise<string>;
   now?: () => number;
+  gitlab?: Config["gitlab"];
+  forgejo?: Config["forgejo"];
 }) {
   const db = openDb(":memory:");
-  const config = gatedConfig();
+  const config = gatedConfig({ gitlab: opts.gitlab, forgejo: opts.forgejo });
   const bot = createIssueBot({
     db,
     config: config.issueBot!,
+    gitlab: config.gitlab,
+    forgejo: config.forgejo,
     fetchImpl: opts.fetchImpl ?? (async () => json(500, {})),
     refine: opts.refine ?? (async () => refinedTemplate()),
     now: opts.now,
@@ -534,6 +538,104 @@ describe("issue refine worker", () => {
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comments.some((c) => (c.body as { body: string }).body === COMMENT_FAILED)).toBe(true);
   });
+
+  it("rewrites a GitLab issue with PUT description, labels, note, and award", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: { method: string; path: string; body?: unknown }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const parsedUrl = new URL(url);
+      const path = parsedUrl.pathname + parsedUrl.search;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      calls.push({ method, path, body: parsed });
+      if (path.includes("/issues/12") && !path.includes("/notes") && !path.includes("/award") && !path.includes("/labels") && method === "GET") {
+        return json(200, { title: "The lights flicker", description: original });
+      }
+      if (path.includes("/issues/12") && method === "PUT") return json(200, {});
+      if (path.includes("/labels") && method === "POST") return json(201, {});
+      if (path.includes("/notes") && method === "GET") return json(200, []);
+      if (path.includes("/notes") && method === "POST") return json(201, { id: 1 });
+      if (path.includes("/award_emoji") && method === "POST") return json(201, {});
+      return json(404, {});
+    };
+    const { db, bot } = testApp({
+      fetchImpl,
+      gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: "gitlab-webhook-16+" },
+      refine: async () => refinedTemplate(""),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        forge: "gitlab",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    const put = calls.find((c) => c.method === "PUT" && /\/issues\/12$/.test(c.path));
+    expect((put?.body as { description: string }).description).toContain(ISSUE_BOT_MARKER);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/notes"))).toBe(true);
+    expect(calls.some((c) => c.method === "PUT" && JSON.stringify(c.body).includes("add_labels"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/award_emoji"))).toBe(true);
+  });
+
+  it("rewrites a Forgejo issue with PATCH, labels, comment, and reaction", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: { method: string; path: string; body?: unknown }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const parsedUrl = new URL(url);
+      const path = parsedUrl.pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      calls.push({ method, path, body: parsed });
+      if (/\/issues\/12$/.test(path) && method === "GET") {
+        return json(200, { title: "The lights flicker", body: original });
+      }
+      if (/\/issues\/12$/.test(path) && method === "PATCH") return json(200, {});
+      if (path.endsWith("/labels") && !path.includes("/issues/") && method === "GET") return json(200, []);
+      if (path.endsWith("/labels") && !path.includes("/issues/") && method === "POST") {
+        return json(201, { id: 11, name: (parsed as { name?: string }).name });
+      }
+      if (path.includes("/issues/12/labels") && method === "POST") return json(200, []);
+      if (path.includes("/comments") && method === "GET") return json(200, []);
+      if (path.includes("/comments") && method === "POST") return json(201, { id: 2 });
+      if (path.includes("/reactions") && method === "POST") return json(201, {});
+      return json(404, {});
+    };
+    const { db, bot } = testApp({
+      fetchImpl,
+      forgejo: { origin: "https://git.example", token: "tok", webhookSecret: "forgejo-webhook-16+" },
+      refine: async () => refinedTemplate(""),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        forge: "forgejo",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
+    expect((patch?.body as { body: string }).body).toContain(ISSUE_BOT_MARKER);
+    expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/comments"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/issues/12/labels"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/reactions"))).toBe(true);
+  });
 });
 
 function gitlabOpened(opts: { description?: string; action?: string; iid?: number } = {}): Record<string, unknown> {
@@ -651,5 +753,31 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
     });
     expect(res.status).toBe(202);
     expect(listIssueRefineJobs(db)[0].forge).toBe("forgejo");
+  });
+
+  it("returns 404 when GitLab or Forgejo webhook secrets are missing", async () => {
+    const db = openDb(":memory:");
+    const config = gatedConfig({
+      gitlab: { origin: "https://git.example", token: "glpat-x" },
+      forgejo: { origin: "https://git.example", token: "tok" },
+    });
+    const bot = createIssueBot({
+      db,
+      config: config.issueBot,
+      gitlab: config.gitlab,
+      forgejo: config.forgejo,
+      fetchImpl: async () => json(500, {}),
+      refine: async () => refinedTemplate(),
+      backoffMs: () => 0,
+    });
+    const app = createApp({
+      config,
+      db,
+      issueBot: bot,
+      issueBotAutoStart: false,
+      openCodeServe: { url: () => null, password: () => "x", ensure: async () => {}, stop: async () => {} },
+    });
+    expect((await app.request("/webhooks/gitlab", { method: "POST", body: "{}" })).status).toBe(404);
+    expect((await app.request("/webhooks/forgejo", { method: "POST", body: "{}" })).status).toBe(404);
   });
 });

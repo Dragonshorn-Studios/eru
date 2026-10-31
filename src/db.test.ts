@@ -50,7 +50,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(8);
+    expect(migrations.n).toBe(9);
     again.close();
   });
 
@@ -95,7 +95,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(8);
+    expect(migrations.n).toBe(9);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -104,7 +104,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(8);
+    expect(after.n).toBe(9);
     legacy.close();
   });
 });
@@ -218,6 +218,7 @@ describe("repo auth source and page mapped_ref", () => {
     );
     expect(getRepo(db, instanceId)!.authSource).toBe("instance");
     expect(getRepo(db, instanceId)!.forge).toBe("gitlab");
+    expect(getRepo(db, instanceId)!.origin).toBe("");
 
     // Reconnecting the same GitHub repo manually flips it back.
     upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-05T00:00:00Z");
@@ -368,6 +369,95 @@ describe("issue refine jobs", () => {
     expect(columns.some((col) => col.name === "forge")).toBe(true);
     const row = legacy.prepare(`SELECT forge, owner FROM issue_refine_jobs`).get() as { forge: string; owner: string };
     expect(row).toEqual({ forge: "github", owner: "acme" });
+    legacy.close();
+  });
+
+  it("keeps GitLab/Forgejo hosts distinct by origin after 0009", () => {
+    const db = openDb(":memory:");
+    const hostA = upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.a.example" },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
+    upsertPage(db, hostA, { slug: "arch", title: "A", body: "from A", sortOrder: 0 }, "t");
+    const hostB = upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.b.example" },
+      "2026-01-02T00:00:00Z",
+      "instance",
+    );
+    expect(hostB).not.toBe(hostA);
+    expect(listPages(db, hostA)).toEqual([{ slug: "arch", title: "A" }]);
+    expect(listPages(db, hostB)).toEqual([]);
+    const sameA = upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.a.example" },
+      "2026-01-03T00:00:00Z",
+      "instance",
+    );
+    expect(sameA).toBe(hostA);
+    db.close();
+  });
+
+  it("adds origin to a pre-0009 repos table and preserves pages", () => {
+    const legacy = new Database(":memory:");
+    legacy.pragma("foreign_keys = ON");
+    legacy.exec(`
+      CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE repos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        forge TEXT NOT NULL DEFAULT 'github',
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        auth_source TEXT NOT NULL DEFAULT 'manual',
+        default_branch TEXT,
+        last_mapped_ref TEXT,
+        last_mapped_at TEXT,
+        connected_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (forge, owner, name)
+      );
+      CREATE TABLE pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        mapped_ref TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE (repo_id, slug)
+      );
+      INSERT INTO repos (forge, owner, name, auth_source, created_at)
+        VALUES ('gitlab', 'acme', 'box', 'instance', 't');
+      INSERT INTO pages (repo_id, slug, title, body, sort_order, updated_at)
+        VALUES (1, 'arch', 'Arch', 'body', 0, 't');
+    `);
+    for (const name of [
+      "0001_init.sql",
+      "0002_forge_connect.sql",
+      "0003_settings.sql",
+      "0004_auth_source.sql",
+      "0005_default_branch.sql",
+      "0006_ask_threads.sql",
+      "0007_issue_bot.sql",
+      "0008_issue_bot_forge.sql",
+    ]) {
+      legacy.prepare(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(name, "t");
+    }
+    migrate(legacy);
+    const columns = legacy.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+    expect(columns.some((col) => col.name === "origin")).toBe(true);
+    expect(getPage(legacy, 1, "arch")?.body).toBe("body");
+    expect(getRepo(legacy, 1)).toMatchObject({ forge: "gitlab", owner: "acme", name: "box", origin: "" });
+    const hostB = upsertConnectedRepo(
+      legacy,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.b.example" },
+      "t2",
+      "instance",
+    );
+    expect(hostB).not.toBe(1);
     legacy.close();
   });
 });
