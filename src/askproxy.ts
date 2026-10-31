@@ -76,7 +76,7 @@ export function pinWorkspaceQuery(target: URL, workspace: string): void {
   target.searchParams.set("location[directory]", workspace);
 }
 
-/** Session create with an empty body has no location object. Fill it from the workspace. */
+/** Session create always uses the thread workspace. A client directory is not forwarded. */
 export function withSessionLocation(raw: ArrayBuffer | Uint8Array, workspace: string): Uint8Array {
   const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
   const text = new TextDecoder().decode(bytes).trim();
@@ -84,18 +84,14 @@ export function withSessionLocation(raw: ArrayBuffer | Uint8Array, workspace: st
   if (text) {
     try {
       const parsed = JSON.parse(text) as unknown;
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return bytes;
-      body = parsed as Record<string, unknown>;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
     } catch {
-      return bytes;
+      body = {};
     }
   }
-  const location = body.location;
-  if (typeof location !== "object" || location === null || Array.isArray(location)) {
-    body.location = { directory: workspace };
-  } else if (typeof (location as { directory?: unknown }).directory !== "string") {
-    (location as { directory: string }).directory = workspace;
-  }
+  body.location = { directory: workspace };
   return new TextEncoder().encode(JSON.stringify(body));
 }
 

@@ -15,10 +15,10 @@ describe("ask proxy allowlist", () => {
     expect(filled.location.directory).toBe("/data/ask/thread");
     const kept = JSON.parse(
       new TextDecoder().decode(
-        withSessionLocation(new TextEncoder().encode('{"location":{"directory":"/already"}}'), "/data/ask/thread"),
+        withSessionLocation(new TextEncoder().encode('{"location":{"directory":"/tmp/elsewhere"}}'), "/data/ask/thread"),
       ),
     );
-    expect(kept).toEqual({ location: { directory: "/already" } });
+    expect(kept).toEqual({ location: { directory: "/data/ask/thread" } });
     expect(proxyPathAllowed("/api/event")).toBe(true);
     expect(proxyPathAllowed("/event")).toBe(true);
   });
