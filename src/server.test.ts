@@ -1083,7 +1083,9 @@ describe("github app", () => {
       seen.push({ auth: (init.headers as Record<string, string>)?.Authorization ?? "none", path: u.pathname });
       const json = (status: number, body: unknown) =>
         new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if (u.pathname === "/app") return json(200, { id: 4242, slug: "eru", name: "Eru" });
       if (u.pathname === "/app/installations") return json(200, [{ id: 7 }]);
+      if (decodeURIComponent(u.pathname) === "/users/eru[bot]") return json(200, { id: 9001, login: "eru[bot]" });
       if (u.pathname === "/app/installations/7/access_tokens") {
         return json(201, { token: "ghs_inst_tok", expires_at: "2030-01-01T00:00:00Z" });
       }
@@ -1251,6 +1253,63 @@ describe("github app", () => {
     expect(html).toContain("Sign in with GitHub");
     expect(html).toContain("/login/github");
   });
+
+  it("shows setup steps and tests saved App credentials against GitHub", async () => {
+    const seen: { auth: string; path: string }[] = [];
+    const instance = app(
+      {
+        githubAppId: "4242",
+        githubAppPrivateKey: APP_PEM,
+        publicUrl: "http://eru.test",
+        oauthClientId: "Iv1.app",
+        oauthClientSecret: "oauth-secret",
+        oauthAdminIds: [42],
+        uiLocalLogin: true,
+        issueBot: {
+          appId: "4242",
+          privateKey: APP_PEM,
+          webhookSecret: "webhook-secret-16+",
+          botUserId: 9001,
+          trustedBotIds: [],
+          hourlyCap: 20,
+          dedicated: false,
+        },
+      },
+      appFetch(seen),
+    );
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("Identifying and authorizing users");
+    expect(page).toContain("http://eru.test/login/github/callback");
+    expect(page).toContain("http://eru.test/webhooks/github");
+    expect(page).toContain("Subscribe to events");
+    expect(page).toContain("Rewrite only runs on repos connected in Eru");
+    expect(page).toContain('action="/config/github-app/test"');
+    expect(page).toContain("Test app config");
+
+    const res = await post(instance, "/config/github-app/test", {});
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("App credentials work.");
+    expect(body).toContain("id=\"github-app-test\"");
+    expect(body).toContain("2 repositories");
+    expect(body).toContain("Sign in with GitHub is on");
+    expect(body).toContain("Webhook secret is set");
+    expect(body).toContain("9001");
+    expect(seen.some((s) => s.path === "/app" && s.auth.startsWith("Bearer eyJ"))).toBe(true);
+    expect(body).not.toContain(APP_PEM);
+    expect(body).not.toContain("oauth-secret");
+    expect(body).not.toContain("webhook-secret-16+");
+  });
+
+  it("tests fail closed when no App is configured", async () => {
+    const instance = app();
+    const res = await post(instance, "/config/github-app/test", {});
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("App config needs attention.");
+    expect(body).toContain("Save App ID and a private key first");
+  });
 });
 
 describe("gitlab and forgejo from /config", () => {
@@ -1288,6 +1347,7 @@ describe("gitlab and forgejo from /config", () => {
     const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
     expect(page).not.toContain("glpat-secret");
     expect(page).toContain("/webhooks/gitlab");
+    expect(page).toContain("for connected repos only");
   });
 
   it("lists GitLab repos on /connect and connects one via the instance token", async () => {

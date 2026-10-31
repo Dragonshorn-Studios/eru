@@ -42,8 +42,8 @@ Brief-style layout — sticky section nav on the left (OpenCode models / Provide
 
 - **OpenCode models** — separate Ask and Map model fields (`provider/model`), a datalist fed by `opencode models`, a refresh-list button.
 - **Provider API keys** — write-only inputs per provider (OpenCode Zen, OpenCode Go, Anthropic, OpenAI, …), stored in OpenCode's `auth.json`, shown as a source badge plus a last-4 fingerprint.
-- **GitHub App** — one App for mapping, Sign in with GitHub, and `@eru-issue-bot`: App ID, installation ID, private key, client id/secret, operator user ids, public URL, webhook secret, bot user id.
-- **GitLab / Forgejo** — self-hosted origin + API token (write-only, encrypted) and optional webhook secret for issue rewrite.
+- **GitHub App** — one App for mapping, Sign in with GitHub, and `@eru-issue-bot`: numbered setup for callback URL, webhook URL, permissions, and bot user id, then App ID, installation ID, private key, client id/secret, operator user ids, public URL, webhook secret, bot user id. **Test app config** calls GitHub with the App JWT (installation, repo list, bot user lookup) and never echoes secrets. Issue rewrite only runs on connected repos.
+- **GitLab / Forgejo** — self-hosted origin + API token (write-only, encrypted) and optional webhook secret for issue rewrite on connected repos.
 - **Operator** — the GitHub login shown in the top-bar pill and used for the avatar.
 
 ![config](ui/config.png)

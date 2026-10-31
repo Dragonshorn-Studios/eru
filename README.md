@@ -65,7 +65,7 @@ Recommended: `ERU_FORGE_TOKEN_KEY` — a stable key for encrypting stored forge 
 
 ## GitHub App (mapping + login + issue bot)
 
-One GitHub App is enough. Permissions: **Contents** Read, **Issues** Read & write, **Metadata** Read. Subscribe to **Issues**. Set the App ID, PEM, client id/secret, operator GitHub user ids, public URL, webhook secret, and bot user id on `/config` (or via `ERU_GITHUB_APP_*` / `ERU_OAUTH_*` aliases in `.env`). Callback URL must be exactly `$ERU_PUBLIC_URL/login/github/callback`.
+One GitHub App is enough. Permissions: **Contents** Read, **Issues** Read & write, **Metadata** Read. Subscribe to **Issues**. Set the App ID, PEM, client id/secret, operator GitHub user ids, public URL, webhook secret, and bot user id on `/config` (or via `ERU_GITHUB_APP_*` / `ERU_OAUTH_*` aliases in `.env`). The config page lists the exact callback and webhook URLs and can **Test app config** against GitHub. Callback URL must be exactly `$ERU_PUBLIC_URL/login/github/callback`.
 
 ## GitLab and Forgejo
 
@@ -73,7 +73,7 @@ Self-hosted GitLab and Forgejo are configured on `/config` (or `ERU_GITLAB_*` / 
 
 ## eru-issue-bot
 
-Rewrites newly opened issues mentioning `@eru-issue-bot` into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it.
+Rewrites newly opened issues mentioning `@eru-issue-bot` on **connected** repos into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it. A signed webhook from a repo that is not connected returns 202 and is ignored.
 
 On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` App is an optional override and must be set as a complete set (App ID, PEM, webhook secret, bot user id) — mixing a dedicated App ID with the mapping App's PEM or webhook secret fails closed at boot. The webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve (GitLab/Forgejo need URL + token + webhook secret).
 
@@ -84,7 +84,7 @@ On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` A
 3. Webhook URL: `https://<your-eru-host>/webhooks/github`. Webhook secret: a random 16+ byte string.
 4. Repository permissions: **Contents** Read, **Issues** Read & write, **Metadata** Read-only. Uncheck everything else.
 5. Subscribe to events: **Issues**.
-6. Install the App on the selected repositories. Note the App ID, generate a PEM (mode 400), copy the client id/secret, and look up the bot user id at `https://api.github.com/users/<app-slug>%5Bbot%5D`.
+6. Install the App on the selected repositories, then Connect each one in Eru. Issue rewrite only runs on connected repos. Note the App ID, generate a PEM (mode 400), copy the client id/secret, and look up the bot user id at `https://api.github.com/users/<app-slug>%5Bbot%5D`.
 
 The bot uses the same OpenCode model as Ask (`ERU_OPENCODE_ASK_MODEL` / saved `/config` Ask model / `ERU_OPENCODE_MODEL`). Nagato's "Refine with Eru" checkbox only needs to append `@eru-issue-bot` on its own line at the end of the issue body.
 

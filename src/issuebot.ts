@@ -1,6 +1,8 @@
 /**
  * eru-issue-bot (#37): GitHub `issues` webhook → SQLite job → in-process worker.
  *
+ * Signed webhooks from repos that are not connected in Eru return 202 and are
+ * not queued. The worker skips a job if the repo was disconnected after enqueue.
  * Issue title/body are untrusted user data. They go to the model as text only
  * (no tools, no repo, no secrets) and are never logged. App private key,
  * webhook secret, and installation tokens stay in env / memory.
@@ -17,6 +19,7 @@ import {
   countRecentIssueRefineJobs,
   enqueueIssueRefineJob,
   failIssueRefineJob,
+  findConnectedRepo,
   recoverIssueRefineJobs,
   retryIssueRefineJob,
   type IssueRefineJob,
@@ -393,9 +396,23 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     return new Date(ms).toISOString();
   }
 
+  function connectedOrigin(forge: string): string {
+    if (forge === FORGE_GITLAB) return opts.gitlab?.origin ?? "";
+    if (forge === FORGE_FORGEJO) return opts.forgejo?.origin ?? "";
+    return "";
+  }
+
+  function isConnected(forge: string, owner: string, name: string): boolean {
+    return Boolean(findConnectedRepo(db, { forge, owner, name, origin: connectedOrigin(forge) }));
+  }
+
   async function acceptJob(decision: EnqueueDecision): Promise<Response> {
     if (!decision.enqueue) return jsonOk();
     const parsed = decision.target;
+    if (!isConnected(parsed.forge, parsed.owner, parsed.name)) {
+      console.log(`issuebot: ignored unconnected ${parsed.forge}:${parsed.owner}/${parsed.name}`);
+      return jsonOk();
+    }
     const at = iso();
     const hourAgo = iso(now() - 60 * 60 * 1000);
     if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo, parsed.forge) >= hourlyCap) {
@@ -614,6 +631,11 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
 
   async function processJob(job: IssueRefineJob): Promise<void> {
     const label = `${job.forge}:${job.owner}/${job.name}#${job.issueNumber}`;
+    if (!isConnected(job.forge, job.owner, job.name)) {
+      completeIssueRefineJob(db, job.id, iso());
+      console.log(`issuebot: skipped unconnected ${label}`);
+      return;
+    }
     try {
       const live = await liveIssue(job);
       const liveBody = live.body || job.body;

@@ -318,6 +318,20 @@ export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
     .all() as MappedRepo[];
 }
 
+/** Match a forge identity to a connected repo. Owner/name compare case-insensitively. */
+export function findConnectedRepo(
+  db: SqliteDb,
+  identity: { forge: string; owner: string; name: string; origin?: string },
+): MappedRepo | undefined {
+  return db
+    .prepare(
+      `SELECT ${MAPPED_REPO_COLUMNS} FROM repos
+       WHERE forge = ? AND origin = ? AND lower(owner) = lower(?) AND lower(name) = lower(?)
+       LIMIT 1`,
+    )
+    .get(identity.forge, identity.origin ?? "", identity.owner, identity.name) as MappedRepo | undefined;
+}
+
 export function upsertConnectedRepo(
   db: SqliteDb,
   repo: { forge: string; owner: string; name: string; defaultBranch?: string; origin?: string },

@@ -903,6 +903,33 @@ a.enter {
 }
 .provider-save { padding: 0.45rem 1.1rem; width: auto; }
 .config-refresh .refresh-run { width: auto; }
+.config-refresh form { margin: 0; }
+.setup-steps {
+  margin: 0.5rem 0 0.8rem;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--ink) 70%, white);
+}
+.setup-steps code { font-size: 0.84em; }
+.setup-check {
+  margin: 0.8rem 0 0;
+  padding: 0.85rem 1.1rem;
+  border-radius: 1.2rem;
+  background: color-mix(in srgb, var(--mint) 45%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 65%, var(--mint));
+}
+.setup-check.is-fail {
+  background: color-mix(in srgb, var(--rose) 40%, var(--cream));
+  border-color: color-mix(in srgb, white 60%, var(--rose));
+}
+.setup-check-title { margin: 0; font-size: 0.92rem; }
+.setup-check ul { list-style: none; margin: 0.45rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+.setup-check li { font-size: 0.86rem; line-height: 1.4; }
+.setup-check li.ok::before { content: "ok · "; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; color: color-mix(in srgb, var(--moss) 70%, var(--ink)); }
+.setup-check li.fail::before { content: "no · "; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; color: #7a3b44; }
 @media (max-width: 960px) {
   .config-stage { grid-template-columns: 1fr; }
   .config-nav { position: static; }

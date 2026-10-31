@@ -67,6 +67,7 @@ import {
   encryptForgeToken,
   fetchRepoTarball,
   forgeKeySecrets,
+  probeGithubApp,
   verifyGithubRepo,
   type AppRepo,
   type FetchLike,
@@ -897,6 +898,37 @@ export function createApp(opts: AppOptions): Hono<Env> {
     })();
     issueBotNow();
     return c.redirect("/config#github-app");
+  });
+
+  app.post("/config/github-app/test", async (c) => {
+    const resolved = resolveGithubApp(config, db);
+    const publicUrl = resolvePublicUrl(config, db).value;
+    const clientId = storedOrEnv(getSetting(db, SETTING_APP_CLIENT_ID) ?? "", config.oauthClientId);
+    const storedAdmins = getSetting(db, SETTING_APP_ADMIN_IDS);
+    const adminIds = storedAdmins ? parseAdminIds(storedAdmins) : config.oauthAdminIds;
+    const webhook = decryptStored(config, getSetting(db, SETTING_APP_WEBHOOK)) || config.issueBot?.webhookSecret;
+    const storedBot = getSetting(db, SETTING_APP_BOT_USER);
+    const botUserId =
+      storedBot && /^\d+$/.test(storedBot) ? Number(storedBot) : config.issueBot?.botUserId;
+    const probe = await probeGithubApp(
+      {
+        creds: resolved?.creds,
+        webhookSecret: webhook,
+        botUserId,
+        oauth: {
+          clientId: clientId.value || undefined,
+          hasClientSecret: Boolean(
+            decryptStored(config, getSetting(db, SETTING_APP_CLIENT_SECRET)) || config.oauthClientSecret,
+          ),
+          adminIds: adminIds ?? [],
+          publicUrl,
+        },
+      },
+      fetchImpl,
+    );
+    const view = configView(db, config, modelDiscovery, providers);
+    view.appProbe = probe;
+    return html(c, configPage(chromeModel(c, db, config), view), probe.ok ? 200 : 400);
   });
 
   for (const kind of ["gitlab", "forgejo"] as const) {

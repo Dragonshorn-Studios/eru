@@ -5,6 +5,7 @@ import {
   decryptForgeToken,
   encryptForgeToken,
   githubAppJwt,
+  probeGithubApp,
   verifyGithubRepo,
   type FetchLike,
 } from "./forge.js";
@@ -229,5 +230,85 @@ describe("github app client", () => {
     });
     const res = await client.installationToken();
     expect(!res.ok && res.error === "unreachable").toBe(true);
+  });
+
+  it("reads /app for appInfo", async () => {
+    const client = createGithubAppClient(CREDS, json(200, { id: 424242, slug: "eru", name: "Eru" }));
+    expect(await client.appInfo()).toEqual({ ok: true, value: { id: "424242", slug: "eru", name: "Eru" } });
+  });
+});
+
+describe("probeGithubApp", () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const APP_PEM = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const CREDS = { appId: "424242", privateKey: APP_PEM, installationId: "777" };
+
+  function probeFetch(opts: { botId?: number; authFail?: boolean } = {}): FetchLike {
+    return async (url, init) => {
+      const path = new URL(url).pathname;
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if (opts.authFail) return json(401, {});
+      if (path === "/app") return json(200, { id: 424242, slug: "eru", name: "Eru" });
+      if (path.includes("/access_tokens")) return json(201, { token: "ghs_x", expires_at: "2030-01-01T00:00:00Z" });
+      if (path === "/installation/repositories") {
+        return json(200, { repositories: [{ owner: { login: "acme" }, name: "box", private: false }] });
+      }
+      if (decodeURIComponent(path) === "/users/eru[bot]") return json(200, { id: opts.botId ?? 9001, login: "eru[bot]" });
+      return json(404, {});
+    };
+  }
+
+  it("fails closed without App credentials and still reports oauth/webhook gaps", async () => {
+    const res = await probeGithubApp({});
+    expect(res.ok).toBe(false);
+    expect(res.checks.some((c) => !c.ok && /Save App ID/.test(c.detail))).toBe(true);
+    expect(res.checks.some((c) => /Sign in with GitHub needs/.test(c.detail))).toBe(true);
+    expect(res.checks.some((c) => /webhook secret/.test(c.detail))).toBe(true);
+  });
+
+  it("reports a working App, oauth, webhook, and matching bot user", async () => {
+    const res = await probeGithubApp(
+      {
+        creds: CREDS,
+        webhookSecret: "webhook-secret-16+",
+        botUserId: 9001,
+        oauth: {
+          clientId: "Iv1.app",
+          hasClientSecret: true,
+          adminIds: [42],
+          publicUrl: "https://eru.example",
+        },
+      },
+      probeFetch(),
+    );
+    expect(res.ok).toBe(true);
+    expect(res.checks.every((c) => c.ok)).toBe(true);
+    expect(res.checks.some((c) => /1 repository/.test(c.detail))).toBe(true);
+    expect(res.checks.some((c) => c.detail.includes("https://eru.example/login/github/callback"))).toBe(true);
+    expect(res.checks.some((c) => c.detail.includes("https://eru.example/webhooks/github"))).toBe(true);
+    expect(res.checks.some((c) => /9001/.test(c.detail))).toBe(true);
+  });
+
+  it("flags a mismatched bot user id and incomplete oauth", async () => {
+    const res = await probeGithubApp(
+      {
+        creds: CREDS,
+        botUserId: 1,
+        oauth: { clientId: "Iv1.app", hasClientSecret: true, adminIds: [], publicUrl: "" },
+      },
+      probeFetch({ botId: 9001 }),
+    );
+    expect(res.ok).toBe(true);
+    expect(res.checks.some((c) => !c.ok && /Saved bot user id 1 is not eru\[bot\] \(id 9001\)/.test(c.detail))).toBe(
+      true,
+    );
+    expect(res.checks.some((c) => !c.ok && /operator GitHub user ids/.test(c.detail))).toBe(true);
+  });
+
+  it("maps a refused JWT to a failed mapping check", async () => {
+    const res = await probeGithubApp({ creds: CREDS }, probeFetch({ authFail: true }));
+    expect(res.ok).toBe(false);
+    expect(res.checks.some((c) => !c.ok && /refused the App JWT/.test(c.detail))).toBe(true);
   });
 });
