@@ -562,7 +562,7 @@ describe("ask threads and proxy", () => {
     // The upstream session create carried the loopback basic auth and the
     // per-thread workspace directory — never client input.
     expect(seen?.auth).toBe(`Basic ${Buffer.from("opencode:oc-test-password").toString("base64")}`);
-    expect(seen?.url).toContain("/session");
+    expect(seen?.url).toContain("/api/session");
     expect(seen?.url).toContain(`directory=${encodeURIComponent(join(instance.askWorkdir, thread.id))}`);
 
     const list = await api(instance, auth, "/ask/api/threads");
@@ -631,11 +631,16 @@ describe("ask threads and proxy", () => {
     expect(res.headers.get("set-cookie")).toBeNull();
     expect(calls).toHaveLength(1);
     const target = new URL(calls[0].url);
-    expect(target.pathname).toBe("/session");
+    expect(target.pathname).toBe("/api/session");
     expect(target.searchParams.get("directory")).toBe(join(instance.askWorkdir, thread.id));
     expect(target.searchParams.get("x")).toBe("1");
     expect(calls[0].cookie).toBeNull();
     expect(calls[0].auth).toBe(`Basic ${Buffer.from("opencode:oc-test-password").toString("base64")}`);
+
+    calls.length = 0;
+    const alreadyPrefixed = await api(instance, auth, `/ask/oc/${thread.id}/api/session`);
+    expect(alreadyPrefixed.status).toBe(200);
+    expect(new URL(calls[0].url).pathname).toBe("/api/session");
 
     // POST bodies flow through the CSRF middleware untouched.
     const post = await api(instance, auth, `/ask/oc/${thread.id}/session/ses-1/message`, {
@@ -670,6 +675,35 @@ describe("ask threads and proxy", () => {
       body: "{}",
     });
     expect(post.status).toBe(403);
+  });
+
+  it("does not attach a request timeout to OC2 /api/event streams", async () => {
+    const seen: { path: string; abortedAfter: boolean }[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname;
+      await new Promise((r) => setTimeout(r, 120));
+      seen.push({ path, abortedAfter: Boolean(init.signal?.aborted) });
+      if (init.signal?.aborted) {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      return new Response("ok", { status: 200 });
+    };
+    const instance = app({ openCodeTimeoutMs: 50 }, fetchImpl, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "a", title: "A", body: "b", sortOrder: 0 }]);
+    const { thread } = (await (await api(instance, auth, "/ask/api/threads", { method: "POST" })).json()) as {
+      thread: { id: string };
+    };
+    seen.length = 0;
+    const event = await api(instance, auth, `/ask/oc/${thread.id}/api/event`);
+    expect(event.status).toBe(200);
+    expect(seen[0]).toEqual({ path: "/api/event", abortedAfter: false });
+    const session = await api(instance, auth, `/ask/oc/${thread.id}/session`);
+    expect(session.status).toBe(499);
+    expect(seen[1].path).toBe("/api/session");
+    expect(seen[1].abortedAfter).toBe(true);
   });
 });
 
@@ -1199,6 +1233,223 @@ describe("github app", () => {
     expect(page).toContain("saved on this page · overrides <code>ERU_GITHUB_APP_ID</code>");
     expect(page).toContain('value="111"');
   });
+
+  it("turns on Sign in with GitHub after saving App client credentials on /config", async () => {
+    const instance = app();
+    const res = await post(instance, "/config/github-app", {
+      app_id: "4242",
+      app_installation_id: "",
+      app_private_key: APP_PEM,
+      app_client_id: "Iv1.from-config",
+      app_client_secret: "oauth-secret",
+      app_admin_ids: "42",
+      public_url: "http://eru.test",
+    });
+    expect(res.status).toBe(302);
+    const login = await instance.app.request("/login");
+    const html = await login.text();
+    expect(html).toContain("Sign in with GitHub");
+    expect(html).toContain("/login/github");
+  });
+});
+
+describe("gitlab and forgejo from /config", () => {
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  async function post(instance: ReturnType<typeof app>, path: string, fields: Record<string, string>) {
+    const { cookie, csrf } = await authed(instance);
+    return instance.app.request(path, {
+      method: "POST",
+      body: new URLSearchParams({ ...fields, [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+  }
+
+  it("saves GitLab URL and encrypted token from /config", async () => {
+    const instance = app();
+    const res = await post(instance, "/config/gitlab", {
+      base_url: "https://git.example/api/v4",
+      token: "glpat-secret",
+      webhook_secret: "gitlab-webhook-16+",
+    });
+    expect(res.status).toBe(302);
+    expect(getSetting(instance.db, "gitlab.base_url")).toBe("https://git.example");
+    const stored = getSetting(instance.db, "gitlab.token")!;
+    expect(stored).toMatch(/^v1\./);
+    expect(stored).not.toContain("glpat-secret");
+    expect(decryptForgeToken(instance.config.sessionSecret, stored)).toBe("glpat-secret");
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).not.toContain("glpat-secret");
+    expect(page).toContain("/webhooks/gitlab");
+  });
+
+  it("lists GitLab repos on /connect and connects one via the instance token", async () => {
+    const seen: string[] = [];
+    const fetchImpl = async (url: string) => {
+      seen.push(url);
+      if (url.includes("/projects?") ) {
+        return new Response(
+          JSON.stringify([{ path_with_namespace: "acme/box", visibility: "private", default_branch: "main" }]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/projects/")) {
+        return new Response(
+          JSON.stringify({ path_with_namespace: "acme/box", default_branch: "main" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const instance = app(
+      { gitlab: { origin: "https://git.example", token: "glpat-x" } },
+      fetchImpl,
+    );
+    const { cookie, csrf } = await authed(instance);
+    const page = await (await instance.app.request("/connect", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("From GitLab");
+    expect(page).toContain("acme/box");
+    expect(page).toContain('action="/connect/instance"');
+
+    const res = await instance.app.request("/connect/instance", {
+      method: "POST",
+      body: new URLSearchParams({ forge: "gitlab", owner: "acme", name: "box", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const repo = getPrimaryRepo(instance.db)!;
+    expect(repo).toMatchObject({
+      forge: "gitlab",
+      owner: "acme",
+      name: "box",
+      origin: "https://git.example",
+      authSource: "instance",
+    });
+    expect(getForgeCredential(instance.db, repo.id)).toBeUndefined();
+    expect(seen.some((u) => u.includes("/api/v4/projects"))).toBe(true);
+  });
+
+  it("refreshes a GitLab instance repo from the instance archive", async () => {
+    const tar = await fakeTarball();
+    let archiveUrl = "";
+    const fetchImpl = async (url: string) => {
+      if (url.includes("/archive.tar.gz")) {
+        archiveUrl = url;
+        return new Response(new Uint8Array(tar));
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const instance = app(
+      { gitlab: { origin: "https://git.example", token: "glpat-x" } },
+      fetchImpl,
+      undefined,
+      async () => ({ ok: true as const, pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }] }),
+    );
+    upsertConnectedRepo(instance.db, { forge: "gitlab", owner: "acme", name: "box", defaultBranch: "main" }, "t", "instance");
+    const { cookie, csrf } = await authed(instance);
+    await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.notice).toContain("Mapped @main");
+    expect(archiveUrl).toContain("https://git.example/api/v4/projects/acme%2Fbox/repository/archive.tar.gz");
+  });
+
+  it("saves Forgejo from /config, lists and connects via instance, and refreshes the archive", async () => {
+    const tar = await fakeTarball();
+    const seen: string[] = [];
+    let archiveUrl = "";
+    const fetchImpl = async (url: string) => {
+      seen.push(url);
+      if (url.includes("/user/repos")) {
+        return new Response(
+          JSON.stringify([{ owner: { username: "acme" }, name: "box", private: false, default_branch: "dev" }]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/repos/acme/box") && url.includes("/archive/")) {
+        archiveUrl = url;
+        return new Response(new Uint8Array(tar));
+      }
+      if (url.includes("/repos/acme/box")) {
+        return new Response(
+          JSON.stringify({ owner: { login: "acme" }, name: "box", default_branch: "dev" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const instance = app({}, fetchImpl, undefined, async () => ({
+      ok: true as const,
+      pages: [{ slug: "a", title: "A", body: "b", sortOrder: 0 }],
+    }));
+    const save = await post(instance, "/config/forgejo", {
+      base_url: "https://git.example",
+      token: "fj-secret",
+      webhook_secret: "forgejo-webhook-16+",
+    });
+    expect(save.status).toBe(302);
+    expect(getSetting(instance.db, "forgejo.base_url")).toBe("https://git.example");
+    const stored = getSetting(instance.db, "forgejo.token")!;
+    expect(stored).toMatch(/^v1\./);
+    expect(decryptForgeToken(instance.config.sessionSecret, stored)).toBe("fj-secret");
+
+    const { cookie, csrf } = await authed(instance);
+    const page = await (await instance.app.request("/connect", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("From Forgejo");
+    expect(page).toContain("acme/box");
+    expect(page).toContain('action="/connect/instance"');
+
+    const res = await instance.app.request("/connect/instance", {
+      method: "POST",
+      body: new URLSearchParams({ forge: "forgejo", owner: "acme", name: "box", [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const repo = getPrimaryRepo(instance.db)!;
+    expect(repo).toMatchObject({
+      forge: "forgejo",
+      owner: "acme",
+      name: "box",
+      origin: "https://git.example",
+      authSource: "instance",
+    });
+
+    await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, "HX-Request": "true" },
+    });
+    const state = await waitRefreshNotice(instance, cookie);
+    expect(state.notice).toContain("Mapped @dev");
+    expect(archiveUrl).toContain("https://git.example/api/v1/repos/acme/box/archive/dev.tar.gz");
+  });
+
+  it("removes a saved GitLab instance from /config", async () => {
+    const instance = app({ gitlab: { origin: "https://git.example", token: "glpat-x" } });
+    await post(instance, "/config/gitlab", {
+      base_url: "https://git.example",
+      token: "glpat-secret",
+      webhook_secret: "gitlab-webhook-16+",
+    });
+    expect(getSetting(instance.db, "gitlab.base_url")).toBe("https://git.example");
+    const res = await post(instance, "/config/gitlab/remove", {});
+    expect(res.status).toBe(302);
+    expect(getSetting(instance.db, "gitlab.base_url")).toBeUndefined();
+    expect(getSetting(instance.db, "gitlab.token")).toBeUndefined();
+    expect(getSetting(instance.db, "gitlab.webhook_secret")).toBeUndefined();
+  });
 });
 
 describe("repo selection", () => {
@@ -1387,6 +1638,8 @@ describe("provider keys on /config", () => {
     const html = await res.text();
     expect(html).toContain('href="#providers"');
     expect(html).toContain('href="#github-app"');
+    expect(html).toContain('href="#gitlab"');
+    expect(html).toContain('href="#forgejo"');
     expect(html).not.toContain('href="#issue-bot"');
     expect(html).toContain("config-stage");
     expect(html).toContain("key from env <code>OPENAI_API_KEY</code>");

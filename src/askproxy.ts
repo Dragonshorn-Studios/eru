@@ -29,7 +29,9 @@ export interface AskProxyDeps {
 }
 
 // First path segment / exact path allowlist for forwarded upstream requests.
-const ALLOWED_UPSTREAM = /^\/(session(?:\/.*)?|event|question(?:\/.*)?|permission(?:\/.*)?|experimental\/(session|tool)(?:\/.*)?)$/;
+// OC2 serves the same resources under `/api/`; OC1 paths are rewritten below.
+const ALLOWED_UPSTREAM =
+  /^\/(?:api\/)?(session(?:\/.*)?|event|question(?:\/.*)?|permission(?:\/.*)?|experimental\/(session|tool)(?:\/.*)?)$/;
 
 // Headers a client may never smuggle upstream; the proxy sets its own.
 const STRIP_REQUEST_HEADERS = new Set([
@@ -60,6 +62,11 @@ export function proxyPathAllowed(rest: string): boolean {
   return ALLOWED_UPSTREAM.test(rest);
 }
 
+/** OC1 `/event` and OC2 `/api/event` are long-lived SSE — never attach a request timeout. */
+export function isAskEventStream(path: string): boolean {
+  return path === "/event" || path === "/api/event";
+}
+
 export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response> {
   const threadId = c.req.param("threadId") ?? "";
   const prefix = `/ask/oc/${threadId}`;
@@ -85,7 +92,8 @@ export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response
   const at = new Date(deps.now()).toISOString();
   const workspace = await ensureWorkspace(deps.db, deps.workdir, thread, at);
 
-  const target = new URL(`${upstream}${upstreamPath}`);
+  const forwardedPath = upstreamPath.startsWith("/api/") ? upstreamPath : `/api${upstreamPath}`;
+  const target = new URL(`${upstream}${forwardedPath}`);
   for (const [key, value] of new URL(c.req.url).searchParams) {
     target.searchParams.append(key, value);
   }
@@ -106,7 +114,7 @@ export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response
     init.body = await c.req.arrayBuffer();
   }
   const signals = [c.req.raw.signal];
-  if (upstreamPath !== "/event" && deps.timeoutMs) {
+  if (!isAskEventStream(upstreamPath) && deps.timeoutMs) {
     signals.push(AbortSignal.timeout(deps.timeoutMs()));
   }
   init.signal = AbortSignal.any(signals);

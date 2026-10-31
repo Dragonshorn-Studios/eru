@@ -10,7 +10,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "hono";
-import type { IssueBotConfig } from "./config.js";
+import { DEFAULT_ISSUE_BOT_HOURLY_CAP, type ForgeInstanceConfig, type IssueBotConfig } from "./config.js";
 import {
   claimDueIssueRefineJob,
   completeIssueRefineJob,
@@ -30,14 +30,34 @@ import {
   type FetchLike,
   type GithubAppClient,
 } from "./forge.js";
-import { opencodeModel, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
+import { opencodeModel, opencodeRunArgs, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import {
+  FORGE_FORGEJO,
+  FORGE_GITLAB,
+  FORGE_GITHUB,
+  forgejoAddLabels,
+  forgejoAddReaction,
+  forgejoEnsureComment,
+  forgejoGetIssue,
+  forgejoPatchIssue,
+  gitlabAddLabels,
+  gitlabAwardEyes,
+  gitlabEnsureNote,
+  gitlabGetIssue,
+  gitlabPatchIssue,
+  splitNamespace,
+  verifyForgejoWebhookSignature,
+  verifyGitlabWebhookToken,
+} from "./forges.js";
 import { markWorkspaceRoot } from "./util.js";
 
 export const ISSUE_BOT_MENTION = "@eru-issue-bot";
 export const ISSUE_BOT_MARKER = "<!-- eru-issue-bot:v1 -->";
 export const ISSUE_BOT_MAX_ATTEMPTS = 3;
 export const ISSUE_BOT_WEBHOOK_PATH = "/webhooks/github";
+export const GITLAB_WEBHOOK_PATH = "/webhooks/gitlab";
+export const FORGEJO_WEBHOOK_PATH = "/webhooks/forgejo";
 export const ISSUE_BOT_MAX_BODY_BYTES = 1_000_000;
 export const GITHUB_ISSUE_BODY_MAX = 65_536;
 
@@ -76,6 +96,8 @@ export type IssueRefineFn = (input: { title: string; body: string }) => Promise<
 
 export interface IssueBot {
   handleWebhook(c: Context): Promise<Response>;
+  handleGitlabWebhook(c: Context): Promise<Response>;
+  handleForgejoWebhook(c: Context): Promise<Response>;
   processDue(): Promise<void>;
   start(): void;
   stop(): void;
@@ -83,7 +105,9 @@ export interface IssueBot {
 
 export interface IssueBotOptions {
   db: SqliteDb;
-  config: IssueBotConfig;
+  config?: IssueBotConfig;
+  gitlab?: ForgeInstanceConfig;
+  forgejo?: ForgeInstanceConfig;
   fetchImpl?: FetchLike;
   apiBase?: string;
   refine?: IssueRefineFn;
@@ -123,6 +147,7 @@ export function stripIssueBotMention(text: string): string {
 }
 
 export interface EnqueueTarget {
+  forge: string;
   installationId: string;
   owner: string;
   name: string;
@@ -174,7 +199,84 @@ export function shouldEnqueueIssue(
   return {
     enqueue: true,
     target: {
+      forge: FORGE_GITHUB,
       installationId: String(installationId),
+      owner: ownerLogin,
+      name: repoName,
+      issueNumber: number,
+      title: typeof issue.title === "string" ? issue.title : "",
+      body: issueBody,
+    },
+  };
+}
+
+export function shouldEnqueueGitlabIssue(
+  payload: unknown,
+  opts: { botUserId?: number; trustedBotIds: number[] },
+): EnqueueDecision {
+  if (payload == null || typeof payload !== "object") return { enqueue: false, reason: "payload" };
+  const body = payload as Record<string, unknown>;
+  if (body.object_kind !== "issue") return { enqueue: false, reason: "kind" };
+  const attrs = asRecord(body.object_attributes);
+  if (!attrs) return { enqueue: false, reason: "issue" };
+  if (attrs.action !== "open") return { enqueue: false, reason: "action" };
+  const issueBody = typeof attrs.description === "string" ? attrs.description : "";
+  if (!bodyMentionsIssueBot(issueBody)) return { enqueue: false, reason: "mention" };
+  if (hasIssueBotMarker(issueBody)) return { enqueue: false, reason: "marker" };
+  const user = asRecord(body.user);
+  const senderId = asPositiveInt(user?.id);
+  if (senderId === undefined) return { enqueue: false, reason: "sender" };
+  if (opts.botUserId !== undefined && senderId === opts.botUserId) {
+    return { enqueue: false, reason: "own-bot" };
+  }
+  const project = asRecord(body.project);
+  const split = typeof project?.path_with_namespace === "string" ? splitNamespace(project.path_with_namespace) : undefined;
+  const iid = asPositiveInt(attrs.iid);
+  if (!split || iid === undefined) return { enqueue: false, reason: "target" };
+  return {
+    enqueue: true,
+    target: {
+      forge: FORGE_GITLAB,
+      installationId: "-",
+      owner: split.owner,
+      name: split.name,
+      issueNumber: iid,
+      title: typeof attrs.title === "string" ? attrs.title : "",
+      body: issueBody,
+    },
+  };
+}
+
+export function shouldEnqueueForgejoIssue(
+  payload: unknown,
+  opts: { botUserId?: number; trustedBotIds: number[] },
+): EnqueueDecision {
+  if (payload == null || typeof payload !== "object") return { enqueue: false, reason: "payload" };
+  const body = payload as Record<string, unknown>;
+  if (body.action !== "opened") return { enqueue: false, reason: "action" };
+  const issue = asRecord(body.issue);
+  if (!issue) return { enqueue: false, reason: "issue" };
+  const issueBody = typeof issue.body === "string" ? issue.body : "";
+  if (!bodyMentionsIssueBot(issueBody)) return { enqueue: false, reason: "mention" };
+  if (hasIssueBotMarker(issueBody)) return { enqueue: false, reason: "marker" };
+  const sender = asRecord(body.sender);
+  const senderId = asPositiveInt(sender?.id);
+  if (senderId === undefined) return { enqueue: false, reason: "sender" };
+  if (opts.botUserId !== undefined && senderId === opts.botUserId) {
+    return { enqueue: false, reason: "own-bot" };
+  }
+  const repo = asRecord(body.repository);
+  const owner = asRecord(repo?.owner);
+  const ownerLogin =
+    (typeof owner?.login === "string" && owner.login) || (typeof owner?.username === "string" && owner.username) || "";
+  const repoName = typeof repo?.name === "string" ? repo.name : "";
+  const number = asPositiveInt(issue.number);
+  if (!ownerLogin || !repoName || number === undefined) return { enqueue: false, reason: "target" };
+  return {
+    enqueue: true,
+    target: {
+      forge: FORGE_FORGEJO,
+      installationId: "-",
       owner: ownerLogin,
       name: repoName,
       issueNumber: number,
@@ -242,10 +344,8 @@ export function createIssueRefiner(opts: OpenCodeOptions): IssueRefineFn {
     try {
       await writeFile(join(workdir, "opencode.json"), JSON.stringify(ISSUE_BOT_WORKSPACE_CONFIG));
       await markWorkspaceRoot(workdir);
-      const args = ["run", "--format", "default"];
       const runModel = opencodeModel(opts);
-      if (runModel) args.push("-m", runModel);
-      args.push("--", refinePrompt(title, body));
+      const args = opencodeRunArgs(refinePrompt(title, body), runModel);
       const timeoutMs = opencodeTimeout(opts);
       const child = await runChild(opts.bin, args, {
         cwd: workdir,
@@ -272,11 +372,11 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   const now = opts.now ?? Date.now;
   const backoff = opts.backoffMs ?? issueBotBackoffMs;
   const pollMs = opts.pollMs ?? POLL_IDLE_MS;
-  const appClient: GithubAppClient = createGithubAppClient(
-    { appId: config.appId, privateKey: config.privateKey },
-    fetchImpl,
-    apiBase,
-  );
+  const hourlyCap = config?.hourlyCap ?? DEFAULT_ISSUE_BOT_HOURLY_CAP;
+  const trustedBotIds = config?.trustedBotIds ?? [];
+  const appClient: GithubAppClient | undefined = config
+    ? createGithubAppClient({ appId: config.appId, privateKey: config.privateKey }, fetchImpl, apiBase)
+    : undefined;
   const refine =
     opts.refine ??
     (opts.openCode
@@ -293,7 +393,30 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     return new Date(ms).toISOString();
   }
 
+  async function acceptJob(decision: EnqueueDecision): Promise<Response> {
+    if (!decision.enqueue) return jsonOk();
+    const parsed = decision.target;
+    const at = iso();
+    const hourAgo = iso(now() - 60 * 60 * 1000);
+    if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo, parsed.forge) >= hourlyCap) {
+      console.log(`issuebot: hourly cap ${parsed.forge}:${parsed.owner}/${parsed.name}`);
+      return jsonOk();
+    }
+    const id = enqueueIssueRefineJob(db, parsed, at);
+    if (id) console.log(`issuebot: queued ${parsed.forge}:${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
+    if (id && !stopped) void processDue();
+    return jsonOk();
+  }
+
+  function jsonOk(): Response {
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   async function handleWebhook(c: Context): Promise<Response> {
+    if (!config) return c.text("not found", 404);
     const raw = await c.req.text();
     const signature = c.req.header("x-hub-signature-256") ?? c.req.header("X-Hub-Signature-256");
     if (!verifyGithubWebhookSignature(config.webhookSecret, raw, signature)) {
@@ -311,24 +434,64 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     } catch {
       return c.json({ ok: true }, 202);
     }
-    const decision = shouldEnqueueIssue(payload, {
-      botUserId: config.botUserId,
-      trustedBotIds: config.trustedBotIds,
-    });
-    if (!decision.enqueue) {
+    return acceptJob(
+      shouldEnqueueIssue(payload, {
+        botUserId: config.botUserId,
+        trustedBotIds: config.trustedBotIds,
+      }),
+    );
+  }
+
+  async function handleGitlabWebhook(c: Context): Promise<Response> {
+    const gitlab = opts.gitlab;
+    if (!gitlab?.webhookSecret) return c.text("not found", 404);
+    const raw = await c.req.text();
+    const token = c.req.header("x-gitlab-token") ?? c.req.header("X-Gitlab-Token");
+    if (!verifyGitlabWebhookToken(gitlab.webhookSecret, token)) {
+      return c.text("unauthorized", 401);
+    }
+    const event = (c.req.header("x-gitlab-event") ?? c.req.header("X-Gitlab-Event") ?? "").trim();
+    if (event && event !== "Issue Hook" && event !== "Confidential Issue Hook") {
       return c.json({ ok: true }, 202);
     }
-    const parsed = decision.target;
-    const at = iso();
-    const hourAgo = iso(now() - 60 * 60 * 1000);
-    if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo) >= config.hourlyCap) {
-      console.log(`issuebot: hourly cap ${parsed.owner}/${parsed.name}`);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
       return c.json({ ok: true }, 202);
     }
-    const id = enqueueIssueRefineJob(db, parsed, at);
-    if (id) console.log(`issuebot: queued ${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
-    if (id && !stopped) void processDue();
-    return c.json({ ok: true }, 202);
+    return acceptJob(shouldEnqueueGitlabIssue(payload, { trustedBotIds }));
+  }
+
+  async function handleForgejoWebhook(c: Context): Promise<Response> {
+    const forgejo = opts.forgejo;
+    if (!forgejo?.webhookSecret) return c.text("not found", 404);
+    const raw = await c.req.text();
+    const signature =
+      c.req.header("x-hub-signature-256") ??
+      c.req.header("X-Hub-Signature-256") ??
+      c.req.header("x-gitea-signature") ??
+      c.req.header("X-Gitea-Signature") ??
+      c.req.header("x-forgejo-signature") ??
+      c.req.header("X-Forgejo-Signature");
+    if (!verifyForgejoWebhookSignature(forgejo.webhookSecret, raw, signature)) {
+      return c.text("unauthorized", 401);
+    }
+    const event = (
+      c.req.header("x-gitea-event") ??
+      c.req.header("X-Gitea-Event") ??
+      c.req.header("x-forgejo-event") ??
+      c.req.header("X-Forgejo-Event") ??
+      ""
+    ).trim();
+    if (event && event !== "issues") return c.json({ ok: true }, 202);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      return c.json({ ok: true }, 202);
+    }
+    return acceptJob(shouldEnqueueForgejoIssue(payload, { trustedBotIds }));
   }
 
   async function processDue(): Promise<void> {
@@ -345,46 +508,133 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     }
   }
 
+  async function liveIssue(job: IssueRefineJob): Promise<{ title: string; body: string; token?: string }> {
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab;
+      if (!gitlab) throw new Error("gitlab:unconfigured");
+      const live = await gitlabGetIssue(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, fetchImpl);
+      return live;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo;
+      if (!forgejo) throw new Error("forgejo:unconfigured");
+      return forgejoGetIssue(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, fetchImpl);
+    }
+    if (!appClient) throw new Error("github:unconfigured");
+    const token = await appClient.installationTokenFor(job.installationId);
+    if (!token.ok) throw new Error(`token:${token.error}`);
+    const live = await githubJson<{ body?: unknown; title?: unknown }>(
+      fetchImpl,
+      apiBase,
+      token.value,
+      "GET",
+      `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
+    );
+    return {
+      title: typeof live.title === "string" ? live.title : job.title,
+      body: typeof live.body === "string" ? live.body : job.body,
+      token: token.value,
+    };
+  }
+
+  async function writeIssue(job: IssueRefineJob, body: string, token?: string): Promise<void> {
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab;
+      if (!gitlab) throw new Error("gitlab:unconfigured");
+      await gitlabPatchIssue(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, body, fetchImpl);
+      return;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo;
+      if (!forgejo) throw new Error("forgejo:unconfigured");
+      await forgejoPatchIssue(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, body, fetchImpl);
+      return;
+    }
+    if (!token) throw new Error("github:unconfigured");
+    await githubJson(
+      fetchImpl,
+      apiBase,
+      token,
+      "PATCH",
+      `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
+      { body },
+    );
+  }
+
+  async function writeLabels(job: IssueRefineJob, labels: string[], token?: string): Promise<void> {
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab!;
+      await gitlabAddLabels(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, labels, fetchImpl);
+      return;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo!;
+      await forgejoAddLabels(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, labels, fetchImpl);
+      return;
+    }
+    if (!token) throw new Error("github:unconfigured");
+    await addLabels(fetchImpl, apiBase, token, job, labels);
+  }
+
+  async function writeComment(job: IssueRefineJob, body: string, token?: string): Promise<void> {
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab!;
+      await gitlabEnsureNote(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, body, fetchImpl);
+      return;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo!;
+      await forgejoEnsureComment(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, body, fetchImpl);
+      return;
+    }
+    if (!token) throw new Error("github:unconfigured");
+    await ensureComment(fetchImpl, apiBase, token, job, body);
+  }
+
+  async function writeReaction(job: IssueRefineJob, token?: string): Promise<void> {
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab!;
+      await gitlabAwardEyes(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, fetchImpl);
+      return;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo!;
+      await forgejoAddReaction(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, fetchImpl);
+      return;
+    }
+    if (!token) return;
+    await addReaction(fetchImpl, apiBase, token, job);
+  }
+
+  async function finishForgeWriteBack(job: IssueRefineJob, agentReady: boolean, token?: string): Promise<void> {
+    const labels = [LABEL_REFINED, agentReady ? LABEL_AGENT_READY : LABEL_NEEDS_INFO];
+    await writeLabels(job, labels, token);
+    await writeComment(job, agentReady ? COMMENT_COMPLETE : COMMENT_NEEDS_INFO, token);
+  }
+
   async function processJob(job: IssueRefineJob): Promise<void> {
-    const label = `${job.owner}/${job.name}#${job.issueNumber}`;
+    const label = `${job.forge}:${job.owner}/${job.name}#${job.issueNumber}`;
     try {
-      const token = await appClient.installationTokenFor(job.installationId);
-      if (!token.ok) throw new Error(`token:${token.error}`);
-      const live = await githubJson<{ body?: unknown; title?: unknown }>(
-        fetchImpl,
-        apiBase,
-        token.value,
-        "GET",
-        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
-      );
-      const liveBody = typeof live.body === "string" ? live.body : job.body;
+      const live = await liveIssue(job);
+      const liveBody = live.body || job.body;
       if (hasIssueBotMarker(liveBody)) {
-        // Body PATCH already landed (labels/comment failed, or the process
-        // crashed). Finish write-back idempotently instead of skipping.
         const agentReady = openQuestionsEmpty(refinedPortion(liveBody));
-        await finishWriteBack(fetchImpl, apiBase, token.value, job, agentReady);
+        await finishForgeWriteBack(job, agentReady, live.token);
         completeIssueRefineJob(db, job.id, iso());
         console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
         return;
       }
-      await addReaction(fetchImpl, apiBase, token.value, job);
+      await writeReaction(job, live.token);
       const rawOut = await refine({
-        title: typeof live.title === "string" ? live.title : job.title,
+        title: live.title || job.title,
         body: liveBody,
       });
       const parsed = parseRefinedMarkdown(rawOut);
       if (!parsed.ok) throw new Error(parsed.error);
       const agentReady = openQuestionsEmpty(parsed.text);
       const newBody = composeIssueBody(parsed.text, liveBody);
-      await githubJson(
-        fetchImpl,
-        apiBase,
-        token.value,
-        "PATCH",
-        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
-        { body: newBody },
-      );
-      await finishWriteBack(fetchImpl, apiBase, token.value, job, agentReady);
+      await writeIssue(job, newBody, live.token);
+      await finishForgeWriteBack(job, agentReady, live.token);
       completeIssueRefineJob(db, job.id, iso());
       console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
     } catch (err) {
@@ -407,19 +657,11 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   }
 
   async function applyFailure(job: IssueRefineJob): Promise<void> {
-    const token = await appClient.installationTokenFor(job.installationId);
-    if (!token.ok) return;
-    const live = await githubJson<{ body?: unknown }>(
-      fetchImpl,
-      apiBase,
-      token.value,
-      "GET",
-      `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
-    ).catch(() => ({ body: job.body }));
-    const liveBody = typeof live.body === "string" ? live.body : job.body;
+    const live = await liveIssue(job).catch(() => ({ title: job.title, body: job.body, token: undefined as string | undefined }));
+    const liveBody = live.body || job.body;
     if (hasIssueBotMarker(liveBody)) return;
-    await addLabels(fetchImpl, apiBase, token.value, job, [LABEL_FAILED]).catch(() => {});
-    await ensureComment(fetchImpl, apiBase, token.value, job, COMMENT_FAILED).catch(() => {});
+    await writeLabels(job, [LABEL_FAILED], live.token).catch(() => {});
+    await writeComment(job, COMMENT_FAILED, live.token).catch(() => {});
   }
 
   function start(): void {
@@ -446,7 +688,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     timer = undefined;
   }
 
-  return { handleWebhook, processDue, start, stop };
+  return { handleWebhook, handleGitlabWebhook, handleForgejoWebhook, processDue, start, stop };
 }
 
 const ISSUE_BOT_WORKSPACE_CONFIG = {

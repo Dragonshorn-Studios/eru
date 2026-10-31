@@ -19,6 +19,23 @@ export function opencodeModel(opts: Pick<OpenCodeOptions, "model">): string | un
   return typeof opts.model === "function" ? opts.model() : opts.model;
 }
 
+/** OpenCode 2.0: private server per invocation, no shared background service. */
+export function opencodeRunArgs(prompt: string, model?: string): string[] {
+  const args = ["--standalone", "run"];
+  if (model) args.push("-m", model);
+  args.push("--", prompt);
+  return args;
+}
+
+/** OC2 JSON envelopes wrap the payload in `{ data }`. OC1 returned the value directly. */
+export function unwrapOcData<T>(body: unknown): T {
+  if (body && typeof body === "object" && "data" in body) {
+    const data = (body as { data: unknown }).data;
+    if (data !== undefined && data !== null) return data as T;
+  }
+  return body as T;
+}
+
 export interface ModelSnapshot {
   models: string[];
   error?: string;

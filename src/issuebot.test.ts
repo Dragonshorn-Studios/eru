@@ -22,6 +22,8 @@ import {
   hasIssueBotMarker,
   openQuestionsEmpty,
   parseRefinedMarkdown,
+  shouldEnqueueForgejoIssue,
+  shouldEnqueueGitlabIssue,
   shouldEnqueueIssue,
   verifyGithubWebhookSignature,
 } from "./issuebot.js";
@@ -194,12 +196,16 @@ function testApp(opts: {
   fetchImpl?: FetchLike;
   refine?: (input: { title: string; body: string }) => Promise<string>;
   now?: () => number;
+  gitlab?: Config["gitlab"];
+  forgejo?: Config["forgejo"];
 }) {
   const db = openDb(":memory:");
-  const config = gatedConfig();
+  const config = gatedConfig({ gitlab: opts.gitlab, forgejo: opts.forgejo });
   const bot = createIssueBot({
     db,
     config: config.issueBot!,
+    gitlab: config.gitlab,
+    forgejo: config.forgejo,
     fetchImpl: opts.fetchImpl ?? (async () => json(500, {})),
     refine: opts.refine ?? (async () => refinedTemplate()),
     now: opts.now,
@@ -236,6 +242,7 @@ describe("enqueue filter", () => {
     expect(decision).toEqual({
       enqueue: true,
       target: {
+        forge: "github",
         installationId: "555",
         owner: "acme",
         name: "box",
@@ -530,5 +537,247 @@ describe("issue refine worker", () => {
     expect(JSON.stringify(labelAdds)).toContain(LABEL_FAILED);
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comments.some((c) => (c.body as { body: string }).body === COMMENT_FAILED)).toBe(true);
+  });
+
+  it("rewrites a GitLab issue with PUT description, labels, note, and award", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: { method: string; path: string; body?: unknown }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const parsedUrl = new URL(url);
+      const path = parsedUrl.pathname + parsedUrl.search;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      calls.push({ method, path, body: parsed });
+      if (path.includes("/issues/12") && !path.includes("/notes") && !path.includes("/award") && !path.includes("/labels") && method === "GET") {
+        return json(200, { title: "The lights flicker", description: original });
+      }
+      if (path.includes("/issues/12") && method === "PUT") return json(200, {});
+      if (path.includes("/labels") && method === "POST") return json(201, {});
+      if (path.includes("/notes") && method === "GET") return json(200, []);
+      if (path.includes("/notes") && method === "POST") return json(201, { id: 1 });
+      if (path.includes("/award_emoji") && method === "POST") return json(201, {});
+      return json(404, {});
+    };
+    const { db, bot } = testApp({
+      fetchImpl,
+      gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: "gitlab-webhook-16+" },
+      refine: async () => refinedTemplate(""),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        forge: "gitlab",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    const put = calls.find((c) => c.method === "PUT" && /\/issues\/12$/.test(c.path));
+    expect((put?.body as { description: string }).description).toContain(ISSUE_BOT_MARKER);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/notes"))).toBe(true);
+    expect(calls.some((c) => c.method === "PUT" && JSON.stringify(c.body).includes("add_labels"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/award_emoji"))).toBe(true);
+  });
+
+  it("rewrites a Forgejo issue with PATCH, labels, comment, and reaction", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: { method: string; path: string; body?: unknown }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const parsedUrl = new URL(url);
+      const path = parsedUrl.pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      calls.push({ method, path, body: parsed });
+      if (/\/issues\/12$/.test(path) && method === "GET") {
+        return json(200, { title: "The lights flicker", body: original });
+      }
+      if (/\/issues\/12$/.test(path) && method === "PATCH") return json(200, {});
+      if (path.endsWith("/labels") && !path.includes("/issues/") && method === "GET") return json(200, []);
+      if (path.endsWith("/labels") && !path.includes("/issues/") && method === "POST") {
+        return json(201, { id: 11, name: (parsed as { name?: string }).name });
+      }
+      if (path.includes("/issues/12/labels") && method === "POST") return json(200, []);
+      if (path.includes("/comments") && method === "GET") return json(200, []);
+      if (path.includes("/comments") && method === "POST") return json(201, { id: 2 });
+      if (path.includes("/reactions") && method === "POST") return json(201, {});
+      return json(404, {});
+    };
+    const { db, bot } = testApp({
+      fetchImpl,
+      forgejo: { origin: "https://git.example", token: "tok", webhookSecret: "forgejo-webhook-16+" },
+      refine: async () => refinedTemplate(""),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        forge: "forgejo",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
+    expect((patch?.body as { body: string }).body).toContain(ISSUE_BOT_MARKER);
+    expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/comments"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.includes("/issues/12/labels"))).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/reactions"))).toBe(true);
+  });
+});
+
+function gitlabOpened(opts: { description?: string; action?: string; iid?: number } = {}): Record<string, unknown> {
+  return {
+    object_kind: "issue",
+    user: { id: OWNER_ID },
+    project: { path_with_namespace: "acme/box" },
+    object_attributes: {
+      action: opts.action ?? "open",
+      iid: opts.iid ?? 12,
+      title: "The lights flicker",
+      description: opts.description ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+    },
+  };
+}
+
+function forgejoOpened(opts: { body?: string; action?: string; number?: number } = {}): Record<string, unknown> {
+  return {
+    action: opts.action ?? "opened",
+    sender: { id: OWNER_ID },
+    repository: { name: "box", owner: { login: "acme" } },
+    issue: {
+      number: opts.number ?? 12,
+      title: "The lights flicker",
+      body: opts.body ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+    },
+  };
+}
+
+describe("gitlab and forgejo enqueue filters", () => {
+  it("enqueues a GitLab issue open that mentions the bot", () => {
+    const decision = shouldEnqueueGitlabIssue(gitlabOpened(), { trustedBotIds: [] });
+    expect(decision).toEqual({
+      enqueue: true,
+      target: {
+        forge: "gitlab",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+      },
+    });
+    expect(shouldEnqueueGitlabIssue(gitlabOpened({ action: "update" }), { trustedBotIds: [] }).enqueue).toBe(false);
+    expect(shouldEnqueueGitlabIssue(gitlabOpened({ description: "no mention" }), { trustedBotIds: [] }).enqueue).toBe(
+      false,
+    );
+  });
+
+  it("enqueues a Forgejo issue opened that mentions the bot", () => {
+    const decision = shouldEnqueueForgejoIssue(forgejoOpened(), { trustedBotIds: [] });
+    expect(decision.enqueue).toBe(true);
+    if (decision.enqueue) expect(decision.target.forge).toBe("forgejo");
+    expect(shouldEnqueueForgejoIssue(forgejoOpened({ action: "closed" }), { trustedBotIds: [] }).enqueue).toBe(false);
+  });
+});
+
+describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
+  const GITLAB_SECRET = "gitlab-webhook-16+";
+  const FORGEJO_SECRET = "forgejo-webhook-16+";
+
+  function instanceApp() {
+    const db = openDb(":memory:");
+    const config = gatedConfig({
+      gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: GITLAB_SECRET },
+      forgejo: { origin: "https://git.example", token: "tok", webhookSecret: FORGEJO_SECRET },
+    });
+    const bot = createIssueBot({
+      db,
+      config: config.issueBot,
+      gitlab: config.gitlab,
+      forgejo: config.forgejo,
+      fetchImpl: async () => json(500, {}),
+      refine: async () => refinedTemplate(),
+      backoffMs: () => 0,
+    });
+    const app = createApp({
+      config,
+      db,
+      issueBot: bot,
+      issueBotAutoStart: false,
+      openCodeServe: { url: () => null, password: () => "x", ensure: async () => {}, stop: async () => {} },
+    });
+    return { app, db };
+  }
+
+  it("accepts a GitLab Issue Hook with a matching token and ignores a bad token", async () => {
+    const { app, db } = instanceApp();
+    const payload = gitlabOpened();
+    const bad = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": "nope-nope-nope-nope" },
+    });
+    expect(bad.status).toBe(401);
+    const good = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(good.status).toBe(202);
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
+    expect(listIssueRefineJobs(db)[0].forge).toBe("gitlab");
+  });
+
+  it("accepts a Forgejo issues webhook with a matching HMAC", async () => {
+    const { app, db } = instanceApp();
+    const payload = JSON.stringify(forgejoOpened());
+    const sig = createHmac("sha256", FORGEJO_SECRET).update(payload).digest("hex");
+    const res = await app.request("/webhooks/forgejo", {
+      method: "POST",
+      body: payload,
+      headers: { "Content-Type": "application/json", "X-Gitea-Event": "issues", "X-Gitea-Signature": sig },
+    });
+    expect(res.status).toBe(202);
+    expect(listIssueRefineJobs(db)[0].forge).toBe("forgejo");
+  });
+
+  it("returns 404 when GitLab or Forgejo webhook secrets are missing", async () => {
+    const db = openDb(":memory:");
+    const config = gatedConfig({
+      gitlab: { origin: "https://git.example", token: "glpat-x" },
+      forgejo: { origin: "https://git.example", token: "tok" },
+    });
+    const bot = createIssueBot({
+      db,
+      config: config.issueBot,
+      gitlab: config.gitlab,
+      forgejo: config.forgejo,
+      fetchImpl: async () => json(500, {}),
+      refine: async () => refinedTemplate(),
+      backoffMs: () => 0,
+    });
+    const app = createApp({
+      config,
+      db,
+      issueBot: bot,
+      issueBotAutoStart: false,
+      openCodeServe: { url: () => null, password: () => "x", ensure: async () => {}, stop: async () => {} },
+    });
+    expect((await app.request("/webhooks/gitlab", { method: "POST", body: "{}" })).status).toBe(404);
+    expect((await app.request("/webhooks/forgejo", { method: "POST", body: "{}" })).status).toBe(404);
   });
 });

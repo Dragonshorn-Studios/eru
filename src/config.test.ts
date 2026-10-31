@@ -161,6 +161,22 @@ describe("github oauth config", () => {
     expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "no" }).uiLocalLogin).toBe(false);
     expect(loadConfig({ ...secrets, ...oauth, ERU_UI_LOCAL_LOGIN: "garbage" }).uiLocalLogin).toBe(false);
   });
+
+  it("accepts GitHub App client credentials as OAuth aliases", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_CLIENT_ID: "Iv1.app",
+      ERU_GITHUB_APP_CLIENT_SECRET: "app-secret",
+      ERU_GITHUB_APP_ADMIN_IDS: "9",
+      ERU_PUBLIC_URL: "https://eru.example",
+    });
+    expect(cfg.oauthClientId).toBe("Iv1.app");
+    expect(cfg.oauthClientSecret).toBe("app-secret");
+    expect(cfg.oauthAdminIds).toEqual([9]);
+    expect(() =>
+      loadConfig({ ...secrets, ERU_GITHUB_APP_CLIENT_ID: "Iv1.app" }),
+    ).toThrow(/both GitHub App client/);
+  });
 });
 
 describe("issue bot config", () => {
@@ -183,6 +199,7 @@ describe("issue bot config", () => {
       botUserId: 9001,
       trustedBotIds: [7, 8],
       hourlyCap: 15,
+      dedicated: true,
     });
     expect(loadConfig({ ...secrets }).issueBot).toBeUndefined();
   });
@@ -194,12 +211,128 @@ describe("issue bot config", () => {
     ).toThrow(/issue bot/);
     expect(() =>
       loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_WEBHOOK_SECRET: "short" }),
-    ).toThrow(/WEBHOOK_SECRET/);
+    ).toThrow(/webhook secret is too short/);
     expect(() => loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_HOURLY_CAP: "0" })).toThrow(/HOURLY_CAP/);
     expect(() => loadConfig({ ...secrets, ...bot, ERU_TRUSTED_BOT_IDS: "nope" })).toThrow(/ERU_TRUSTED_BOT_IDS/);
     const { ERU_ISSUE_BOT_USER_ID: _omit, ...noUser } = bot;
     expect(() => loadConfig({ ...secrets, ...noUser })).toThrow(/ERU_ISSUE_BOT_USER_ID/);
     expect(() => loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_USER_ID: "nope" })).toThrow(/ERU_ISSUE_BOT_USER_ID/);
+  });
+
+  it("reuses the mapping GitHub App when dedicated issue-bot App env is omitted", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_GITHUB_APP_WEBHOOK_SECRET: "webhook-secret-16+",
+      ERU_GITHUB_APP_BOT_USER_ID: "9001",
+    });
+    expect(cfg.issueBot).toMatchObject({
+      appId: "12345",
+      webhookSecret: "webhook-secret-16+",
+      botUserId: 9001,
+      dedicated: false,
+    });
+    const aliased = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_ISSUE_BOT_WEBHOOK_SECRET: "webhook-secret-16+",
+      ERU_ISSUE_BOT_USER_ID: "9001",
+    });
+    expect(aliased.issueBot).toMatchObject({ appId: "12345", dedicated: false, botUserId: 9001 });
+  });
+
+  it("fails closed when a dedicated App ID is mixed with mapping App credentials", () => {
+    const mapping = {
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_GITHUB_APP_WEBHOOK_SECRET: "mapping-webhook-16",
+      ERU_GITHUB_APP_BOT_USER_ID: "111",
+    };
+    expect(() => loadConfig({ ...secrets, ...mapping, ERU_ISSUE_BOT_APP_ID: "99" })).toThrow(
+      /ERU_ISSUE_BOT_PRIVATE_KEY/,
+    );
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ...mapping,
+        ERU_ISSUE_BOT_APP_ID: "99",
+        ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+      }),
+    ).toThrow(/ERU_ISSUE_BOT_WEBHOOK_SECRET/);
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ...mapping,
+        ERU_ISSUE_BOT_APP_ID: "99",
+        ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+        ERU_ISSUE_BOT_WEBHOOK_SECRET: "dedicated-hook-16",
+      }),
+    ).toThrow(/ERU_ISSUE_BOT_USER_ID/);
+  });
+
+  it("keeps a dedicated App's webhook secret and bot id when mapping App env is also set", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITHUB_APP_ID: "12345",
+      ERU_GITHUB_APP_PRIVATE_KEY: PEM,
+      ERU_GITHUB_APP_WEBHOOK_SECRET: "mapping-webhook-16",
+      ERU_GITHUB_APP_BOT_USER_ID: "111",
+      ERU_ISSUE_BOT_APP_ID: "99",
+      ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+      ERU_ISSUE_BOT_WEBHOOK_SECRET: "dedicated-hook-16",
+      ERU_ISSUE_BOT_USER_ID: "9001",
+    });
+    expect(cfg.issueBot).toMatchObject({
+      appId: "99",
+      webhookSecret: "dedicated-hook-16",
+      botUserId: 9001,
+      dedicated: true,
+    });
+  });
+});
+
+describe("gitlab and forgejo instance config", () => {
+  it("loads a GitLab origin and token, stripping an API prefix", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_GITLAB_URL: "https://git.example/api/v4",
+      ERU_GITLAB_TOKEN: "glpat-x",
+      ERU_GITLAB_WEBHOOK_SECRET: "webhook-secret-16+",
+    });
+    expect(cfg.gitlab).toEqual({
+      origin: "https://git.example",
+      token: "glpat-x",
+      webhookSecret: "webhook-secret-16+",
+    });
+    expect(loadConfig({ ...secrets }).gitlab).toBeUndefined();
+  });
+
+  it("loads Forgejo and fails closed on a partial or short secret", () => {
+    const cfg = loadConfig({
+      ...secrets,
+      ERU_FORGEJO_URL: "https://git.example",
+      ERU_FORGEJO_TOKEN: "tok",
+    });
+    expect(cfg.forgejo).toEqual({ origin: "https://git.example", token: "tok", webhookSecret: undefined });
+    expect(() => loadConfig({ ...secrets, ERU_GITLAB_URL: "https://git.example" })).toThrow(/gitlab needs/i);
+    expect(() => loadConfig({ ...secrets, ERU_FORGEJO_TOKEN: "tok" })).toThrow(/forgejo needs/i);
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ERU_GITLAB_URL: "not-a-url",
+        ERU_GITLAB_TOKEN: "tok",
+      }),
+    ).toThrow(/ERU_GITLAB_URL/);
+    expect(() =>
+      loadConfig({
+        ...secrets,
+        ERU_FORGEJO_URL: "https://git.example",
+        ERU_FORGEJO_TOKEN: "tok",
+        ERU_FORGEJO_WEBHOOK_SECRET: "short",
+      }),
+    ).toThrow(/WEBHOOK_SECRET/);
   });
 });
 

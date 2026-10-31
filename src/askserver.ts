@@ -34,7 +34,7 @@ export interface OpenCodeServe {
   stop(): Promise<void>;
 }
 
-const HEALTH_PATH = "/global/health";
+const HEALTH_PATHS = ["/api/health", "/api/info"];
 const HEALTH_POLL_MS = 250;
 const DEFAULT_HEALTH_TIMEOUT_MS = 15_000;
 const RESTART_DELAY_MS = 1_000;
@@ -75,12 +75,19 @@ export function createOpenCodeServer(opts: OpenCodeServeOptions): OpenCodeServe 
       try {
         // Per-request cap: a socket that accepts but never answers must not
         // stall the health loop past its deadline.
-        const res = await fetchImpl(`http://${hostname}:${port}${HEALTH_PATH}`, {
-          headers: { authorization: basic() },
-          signal: AbortSignal.timeout(2_000),
-        });
-        if (res.ok) return;
-        lastErr = `health ${res.status}`;
+        let ok = false;
+        for (const path of HEALTH_PATHS) {
+          const res = await fetchImpl(`http://${hostname}:${port}${path}`, {
+            headers: { authorization: basic() },
+            signal: AbortSignal.timeout(2_000),
+          });
+          if (res.ok) {
+            ok = true;
+            break;
+          }
+          lastErr = `health ${res.status}`;
+        }
+        if (ok) return;
       } catch (err) {
         lastErr = err instanceof Error ? err.message : String(err);
       }
@@ -113,6 +120,7 @@ export function createOpenCodeServer(opts: OpenCodeServeOptions): OpenCodeServe 
       env: {
         ...opencodeChildEnv(),
         OPENCODE_SERVER_PASSWORD: password,
+        OPENCODE_PASSWORD: password,
       },
     });
     child = spawned;

@@ -4,7 +4,7 @@ Server-rendered HTML + HTMX, locked pastel tokens (cream, lavender, pink, mint, 
 
 ## `/login`
 
-The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe compare, signed `HttpOnly` `SameSite=Lax` cookie. When `ERU_OAUTH_CLIENT_ID`/`SECRET` are configured, a **Sign in with GitHub** button appears (OAuth against a numeric-id allowlist, `ERU_OAUTH_ADMIN_IDS`); the password form then only shows with `ERU_UI_LOCAL_LOGIN=true`.
+The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe compare, signed `HttpOnly` `SameSite=Lax` cookie. When the GitHub App client id/secret are set (on `/config` or `ERU_GITHUB_APP_CLIENT_*` / `ERU_OAUTH_*`), a **Sign in with GitHub** button appears (OAuth against a numeric-id allowlist); the password form then only shows with `ERU_UI_LOCAL_LOGIN=true`.
 
 ![login](ui/login.png)
 
@@ -32,17 +32,18 @@ Threads persist across reloads — the OpenCode session id is recorded on the th
 
 ## `/connect`
 
-Point Eru at a GitHub repository two ways: pick from the connected GitHub App installation's repo list, **or** add one manually with owner/repo and an optional token (stored encrypted; optional for public repos).
+Point Eru at a GitHub, GitLab, or Forgejo repository: pick from the connected GitHub App installation, from a GitLab/Forgejo token configured on `/config`, **or** add one manually with forge/owner/repo and an optional token (stored encrypted; optional for public GitHub, or when the instance token is already set).
 
 ![connect](ui/connect.png)
 
 ## `/config`
 
-Brief-style layout — sticky section nav on the left (OpenCode models / Provider keys / GitHub App / Operator), wide settings card on the right. Saved values win over env vars; every overridden field is marked `overrides ERU_*`.
+Brief-style layout — sticky section nav on the left (OpenCode models / Provider keys / GitHub App / GitLab / Forgejo / Operator), wide settings card on the right. Saved values win over env vars; every overridden field is marked `overrides ERU_*`.
 
 - **OpenCode models** — separate Ask and Map model fields (`provider/model`), a datalist fed by `opencode models`, a refresh-list button.
 - **Provider API keys** — write-only inputs per provider (OpenCode Zen, OpenCode Go, Anthropic, OpenAI, …), stored in OpenCode's `auth.json`, shown as a source badge plus a last-4 fingerprint.
-- **GitHub App** — App ID, installation ID (auto-detect), private key (write-only, encrypted).
+- **GitHub App** — one App for mapping, Sign in with GitHub, and `@eru-issue-bot`: App ID, installation ID, private key, client id/secret, operator user ids, public URL, webhook secret, bot user id.
+- **GitLab / Forgejo** — self-hosted origin + API token (write-only, encrypted) and optional webhook secret for issue rewrite.
 - **Operator** — the GitHub login shown in the top-bar pill and used for the avatar.
 
 ![config](ui/config.png)

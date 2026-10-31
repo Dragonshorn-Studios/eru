@@ -38,13 +38,14 @@ CREATE TABLE IF NOT EXISTS repos (
   forge TEXT NOT NULL DEFAULT 'github',
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT '',
   auth_source TEXT NOT NULL DEFAULT 'manual',
   default_branch TEXT,
   last_mapped_ref TEXT,
   last_mapped_at TEXT,
   connected_at TEXT,
   created_at TEXT NOT NULL,
-  UNIQUE (forge, owner, name)
+  UNIQUE (forge, owner, name, origin)
 );
 
 ${FORGE_CREDENTIALS_SQL}
@@ -66,6 +67,8 @@ ${SETTINGS_SQL}
 interface Migration {
   name: string;
   apply: (db: SqliteDb) => void;
+  /** Table rebuilds that need PRAGMA foreign_keys=OFF cannot run inside a transaction. */
+  unlocked?: boolean;
 }
 
 // For databases created before forge connect landed: add repos.connected_at
@@ -117,6 +120,82 @@ const MIGRATIONS: Migration[] = [
       db.exec(ISSUE_BOT_SQL);
     },
   },
+  {
+    name: "0008_issue_bot_forge.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(issue_refine_jobs)`).all() as { name: string }[];
+      if (columns.length === 0) {
+        db.exec(ISSUE_BOT_SQL);
+        return;
+      }
+      if (columns.some((col) => col.name === "forge")) return;
+      db.exec(`
+        CREATE TABLE issue_refine_jobs_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          forge TEXT NOT NULL DEFAULT 'github',
+          installation_id TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          name TEXT NOT NULL,
+          issue_number INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_after TEXT NOT NULL,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (forge, owner, name, issue_number)
+        );
+        INSERT INTO issue_refine_jobs_new (
+          id, forge, installation_id, owner, name, issue_number, title, body,
+          status, attempts, run_after, last_error, created_at, updated_at
+        )
+        SELECT
+          id, 'github', installation_id, owner, name, issue_number, title, body,
+          status, attempts, run_after, last_error, created_at, updated_at
+        FROM issue_refine_jobs;
+        DROP TABLE issue_refine_jobs;
+        ALTER TABLE issue_refine_jobs_new RENAME TO issue_refine_jobs;
+        CREATE INDEX IF NOT EXISTS issue_refine_jobs_poll_idx ON issue_refine_jobs (status, run_after, id);
+        CREATE INDEX IF NOT EXISTS issue_refine_jobs_repo_idx ON issue_refine_jobs (forge, owner, name, created_at);
+      `);
+    },
+  },
+  {
+    name: "0009_repo_origin.sql",
+    unlocked: true,
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(repos)`).all() as { name: string }[];
+      if (columns.some((col) => col.name === "origin")) return;
+      db.exec(`
+        CREATE TABLE repos_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          forge TEXT NOT NULL DEFAULT 'github',
+          owner TEXT NOT NULL,
+          name TEXT NOT NULL,
+          origin TEXT NOT NULL DEFAULT '',
+          auth_source TEXT NOT NULL DEFAULT 'manual',
+          default_branch TEXT,
+          last_mapped_ref TEXT,
+          last_mapped_at TEXT,
+          connected_at TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE (forge, owner, name, origin)
+        );
+        INSERT INTO repos_new (
+          id, forge, owner, name, origin, auth_source, default_branch,
+          last_mapped_ref, last_mapped_at, connected_at, created_at
+        )
+        SELECT
+          id, forge, owner, name, '', COALESCE(auth_source, 'manual'), default_branch,
+          last_mapped_ref, last_mapped_at, connected_at, created_at
+        FROM repos;
+        DROP TABLE repos;
+        ALTER TABLE repos_new RENAME TO repos;
+      `);
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -140,6 +219,7 @@ CREATE INDEX IF NOT EXISTS ask_threads_repo_idx ON ask_threads (repo_id, updated
 const ISSUE_BOT_SQL = `
 CREATE TABLE IF NOT EXISTS issue_refine_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  forge TEXT NOT NULL DEFAULT 'github',
   installation_id TEXT NOT NULL,
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -152,10 +232,10 @@ CREATE TABLE IF NOT EXISTS issue_refine_jobs (
   last_error TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE (owner, name, issue_number)
+  UNIQUE (forge, owner, name, issue_number)
 );
 CREATE INDEX IF NOT EXISTS issue_refine_jobs_poll_idx ON issue_refine_jobs (status, run_after, id);
-CREATE INDEX IF NOT EXISTS issue_refine_jobs_repo_idx ON issue_refine_jobs (owner, name, created_at);
+CREATE INDEX IF NOT EXISTS issue_refine_jobs_repo_idx ON issue_refine_jobs (forge, owner, name, created_at);
 `;
 
 export function openDb(path: string): SqliteDb {
@@ -180,10 +260,20 @@ export function migrate(db: SqliteDb): void {
       n: number;
     };
     if (applied.n === 0) {
-      db.transaction(() => {
+      const run = () => {
         migration.apply(db);
         recordMigration(db, migration.name);
-      })();
+      };
+      if (migration.unlocked) {
+        db.pragma("foreign_keys = OFF");
+        try {
+          run();
+        } finally {
+          db.pragma("foreign_keys = ON");
+        }
+      } else {
+        db.transaction(run)();
+      }
     }
   }
 }
@@ -200,15 +290,16 @@ export interface MappedRepo {
   forge: string;
   owner: string;
   name: string;
+  origin: string;
   authSource: string;
   defaultBranch: string | null;
   lastMappedRef: string | null;
   lastMappedAt: string | null;
 }
 
-export type RepoAuthSource = "manual" | "app";
+export type RepoAuthSource = "manual" | "app" | "instance";
 
-const MAPPED_REPO_COLUMNS = `id, forge, owner, name, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
+const MAPPED_REPO_COLUMNS = `id, forge, owner, name, origin, auth_source AS authSource, default_branch AS defaultBranch, last_mapped_ref AS lastMappedRef, last_mapped_at AS lastMappedAt`;
 
 /** The currently connected repo: the one most recently connected. */
 export function getPrimaryRepo(db: SqliteDb): MappedRepo | undefined {
@@ -229,21 +320,22 @@ export function listConnectedRepos(db: SqliteDb): MappedRepo[] {
 
 export function upsertConnectedRepo(
   db: SqliteDb,
-  repo: { forge: string; owner: string; name: string; defaultBranch?: string },
+  repo: { forge: string; owner: string; name: string; defaultBranch?: string; origin?: string },
   at: string,
   authSource: RepoAuthSource = "manual",
 ): number {
+  const origin = repo.origin ?? "";
   const row = db
     .prepare(
-      `INSERT INTO repos (forge, owner, name, auth_source, default_branch, connected_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (forge, owner, name) DO UPDATE SET
+      `INSERT INTO repos (forge, owner, name, origin, auth_source, default_branch, connected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (forge, owner, name, origin) DO UPDATE SET
          connected_at = excluded.connected_at,
          auth_source = excluded.auth_source,
          default_branch = COALESCE(excluded.default_branch, repos.default_branch)
        RETURNING id`,
     )
-    .get(repo.forge, repo.owner, repo.name, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
+    .get(repo.forge, repo.owner, repo.name, origin, authSource, repo.defaultBranch ?? null, at, at) as { id: number };
   return row.id;
 }
 
@@ -359,6 +451,7 @@ export type IssueRefineStatus = "pending" | "running" | "done" | "failed";
 
 export interface IssueRefineJob {
   id: number;
+  forge: string;
   installationId: string;
   owner: string;
   name: string;
@@ -373,12 +466,13 @@ export interface IssueRefineJob {
   updatedAt: string;
 }
 
-const ISSUE_JOB_COLUMNS = `id, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
+const ISSUE_JOB_COLUMNS = `id, forge, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
 
 /** Insert a job. Returns undefined when that issue is already queued. */
 export function enqueueIssueRefineJob(
   db: SqliteDb,
   job: {
+    forge?: string;
     installationId: string;
     owner: string;
     name: string;
@@ -391,23 +485,38 @@ export function enqueueIssueRefineJob(
   const row = db
     .prepare(
       `INSERT OR IGNORE INTO issue_refine_jobs (
-         installation_id, owner, name, issue_number, title, body,
+         forge, installation_id, owner, name, issue_number, title, body,
          status, attempts, run_after, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
        RETURNING id`,
     )
-    .get(job.installationId, job.owner, job.name, job.issueNumber, job.title, job.body, at, at, at) as
-    | { id: number }
-    | undefined;
+    .get(
+      job.forge ?? "github",
+      job.installationId,
+      job.owner,
+      job.name,
+      job.issueNumber,
+      job.title,
+      job.body,
+      at,
+      at,
+      at,
+    ) as { id: number } | undefined;
   return row?.id;
 }
 
-export function countRecentIssueRefineJobs(db: SqliteDb, owner: string, name: string, since: string): number {
+export function countRecentIssueRefineJobs(
+  db: SqliteDb,
+  owner: string,
+  name: string,
+  since: string,
+  forge = "github",
+): number {
   const row = db
     .prepare(
-      `SELECT COUNT(*) AS n FROM issue_refine_jobs WHERE owner = ? AND name = ? AND created_at >= ?`,
+      `SELECT COUNT(*) AS n FROM issue_refine_jobs WHERE forge = ? AND owner = ? AND name = ? AND created_at >= ?`,
     )
-    .get(owner, name, since) as { n: number };
+    .get(forge, owner, name, since) as { n: number };
   return row.n;
 }
 

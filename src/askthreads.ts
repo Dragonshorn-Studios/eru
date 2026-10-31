@@ -46,6 +46,10 @@ export const ASK_WORKSPACE_CONFIG = {
     read: "allow",
     glob: "allow",
     grep: "allow",
+    bash: "deny",
+    edit: "deny",
+    write: "deny",
+    webfetch: "deny",
     external_directory: "deny",
   },
   agent: {

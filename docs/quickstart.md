@@ -26,7 +26,7 @@ Flags:
 | `--upgrade-opencode` | Re-seed the OpenCode CLI, recreate the container, wait on `/health` |
 | `--force` | Overwrite an existing `.env` (default is to reuse it) |
 
-First login: open `http://127.0.0.1:3000/login` and enter `ERU_UI_PASSWORD`. Then `/connect` a repository — pick from the GitHub App installation's list, or enter owner/repo manually (a token is optional for public repos). Press the refresh icon to build the first map.
+First login: open `http://127.0.0.1:3000/login` and enter `ERU_UI_PASSWORD`. On `/config`, save the GitHub App (and optional GitLab/Forgejo URL + token). Then `/connect` a repository — pick from the App or instance list, or enter owner/repo manually (a token is optional for public GitHub). Press the refresh icon to build the first map. GitHub login appears on `/login` once client id/secret, operator user ids, and public URL are saved.
 
 ## Local dev
 
