@@ -75,7 +75,7 @@ export const LABEL_FAILED = "eru:refine-failed";
 export const COMMENT_COMPLETE =
   "Curious about this one. I rewrote it so an agent can pick it up. Your original is below, collapsed.";
 export const COMMENT_NEEDS_INFO =
-  "Curious about this one, but a few things are still open. Answer them and I'll mark it agent-ready.";
+  "Curious about this one, but a few things are still open. On GitHub, use Quote reply on the list below and write your answer under each question. I'll refine this when every question has an answer.";
 export const COMMENT_FAILED = "I got curious and tried. I couldn't rewrite this one, so your issue is untouched.";
 
 /** The forge comment: the curious line, then Eru's short take when there is one. */
@@ -511,6 +511,17 @@ export function openQuestionsEmpty(markdown: string): boolean {
     .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
     .filter(Boolean);
   return bullets.length > 0 && bullets.every((line) => EMPTY_OPEN_QUESTIONS.test(line));
+}
+
+/** The open questions a person can answer. Blank lines between them, so Quote reply makes one blockquote each. */
+export function answerSheet(markdown: string): string {
+  const section = headingSection(markdown, "Open questions");
+  if (section === undefined) return "";
+  const lines = section
+    .split("\n")
+    .map((line) => line.replace(/^\s*[-*]\s+/, "").trim())
+    .filter((line) => line.length > 0 && !EMPTY_OPEN_QUESTIONS.test(line));
+  return lines.slice(0, 12).join("\n\n");
 }
 
 /** Pull the trailing ## Eru note out of the brief. The note is not part of the posted issue. */
@@ -958,10 +969,15 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     agentReady: boolean,
     token?: string,
     note = "",
+    brief = "",
   ): Promise<void> {
     const labels = [LABEL_REFINED, agentReady ? LABEL_AGENT_READY : LABEL_NEEDS_INFO];
     await writeLabels(job, labels, token);
     await writeComment(job, forgeComment(agentReady ? COMMENT_COMPLETE : COMMENT_NEEDS_INFO, note), token);
+    if (!agentReady) {
+      const sheet = answerSheet(brief);
+      if (sheet) await writeComment(job, sheet, token);
+    }
   }
 
   async function processJob(job: IssueRefineJob): Promise<void> {
@@ -977,7 +993,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       if (hasIssueBotMarker(liveBody)) {
         const refined = refinedPortion(liveBody);
         const agentReady = openQuestionsEmpty(refined);
-        await finishForgeWriteBack(job, agentReady, live.token);
+        await finishForgeWriteBack(job, agentReady, live.token, "", refined);
         completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, refined, ""));
         console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
         return;
@@ -1007,7 +1023,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       const agentReady = openQuestionsEmpty(parsed.text);
       const newBody = composeIssueBody(parsed.text, liveBody);
       await writeIssue(job, newBody, live.token);
-      await finishForgeWriteBack(job, agentReady, live.token, note);
+      await finishForgeWriteBack(job, agentReady, live.token, note, parsed.text);
       completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, parsed.text, note));
       console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
       } finally {

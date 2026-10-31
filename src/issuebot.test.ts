@@ -16,6 +16,7 @@ import {
   COMMENT_FAILED,
   forgeComment,
   COMMENT_NEEDS_INFO,
+  answerSheet,
   GITHUB_ISSUE_BODY_MAX,
   ISSUE_BOT_MARKER,
   ISSUE_BOT_MAX_BODY_BYTES,
@@ -377,6 +378,7 @@ describe("refined body", () => {
     expect(openQuestionsEmpty(refinedTemplate("None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
+    expect(answerSheet(refinedTemplate("What wattage?\n- Which fixture?"))).toBe("What wattage?\n\nWhich fixture?");
     expect(parseRefinedMarkdown("sorry").ok).toBe(false);
     const withNote = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\nMailbox is in the map. OAuthToken is not.\n`);
     expect(withNote.ok).toBe(true);
@@ -788,10 +790,11 @@ describe("issue refine worker", () => {
     await bot.processDue();
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(JSON.stringify(labelAdds)).toContain(LABEL_NEEDS_INFO);
-    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({
-      body: forgeComment(COMMENT_NEEDS_INFO, "I could not check the names. This repo has no map yet."),
-    });
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([
+      forgeComment(COMMENT_NEEDS_INFO, "I could not check the names. This repo has no map yet."),
+      "What wattage should the bulb be?",
+    ]);
   });
 
   it("finishes labels and comment when the live body already carries the marker", async () => {
