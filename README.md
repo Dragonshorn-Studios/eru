@@ -63,6 +63,36 @@ Configuration is environment variables plus values saved on `/config` — saved 
 
 Recommended: `ERU_FORGE_TOKEN_KEY` — a stable key for encrypting stored forge credentials. Without it, credentials are encrypted under the session secret and become unreadable when that secret rotates. Secrets model and rotation details: [docs/configuration.md](docs/configuration.md).
 
+## eru-issue-bot
+
+Optional GitHub App that rewrites newly opened issues mentioning `@eru-issue-bot` into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it.
+
+This App is **not** the mapping GitHub App. Permissions are Issues read/write and Metadata read only — no Contents, Actions, or Admin. The only subscribed event is `issues`.
+
+### One-time GitHub App setup
+
+1. GitHub → Settings → Developer settings → GitHub Apps → New GitHub App.
+2. Name it `eru-issue-bot`. Homepage URL can be your Eru URL.
+3. Webhook URL: `https://<your-eru-host>/webhooks/github`. Webhook secret: a random 16+ byte string — the same value as `ERU_ISSUE_BOT_WEBHOOK_SECRET`.
+4. Repository permissions: **Issues** Read & write, **Metadata** Read-only. Uncheck everything else.
+5. Subscribe to events: **Issues** only.
+6. Where can this GitHub App be installed? Only on this account (or the org). Create the App.
+7. Note the **App ID**. Generate a private key and store the PEM on the host (mode 400) — do not commit it. Install the App on the selected repositories.
+8. Look up the bot user id: `https://api.github.com/users/eru-issue-bot%5Bbot%5D` (`id` is `ERU_ISSUE_BOT_USER_ID`).
+
+Then either paste the credentials on **Config → Issue bot** (saved encrypted in SQLite; takes effect without a restart) or set them in Coolify / `.env` (never in git). Saved Config values win over env.
+
+| Variable | Purpose |
+| --- | --- |
+| `ERU_ISSUE_BOT_APP_ID` | Numeric App ID |
+| `ERU_ISSUE_BOT_PRIVATE_KEY` or `ERU_ISSUE_BOT_PRIVATE_KEY_FILE` | App PEM (inline with `\n` escapes, or a file path) |
+| `ERU_ISSUE_BOT_WEBHOOK_SECRET` | Webhook HMAC secret (16+ bytes) |
+| `ERU_ISSUE_BOT_USER_ID` | GitHub user id of `eru-issue-bot[bot]` (loop guard) |
+| `ERU_TRUSTED_BOT_IDS` | Optional comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER / MEMBER / COLLABORATOR |
+| `ERU_ISSUE_BOT_HOURLY_CAP` | Optional per-repo hourly job cap (default 20) |
+
+The bot uses the same OpenCode model as Ask (`ERU_OPENCODE_ASK_MODEL` / saved `/config` Ask model / `ERU_OPENCODE_MODEL`). Nagato's "Refine with Eru" checkbox only needs to append `@eru-issue-bot` on its own line at the end of the issue body.
+
 ## Updating the OpenCode CLI
 
 The CLI lives on the `eru-opencode` Docker volume, not in the image. `./scripts/install.sh --upgrade-opencode` re-downloads it (latest GitHub release, or `ERU_OPENCODE_VERSION` to pin), recreates the container, and waits on `/health`.

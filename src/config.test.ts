@@ -163,6 +163,43 @@ describe("github oauth config", () => {
   });
 });
 
+describe("issue bot config", () => {
+  const PEM = "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----";
+  const bot = {
+    ERU_ISSUE_BOT_APP_ID: "99",
+    ERU_ISSUE_BOT_PRIVATE_KEY: PEM,
+    ERU_ISSUE_BOT_WEBHOOK_SECRET: "webhook-secret-16+",
+    ERU_ISSUE_BOT_USER_ID: "9001",
+    ERU_TRUSTED_BOT_IDS: "7, 8",
+    ERU_ISSUE_BOT_HOURLY_CAP: "15",
+  };
+
+  it("loads the issue-bot block and stays unset when omitted", () => {
+    const cfg = loadConfig({ ...secrets, ...bot });
+    expect(cfg.issueBot).toEqual({
+      appId: "99",
+      privateKey: PEM,
+      webhookSecret: "webhook-secret-16+",
+      botUserId: 9001,
+      trustedBotIds: [7, 8],
+      hourlyCap: 15,
+    });
+    expect(loadConfig({ ...secrets }).issueBot).toBeUndefined();
+  });
+
+  it("fails closed on a partial issue-bot config or a short webhook secret", () => {
+    expect(() => loadConfig({ ...secrets, ERU_ISSUE_BOT_APP_ID: "1" })).toThrow(/issue bot/);
+    expect(() =>
+      loadConfig({ ...secrets, ERU_ISSUE_BOT_WEBHOOK_SECRET: "webhook-secret-16+" }),
+    ).toThrow(/issue bot/);
+    expect(() =>
+      loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_WEBHOOK_SECRET: "short" }),
+    ).toThrow(/WEBHOOK_SECRET/);
+    expect(() => loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_HOURLY_CAP: "0" })).toThrow(/HOURLY_CAP/);
+    expect(() => loadConfig({ ...secrets, ...bot, ERU_TRUSTED_BOT_IDS: "nope" })).toThrow(/ERU_TRUSTED_BOT_IDS/);
+  });
+});
+
 describe("parseOpenCodeTimeout", () => {
   it("accepts only integers in the 1000-600000 range", () => {
     expect(parseOpenCodeTimeout("1000")).toBe(1000);

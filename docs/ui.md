@@ -38,11 +38,12 @@ Point Eru at a GitHub repository two ways: pick from the connected GitHub App in
 
 ## `/config`
 
-Brief-style layout — sticky section nav on the left (OpenCode models / Provider keys / GitHub App / Operator), wide settings card on the right. Saved values win over env vars; every overridden field is marked `overrides ERU_*`.
+Brief-style layout — sticky section nav on the left (OpenCode models / Provider keys / GitHub App / Issue bot / Operator), wide settings card on the right. Saved values win over env vars; every overridden field is marked `overrides ERU_*`.
 
 - **OpenCode models** — separate Ask and Map model fields (`provider/model`), a datalist fed by `opencode models`, a refresh-list button.
 - **Provider API keys** — write-only inputs per provider (OpenCode Zen, OpenCode Go, Anthropic, OpenAI, …), stored in OpenCode's `auth.json`, shown as a source badge plus a last-4 fingerprint.
-- **GitHub App** — App ID, installation ID (auto-detect), private key (write-only, encrypted).
+- **GitHub App** — App ID, installation ID (auto-detect), private key (write-only, encrypted). Lists installable repos on Connect.
+- **Issue bot** — the `eru-issue-bot` GitHub App (Issues read/write only). App ID, private key, webhook secret (both write-only, encrypted), bot user id, trusted bot ids, hourly cap. Shows the webhook URL from `ERU_PUBLIC_URL` to paste into GitHub. Saving takes effect without a restart.
 - **Operator** — the GitHub login shown in the top-bar pill and used for the avatar.
 
 ![config](ui/config.png)

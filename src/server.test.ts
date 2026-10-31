@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { lstatSync, mkdtempSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +77,7 @@ function app(
       refreshRunner,
       providerStore,
       modelDiscovery,
+      issueBotAutoStart: false,
     }),
     config,
     db,
@@ -1200,6 +1201,118 @@ describe("github app", () => {
   });
 });
 
+describe("issue bot on /config", () => {
+  const APP_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  const WEBHOOK_SECRET = "webhook-secret-16+";
+
+  async function authed(instance: ReturnType<typeof app>) {
+    const loggedIn = await login(instance.app);
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf };
+  }
+
+  async function post(instance: ReturnType<typeof app>, path: string, fields: Record<string, string>) {
+    const { cookie, csrf } = await authed(instance);
+    return instance.app.request(path, {
+      method: "POST",
+      body: new URLSearchParams({ ...fields, [CSRF_FIELD]: csrf }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      redirect: "manual",
+    });
+  }
+
+  it("shows the webhook URL and issue-bot form on Config", async () => {
+    const instance = app();
+    const { cookie } = await authed(instance);
+    const html = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(html).toContain('id="issue-bot"');
+    expect(html).toContain("http://eru.test/webhooks/github");
+    expect(html).toContain('action="/config/issue-bot"');
+    expect(html).toContain("@eru-issue-bot");
+    expect(html).not.toContain(WEBHOOK_SECRET);
+  });
+
+  it("saves encrypted credentials from the UI and starts accepting signed webhooks", async () => {
+    const instance = app();
+    const missing = await instance.app.request("/webhooks/github", { method: "POST", body: "{}" });
+    expect(missing.status).toBe(404);
+
+    const res = await post(instance, "/config/issue-bot", {
+      app_id: "4242",
+      app_private_key: APP_PEM,
+      webhook_secret: WEBHOOK_SECRET,
+      bot_user_id: "9001",
+      trusted_bot_ids: "7, 8",
+      hourly_cap: "12",
+    });
+    expect(res.status).toBe(302);
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBe("4242");
+    expect(getSetting(instance.db, "issue_bot.user_id")).toBe("9001");
+    expect(getSetting(instance.db, "issue_bot.trusted_ids")).toBe("7,8");
+    expect(getSetting(instance.db, "issue_bot.hourly_cap")).toBe("12");
+    const storedKey = getSetting(instance.db, "issue_bot.private_key")!;
+    const storedSecret = getSetting(instance.db, "issue_bot.webhook_secret")!;
+    expect(storedKey).toMatch(/^v1\./);
+    expect(storedSecret).toMatch(/^v1\./);
+    expect(storedKey).not.toContain("PRIVATE KEY");
+    expect(storedSecret).not.toContain(WEBHOOK_SECRET);
+    expect(decryptForgeToken(instance.config.sessionSecret, storedKey)).toBe(APP_PEM.trim());
+    expect(decryptForgeToken(instance.config.sessionSecret, storedSecret)).toBe(WEBHOOK_SECRET);
+
+    const { cookie } = await authed(instance);
+    const page = await (await instance.app.request("/config", { headers: { Cookie: cookie } })).text();
+    expect(page).toContain("key saved on this page");
+    expect(page).toContain("secret saved on this page");
+    expect(page).not.toContain(WEBHOOK_SECRET);
+    expect(page).not.toContain(APP_PEM);
+
+    const ping = JSON.stringify({ zen: "ok" });
+    const signed = await instance.app.request("/webhooks/github", {
+      method: "POST",
+      body: ping,
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": "ping",
+        "X-GitHub-Delivery": "ui-setup-ping",
+        "X-Hub-Signature-256": `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(ping).digest("hex")}`,
+      },
+    });
+    expect(signed.status).toBe(202);
+
+    const removed = await post(instance, "/config/issue-bot/remove", {});
+    expect(removed.status).toBe(302);
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBeUndefined();
+    const gone = await instance.app.request("/webhooks/github", { method: "POST", body: ping });
+    expect(gone.status).toBe(404);
+  });
+
+  it("rejects malformed issue-bot fields without storing", async () => {
+    const instance = app();
+    const { cookie, csrf } = await authed(instance);
+    const bad: Record<string, string>[] = [
+      { app_id: "abc", app_private_key: APP_PEM, webhook_secret: WEBHOOK_SECRET },
+      { app_id: "1", app_private_key: "not-a-pem", webhook_secret: WEBHOOK_SECRET },
+      { app_id: "1", app_private_key: APP_PEM, webhook_secret: "short" },
+      { app_id: "1", app_private_key: APP_PEM, webhook_secret: WEBHOOK_SECRET, bot_user_id: "nope" },
+      { app_id: "1", app_private_key: APP_PEM, webhook_secret: WEBHOOK_SECRET, trusted_bot_ids: "x" },
+      { app_id: "1", app_private_key: APP_PEM, webhook_secret: WEBHOOK_SECRET, hourly_cap: "0" },
+    ];
+    for (const fields of bad) {
+      const res = await instance.app.request("/config/issue-bot", {
+        method: "POST",
+        body: new URLSearchParams({ ...fields, [CSRF_FIELD]: csrf }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+        redirect: "manual",
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(getSetting(instance.db, "issue_bot.app_id")).toBeUndefined();
+  });
+});
+
 describe("repo selection", () => {
   async function authed(instance: ReturnType<typeof app>) {
     const loggedIn = await login(instance.app);
@@ -1386,6 +1499,7 @@ describe("provider keys on /config", () => {
     const html = await res.text();
     expect(html).toContain('href="#providers"');
     expect(html).toContain('href="#github-app"');
+    expect(html).toContain('href="#issue-bot"');
     expect(html).toContain("config-stage");
     expect(html).toContain("key from env <code>OPENAI_API_KEY</code>");
     expect(html).toContain("stored in auth.json ···ret9");

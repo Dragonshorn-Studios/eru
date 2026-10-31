@@ -44,6 +44,7 @@ describe("session helpers", () => {
     expect(isPublicPath("/assets/apple-touch-icon.png")).toBe(true);
     expect(isPublicPath("/assets/eru.css")).toBe(true);
     expect(isPublicPath("/assets/htmx.min.js")).toBe(true);
+    expect(isPublicPath("/webhooks/github")).toBe(true);
     expect(isPublicPath("/assets/")).toBe(false);
     expect(isPublicPath("/assets/secret.css")).toBe(false);
     expect(isPublicPath("/assets/eru.css.bak")).toBe(false);

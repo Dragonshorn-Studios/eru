@@ -174,6 +174,7 @@ const PUBLIC_PATHS = new Set([
   "/assets/eru-icon.png",
   "/assets/eru.css",
   "/assets/htmx.min.js",
+  "/webhooks/github",
 ]);
 
 export function isPublicPath(path: string): boolean {

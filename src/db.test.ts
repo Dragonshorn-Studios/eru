@@ -32,6 +32,8 @@ describe("sqlite stub schema", () => {
     expect(names).toContain("pages");
     expect(names).toContain("forge_credentials");
     expect(names).toContain("schema_migrations");
+    expect(names).toContain("github_webhook_deliveries");
+    expect(names).toContain("issue_refine_jobs");
     expect(getPrimaryRepo(db)).toBeUndefined();
     db.exec(
       `INSERT INTO repos (forge, owner, name, last_mapped_ref, created_at) VALUES ('github', 'acme', 'box', 'main', datetime('now'))`,
@@ -43,7 +45,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(6);
+    expect(migrations.n).toBe(7);
     again.close();
   });
 
@@ -84,9 +86,11 @@ describe("sqlite stub schema", () => {
     const tables = legacy.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[];
     expect(tables.map((t) => t.name)).toContain("forge_credentials");
     expect(tables.map((t) => t.name)).toContain("settings");
+    expect(tables.map((t) => t.name)).toContain("github_webhook_deliveries");
+    expect(tables.map((t) => t.name)).toContain("issue_refine_jobs");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(6);
+    expect(migrations.n).toBe(7);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -95,7 +99,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(6);
+    expect(after.n).toBe(7);
     legacy.close();
   });
 });

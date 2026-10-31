@@ -30,9 +30,13 @@ import {
   oauthEnabled,
 } from "./oauth.js";
 import {
+  DEFAULT_ISSUE_BOT_HOURLY_CAP,
   DEFAULT_OPENCODE_TIMEOUT_MS,
+  ISSUE_BOT_HOURLY_CAP_MAX,
+  MIN_WEBHOOK_SECRET,
   parseOpenCodeTimeout,
   type Config,
+  type IssueBotConfig,
 } from "./config.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -93,6 +97,7 @@ import {
 import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
+import { ISSUE_BOT_WEBHOOK_PATH, createIssueBot, type IssueBot, type IssueRefineFn } from "./issuebot.js";
 import {
   APP_ERRORS,
   appPage,
@@ -105,6 +110,7 @@ import {
   loginPage,
   themeCss,
   type ChromeModel,
+  type ConfigIssueBotView,
   type ConfigView,
 } from "./ui.js";
 
@@ -121,6 +127,9 @@ export interface AppOptions {
   modelDiscovery?: ModelDiscovery;
   providerStore?: ProviderCredentialStore;
   mappingTracker?: MappingTracker;
+  issueBot?: IssueBot;
+  issueBotAutoStart?: boolean;
+  issueRefine?: IssueRefineFn;
 }
 
 type Env = {
@@ -146,6 +155,45 @@ export function createApp(opts: AppOptions): Hono<Env> {
   void modelDiscovery.refresh();
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
   const mapping = opts.mappingTracker ?? createMappingTracker();
+  // Rebuild whenever saved/env credentials change so a Config-page save
+  // takes effect without restarting the process.
+  let issueBotCached: { sig: string; bot: IssueBot } | undefined;
+  function issueBotRuntime(): IssueBot | undefined {
+    if (opts.issueBot) return opts.issueBot;
+    const resolved = resolveIssueBot(config, db);
+    if (!resolved) {
+      issueBotCached?.bot.stop();
+      issueBotCached = undefined;
+      return undefined;
+    }
+    const sig = [
+      resolved.appId,
+      resolved.privateKey,
+      resolved.webhookSecret,
+      resolved.botUserId ?? "",
+      resolved.trustedBotIds.join(","),
+      resolved.hourlyCap,
+    ].join("\n");
+    if (!issueBotCached || issueBotCached.sig !== sig) {
+      issueBotCached?.bot.stop();
+      const bot = createIssueBot({
+        db,
+        config: resolved,
+        fetchImpl,
+        refine: opts.issueRefine,
+        openCode: {
+          bin: config.openCodeBin,
+          timeoutMs: () => resolveTimeout(config, db).value,
+          model: resolveModel(config, db, "ask").value ?? config.openCodeModel,
+        },
+        now,
+      });
+      if (opts.issueBotAutoStart !== false) bot.start();
+      issueBotCached = { sig, bot };
+    }
+    return issueBotCached.bot;
+  }
+  if (opts.issueBotAutoStart !== false) issueBotRuntime();
 
   const oauthOn = oauthEnabled(config);
   const passwordLoginOn = !oauthOn || config.uiLocalLogin;
@@ -219,6 +267,12 @@ export function createApp(opts: AppOptions): Hono<Env> {
   app.get("/health", (c) => {
     db.prepare("SELECT 1 AS ok").get();
     return c.json({ ok: true });
+  });
+
+  app.post("/webhooks/github", (c) => {
+    const bot = issueBotRuntime();
+    if (!bot) return c.text("not found", 404);
+    return bot.handleWebhook(c);
   });
 
   app.get("/assets/eru.css", (c) => {
@@ -685,6 +739,73 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return c.redirect("/config");
   });
 
+  app.post("/config/issue-bot", async (c) => {
+    const body = await c.req.parseBody();
+    const appId = typeof body.app_id === "string" ? body.app_id.trim() : "";
+    const privateKey = typeof body.app_private_key === "string" ? body.app_private_key.trim() : "";
+    const webhookSecret = typeof body.webhook_secret === "string" ? body.webhook_secret.trim() : "";
+    const botUserId = typeof body.bot_user_id === "string" ? body.bot_user_id.trim() : "";
+    const trustedRaw = typeof body.trusted_bot_ids === "string" ? body.trusted_bot_ids.trim() : "";
+    const hourlyRaw = typeof body.hourly_cap === "string" ? body.hourly_cap.trim() : "";
+    const reject = (notice: string) =>
+      html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), 400);
+    if (!appId || !/^\d+$/.test(appId)) {
+      return reject("App ID is a number — find it on the eru-issue-bot GitHub App settings page.");
+    }
+    if (privateKey && !privateKey.includes("PRIVATE KEY")) {
+      return reject("That does not look like a PEM private key.");
+    }
+    if (webhookSecret && webhookSecret.length < MIN_WEBHOOK_SECRET) {
+      return reject(`Webhook secret must be at least ${MIN_WEBHOOK_SECRET} characters.`);
+    }
+    if (botUserId && !/^\d+$/.test(botUserId)) {
+      return reject("Bot user id is a number — the id of eru-issue-bot[bot].");
+    }
+    const trusted = parseFormIdList(trustedRaw);
+    if (trustedRaw && !trusted) {
+      return reject("Trusted bot ids are comma-separated numeric GitHub user ids.");
+    }
+    if (hourlyRaw && !isValidHourlyCap(hourlyRaw)) {
+      return reject(`Hourly cap is a number between 1 and ${ISSUE_BOT_HOURLY_CAP_MAX}.`);
+    }
+    const current = resolveIssueBot(config, db);
+    const hasKey = Boolean(privateKey) || Boolean(getSetting(db, SETTING_ISSUE_BOT_KEY)) || Boolean(current?.privateKey);
+    const hasSecret =
+      Boolean(webhookSecret) || Boolean(getSetting(db, SETTING_ISSUE_BOT_SECRET)) || Boolean(current?.webhookSecret);
+    if (!hasKey) return reject("Paste the App private key (or set ERU_ISSUE_BOT_PRIVATE_KEY) so the bot can write issues.");
+    if (!hasSecret) {
+      return reject("Paste the webhook secret (or set ERU_ISSUE_BOT_WEBHOOK_SECRET) so GitHub deliveries can be verified.");
+    }
+    const at = new Date(now()).toISOString();
+    const secrets = forgeKeySecrets(config);
+    db.transaction(() => {
+      setSetting(db, SETTING_ISSUE_BOT_ID, appId, at);
+      if (privateKey) setSetting(db, SETTING_ISSUE_BOT_KEY, encryptForgeToken(secrets[0], privateKey), at);
+      if (webhookSecret) setSetting(db, SETTING_ISSUE_BOT_SECRET, encryptForgeToken(secrets[0], webhookSecret), at);
+      if (botUserId) setSetting(db, SETTING_ISSUE_BOT_USER, botUserId, at);
+      else deleteSetting(db, SETTING_ISSUE_BOT_USER);
+      if (trustedRaw) setSetting(db, SETTING_ISSUE_BOT_TRUSTED, trusted!.join(","), at);
+      else deleteSetting(db, SETTING_ISSUE_BOT_TRUSTED);
+      if (hourlyRaw) setSetting(db, SETTING_ISSUE_BOT_CAP, hourlyRaw, at);
+      else deleteSetting(db, SETTING_ISSUE_BOT_CAP);
+    })();
+    issueBotRuntime();
+    return c.redirect("/config#issue-bot");
+  });
+
+  app.post("/config/issue-bot/remove", (c) => {
+    db.transaction(() => {
+      deleteSetting(db, SETTING_ISSUE_BOT_ID);
+      deleteSetting(db, SETTING_ISSUE_BOT_KEY);
+      deleteSetting(db, SETTING_ISSUE_BOT_SECRET);
+      deleteSetting(db, SETTING_ISSUE_BOT_USER);
+      deleteSetting(db, SETTING_ISSUE_BOT_TRUSTED);
+      deleteSetting(db, SETTING_ISSUE_BOT_CAP);
+    })();
+    issueBotRuntime();
+    return c.redirect("/config#issue-bot");
+  });
+
   const renderConfig = (c: Context<Env>, notice = "", status: ContentfulStatusCode = 200) =>
     html(c, configPage(chromeModel(c, db, config), configView(db, config, modelDiscovery, providers), notice), status);
 
@@ -738,6 +859,12 @@ const SETTING_MAP_MODEL = "opencode.map_model";
 const SETTING_APP_ID = "github_app.id";
 const SETTING_APP_KEY = "github_app.private_key";
 const SETTING_APP_INSTALL = "github_app.installation_id";
+const SETTING_ISSUE_BOT_ID = "issue_bot.app_id";
+const SETTING_ISSUE_BOT_KEY = "issue_bot.private_key";
+const SETTING_ISSUE_BOT_SECRET = "issue_bot.webhook_secret";
+const SETTING_ISSUE_BOT_USER = "issue_bot.user_id";
+const SETTING_ISSUE_BOT_TRUSTED = "issue_bot.trusted_ids";
+const SETTING_ISSUE_BOT_CAP = "issue_bot.hourly_cap";
 const SETTING_SELECTED_REPO = "ui.selected_repo";
 const SETTING_UI_USER = "ui.user";
 const SETTING_OPENCODE_TIMEOUT = "opencode.timeout_ms";
@@ -814,6 +941,111 @@ function resolveGithubApp(config: Config, db: SqliteDb): ResolvedGithubApp | nul
     appIdOverriddenEnv: Boolean(storedId && config.githubAppId),
     installOverriddenEnv: Boolean(storedInstall && config.githubAppInstallationId),
     keyOverriddenEnv: keySource === "stored" && Boolean(config.githubAppPrivateKey),
+  };
+}
+
+function parseFormIdList(raw: string): number[] | undefined {
+  if (!raw.trim()) return [];
+  const ids = raw.split(",").map((piece) => Number(piece.trim()));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0)) return undefined;
+  return ids;
+}
+
+function isValidHourlyCap(raw: string): boolean {
+  if (!/^\d+$/.test(raw)) return false;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= ISSUE_BOT_HOURLY_CAP_MAX;
+}
+
+function decryptStoredSecret(config: Config, stored: string | undefined, label: string): string | undefined {
+  if (!stored) return undefined;
+  try {
+    return decryptForgeToken(forgeKeySecrets(config), stored);
+  } catch {
+    console.log(`issuebot: stored ${label} unreadable`);
+    return undefined;
+  }
+}
+
+// Saved values win per field over env. App ID + private key + webhook secret
+// must all resolve or the bot stays off (webhook returns 404).
+function resolveIssueBot(config: Config, db: SqliteDb): IssueBotConfig | undefined {
+  const storedId = getSetting(db, SETTING_ISSUE_BOT_ID);
+  const storedKey = decryptStoredSecret(config, getSetting(db, SETTING_ISSUE_BOT_KEY), "private key");
+  const storedSecret = decryptStoredSecret(config, getSetting(db, SETTING_ISSUE_BOT_SECRET), "webhook secret");
+  const storedUser = getSetting(db, SETTING_ISSUE_BOT_USER);
+  const storedTrusted = getSetting(db, SETTING_ISSUE_BOT_TRUSTED);
+  const storedCap = getSetting(db, SETTING_ISSUE_BOT_CAP);
+  const env = config.issueBot;
+  const appId = storedId ?? env?.appId;
+  const privateKey = storedKey ?? env?.privateKey;
+  const webhookSecret = storedSecret ?? env?.webhookSecret;
+  if (!appId || !privateKey || !webhookSecret) return undefined;
+  let botUserId = env?.botUserId;
+  if (storedUser && /^\d+$/.test(storedUser)) botUserId = Number(storedUser);
+  let trustedBotIds = env?.trustedBotIds ?? [];
+  if (storedTrusted !== undefined) {
+    trustedBotIds = parseFormIdList(storedTrusted) ?? trustedBotIds;
+  }
+  let hourlyCap = env?.hourlyCap ?? DEFAULT_ISSUE_BOT_HOURLY_CAP;
+  if (storedCap && isValidHourlyCap(storedCap)) hourlyCap = Number(storedCap);
+  return { appId, privateKey, webhookSecret, botUserId, trustedBotIds, hourlyCap };
+}
+
+function issueBotView(db: SqliteDb, config: Config): ConfigIssueBotView {
+  const env = config.issueBot;
+  const storedAppId = getSetting(db, SETTING_ISSUE_BOT_ID) ?? "";
+  const storedUser = getSetting(db, SETTING_ISSUE_BOT_USER) ?? "";
+  const storedTrusted = getSetting(db, SETTING_ISSUE_BOT_TRUSTED) ?? "";
+  const storedCap = getSetting(db, SETTING_ISSUE_BOT_CAP) ?? "";
+  const hasStoredKey = Boolean(getSetting(db, SETTING_ISSUE_BOT_KEY));
+  const hasStoredSecret = Boolean(getSetting(db, SETTING_ISSUE_BOT_SECRET));
+  const storedKeyOk = Boolean(decryptStoredSecret(config, getSetting(db, SETTING_ISSUE_BOT_KEY), "private key"));
+  const storedSecretOk = Boolean(decryptStoredSecret(config, getSetting(db, SETTING_ISSUE_BOT_SECRET), "webhook secret"));
+  const resolved = resolveIssueBot(config, db);
+  const keySource: ConfigIssueBotView["keySource"] = storedKeyOk ? "stored" : env?.privateKey ? "env" : "default";
+  const secretSource: ConfigIssueBotView["secretSource"] = storedSecretOk
+    ? "stored"
+    : env?.webhookSecret
+      ? "env"
+      : "default";
+  const appIdSource: ConfigIssueBotView["appIdSource"] = storedAppId ? "stored" : env?.appId ? "env" : "default";
+  const botUserSource: ConfigIssueBotView["botUserSource"] = storedUser
+    ? "stored"
+    : env?.botUserId
+      ? "env"
+      : "default";
+  const trustedSource: ConfigIssueBotView["trustedSource"] = storedTrusted
+    ? "stored"
+    : env?.trustedBotIds.length
+      ? "env"
+      : "default";
+  const capSource: ConfigIssueBotView["capSource"] = storedCap ? "stored" : env ? "env" : "default";
+  return {
+    enabled: Boolean(resolved),
+    webhookUrl: config.publicUrl ? `${config.publicUrl}${ISSUE_BOT_WEBHOOK_PATH}` : "",
+    appId: resolved?.appId ?? env?.appId ?? "",
+    appIdSource,
+    storedAppId,
+    appIdOverriddenEnv: Boolean(storedAppId && env?.appId),
+    keySource,
+    hasStoredKey,
+    keyOverriddenEnv: keySource === "stored" && Boolean(env?.privateKey),
+    secretSource,
+    hasStoredSecret,
+    secretOverriddenEnv: secretSource === "stored" && Boolean(env?.webhookSecret),
+    botUserId: resolved?.botUserId ? String(resolved.botUserId) : env?.botUserId ? String(env.botUserId) : "",
+    botUserSource,
+    storedBotUserId: storedUser,
+    botUserOverriddenEnv: Boolean(storedUser && env?.botUserId),
+    trusted: (resolved?.trustedBotIds ?? env?.trustedBotIds ?? []).join(", "),
+    trustedSource,
+    storedTrusted,
+    trustedOverriddenEnv: Boolean(storedTrusted && env?.trustedBotIds.length),
+    hourlyCap: String(resolved?.hourlyCap ?? env?.hourlyCap ?? DEFAULT_ISSUE_BOT_HOURLY_CAP),
+    capSource,
+    storedCap,
+    capOverriddenEnv: Boolean(storedCap && env),
   };
 }
 
@@ -905,6 +1137,7 @@ function configView(db: SqliteDb, config: Config, discovery: ModelDiscovery, pro
       installOverriddenEnv: app?.installOverriddenEnv ?? false,
       keyOverriddenEnv: app?.keyOverriddenEnv ?? false,
     },
+    issueBot: issueBotView(db, config),
     user: (() => {
       const u = resolveUser(config, db);
       return {
