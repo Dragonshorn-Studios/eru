@@ -71,13 +71,7 @@ This App is **not** the mapping GitHub App. Permissions are Issues read/write an
 
 ### One-time GitHub App setup
 
-Set `ERU_PUBLIC_URL` to the URL operators use to reach Eru (no trailing slash). Then on **Config → Issue bot** click **Create GitHub App**. GitHub opens with the name, Issues read/write permission, Issues event, and webhook URL already filled in. After you create it, Eru stores the App ID, PEM, and webhook secret encrypted and looks up the bot user id. Install the App on the repos you want — the Config page keeps an install link. Takes effect without a restart.
-
-To create the App on an organization, fill in the org login before clicking Create.
-
-**Already have the App?** Paste App ID, PEM, and webhook secret on the same Config section, or set them in Coolify / `.env` (never in git). Saved Config values win over env.
-
-Manual GitHub steps if you are not using Create:
+Create the App on GitHub and set the env vars below (Coolify / `.env` — never in git). Partial config fails closed at boot; the webhook returns 404 until App ID, private key, webhook secret, and bot user id all resolve.
 
 1. GitHub → Settings → Developer settings → GitHub Apps → New GitHub App.
 2. Name it `eru-issue-bot`. Homepage URL can be your Eru URL.

@@ -220,40 +220,10 @@ export interface ConfigAppView {
   keyOverriddenEnv: boolean;
 }
 
-export interface ConfigIssueBotView {
-  enabled: boolean;
-  webhookUrl: string;
-  canCreate: boolean;
-  installUrl: string;
-  appId: string;
-  appIdSource: "env" | "stored" | "default";
-  storedAppId: string;
-  appIdOverriddenEnv: boolean;
-  keySource: "env" | "stored" | "default";
-  hasStoredKey: boolean;
-  keyOverriddenEnv: boolean;
-  secretSource: "env" | "stored" | "default";
-  hasStoredSecret: boolean;
-  secretOverriddenEnv: boolean;
-  botUserId: string;
-  botUserSource: "env" | "stored" | "default";
-  storedBotUserId: string;
-  botUserOverriddenEnv: boolean;
-  trusted: string;
-  trustedSource: "env" | "stored" | "default";
-  storedTrusted: string;
-  trustedOverriddenEnv: boolean;
-  hourlyCap: string;
-  capSource: "env" | "stored" | "default";
-  storedCap: string;
-  capOverriddenEnv: boolean;
-}
-
 export interface ConfigView {
   bin: string;
   timeout: ConfigModelRow;
   app: ConfigAppView;
-  issueBot: ConfigIssueBotView;
   user: ConfigModelRow;
   ask: ConfigModelRow;
   map: ConfigModelRow;
@@ -349,7 +319,6 @@ const CONFIG_SECTIONS = [
   { id: "models", label: "OpenCode models" },
   { id: "providers", label: "Provider keys" },
   { id: "github-app", label: "GitHub App" },
-  { id: "issue-bot", label: "Issue bot" },
   { id: "operator", label: "Operator" },
 ] as const;
 
@@ -438,7 +407,6 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           <button class="enter" type="submit">Save GitHub App</button>
         </form>
         ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
-        ${issueBotSection(view.issueBot, model.csrf)}
         <h3 id="operator">Operator</h3>
         <p class="mapped">the name (and GitHub avatar) shown in the top bar — <code>ERU_UI_USER</code></p>
         <form class="connect-form" method="post" action="/config/user" autocomplete="off">
@@ -478,111 +446,6 @@ function appFieldHint(
     return overriddenEnv ? `saved on this page · overrides <code>${escapeHtml(envKey)}</code>` : "saved on this page";
   }
   return escapeHtml(fallback);
-}
-
-export function issueBotManifestHandoffPage(registerUrl: string, manifestJson: string): string {
-  return layout(
-    "Eru — create GitHub App",
-    `<body>
-  <main id="main" class="stage">
-    <section class="card">
-      <h2>Continue on GitHub</h2>
-      <p class="page-lead">GitHub will offer the name <code>eru-issue-bot</code> with Issues read/write and the webhook URL already filled in. After you create it, you'll come back here and Eru stores the credentials encrypted.</p>
-      <form id="issue-bot-manifest" class="connect-form" method="post" action="${escapeHtml(registerUrl)}">
-        <input type="hidden" name="manifest" value="${escapeHtml(manifestJson)}"/>
-        <button class="enter" type="submit">Continue on GitHub</button>
-      </form>
-      <script>document.getElementById("issue-bot-manifest").submit();</script>
-    </section>
-  </main>
-</body>`,
-  );
-}
-
-function issueBotSection(bot: ConfigIssueBotView, csrf: string): string {
-  const webhookField = bot.webhookUrl
-    ? `<label class="field">
-            <span>Webhook URL <span class="field-hint">${bot.enabled ? "listening" : "saved credentials still need a key and secret"}</span></span>
-            <input type="text" readonly value="${escapeHtml(bot.webhookUrl)}" onclick="this.select()"/>
-            <span class="field-hint">paste this into the GitHub App · webhook secret below must match GitHub's</span>
-          </label>`
-    : `<p class="field-hint">Set <code>ERU_PUBLIC_URL</code> so this page can show the webhook URL, or use <code>https://&lt;host&gt;/webhooks/github</code> on the GitHub App.</p>`;
-  const createBlock = bot.canCreate
-    ? `<form class="connect-form" method="post" action="/config/issue-bot/create" autocomplete="off">
-          ${csrfInput(csrf)}
-          <label class="field">
-            <span>GitHub organization <span class="field-hint">optional — leave empty to create the App on your account</span></span>
-            <input type="text" name="org" maxlength="39" placeholder="your-org"/>
-          </label>
-          <button class="enter" type="submit">Create GitHub App</button>
-        </form>`
-    : `<p class="field-hint">Set <code>ERU_PUBLIC_URL</code> to create the App from this page (GitHub needs the webhook and return URLs). Until then, create it on GitHub and paste the credentials below.</p>`;
-  const installLine = bot.installUrl
-    ? `<p class="field-hint"><a href="${escapeHtml(bot.installUrl)}">Install this App on GitHub</a> — pick the repos that should get rewritten issues.</p>`
-    : "";
-  const hasSaved =
-    bot.hasStoredKey ||
-    bot.hasStoredSecret ||
-    Boolean(bot.storedAppId) ||
-    Boolean(bot.storedBotUserId) ||
-    Boolean(bot.storedTrusted) ||
-    Boolean(bot.storedCap);
-  return `<h3 id="issue-bot">Issue bot</h3>
-        <p class="mapped">rewrites newly opened issues that mention <code>@eru-issue-bot</code> — a separate GitHub App (Issues read/write, Metadata read, event: Issues only)</p>
-        <p class="field-hint">Create the App here (GitHub fills in permissions and the webhook URL), then install it on the repos you want. Saved values win over <code>ERU_ISSUE_BOT_*</code>. Nagato only needs to append <code>@eru-issue-bot</code> on its own line at the end of the issue body.</p>
-        ${createBlock}
-        ${installLine}
-        <p class="mapped">or paste credentials from an App you already created</p>
-        <form class="connect-form" method="post" action="/config/issue-bot" autocomplete="off">
-          ${csrfInput(csrf)}
-          ${webhookField}
-          <label class="field">
-            <span>App ID <span class="field-hint">${appFieldHint(bot.appId, bot.appIdSource, "ERU_ISSUE_BOT_APP_ID", "required", bot.appIdOverriddenEnv)}</span></span>
-            <input type="text" name="app_id" inputmode="numeric" maxlength="20" value="${escapeHtml(bot.storedAppId)}" placeholder="${escapeHtml(bot.appId || "123456")}"/>
-          </label>
-          <label class="field">
-            <span>Private key <span class="field-hint">${issueBotSecretHint(bot.keySource, bot.hasStoredKey, bot.keyOverriddenEnv, "key")}</span></span>
-            <textarea name="app_private_key" rows="4" spellcheck="false" autocomplete="off" placeholder="-----BEGIN RSA PRIVATE KEY-----"></textarea>
-            <span class="field-hint">write-only — stored encrypted; leave empty to keep the saved key · env: <code>ERU_ISSUE_BOT_PRIVATE_KEY</code> or <code>_FILE</code></span>
-          </label>
-          <label class="field">
-            <span>Webhook secret <span class="field-hint">${issueBotSecretHint(bot.secretSource, bot.hasStoredSecret, bot.secretOverriddenEnv, "secret")}</span></span>
-            <input type="password" name="webhook_secret" autocomplete="off" placeholder="${bot.hasStoredSecret || bot.secretSource === "env" ? "leave empty to keep" : "16+ random bytes"}"/>
-            <span class="field-hint">write-only — stored encrypted; the same value as the GitHub App webhook secret · <code>ERU_ISSUE_BOT_WEBHOOK_SECRET</code></span>
-          </label>
-          <label class="field">
-            <span>Bot user id <span class="field-hint">${appFieldHint(bot.botUserId, bot.botUserSource, "ERU_ISSUE_BOT_USER_ID", "optional loop guard", bot.botUserOverriddenEnv)}</span></span>
-            <input type="text" name="bot_user_id" inputmode="numeric" maxlength="20" value="${escapeHtml(bot.storedBotUserId)}" placeholder="${escapeHtml(bot.botUserId || "from api.github.com/users/eru-issue-bot[bot]")}"/>
-            <span class="field-hint">numeric <code>id</code> of <code>eru-issue-bot[bot]</code> — skips the bot's own sender</span>
-          </label>
-          <label class="field">
-            <span>Trusted bot ids <span class="field-hint">${appFieldHint(bot.trusted, bot.trustedSource, "ERU_TRUSTED_BOT_IDS", "optional", bot.trustedOverriddenEnv)}</span></span>
-            <input type="text" name="trusted_bot_ids" value="${escapeHtml(bot.storedTrusted)}" placeholder="${escapeHtml(bot.trusted || "123, 456")}"/>
-            <span class="field-hint">comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER / MEMBER / COLLABORATOR</span>
-          </label>
-          <label class="field">
-            <span>Hourly cap <span class="field-hint">${appFieldHint(bot.hourlyCap, bot.capSource, "ERU_ISSUE_BOT_HOURLY_CAP", "20", bot.capOverriddenEnv)}</span></span>
-            <input type="text" name="hourly_cap" inputmode="numeric" maxlength="4" value="${escapeHtml(bot.storedCap)}" placeholder="${escapeHtml(bot.hourlyCap || "20")}"/>
-            <span class="field-hint">max refine jobs per owner/repo per hour</span>
-          </label>
-          <button class="enter" type="submit">Save issue bot</button>
-        </form>
-        ${hasSaved ? `<form class="config-refresh" method="post" action="/config/issue-bot/remove">${csrfInput(csrf)}<button class="link-button" type="submit">Remove saved issue bot</button></form>` : ""}`;
-}
-
-function issueBotSecretHint(
-  source: "env" | "stored" | "default",
-  hasStored: boolean,
-  overriddenEnv: boolean,
-  noun: string,
-): string {
-  if (source === "env") {
-    return hasStored ? `${noun} comes from env — saved ${noun} is unreadable` : `${noun} comes from env`;
-  }
-  if (hasStored) {
-    return overriddenEnv ? `${noun} saved on this page · overrides env ${noun}` : `${noun} saved on this page`;
-  }
-  return `no ${noun} saved`;
 }
 
 function appKeyHint(app: ConfigAppView): string {

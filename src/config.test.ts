@@ -197,6 +197,9 @@ describe("issue bot config", () => {
     ).toThrow(/WEBHOOK_SECRET/);
     expect(() => loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_HOURLY_CAP: "0" })).toThrow(/HOURLY_CAP/);
     expect(() => loadConfig({ ...secrets, ...bot, ERU_TRUSTED_BOT_IDS: "nope" })).toThrow(/ERU_TRUSTED_BOT_IDS/);
+    const { ERU_ISSUE_BOT_USER_ID: _omit, ...noUser } = bot;
+    expect(() => loadConfig({ ...secrets, ...noUser })).toThrow(/ERU_ISSUE_BOT_USER_ID/);
+    expect(() => loadConfig({ ...secrets, ...bot, ERU_ISSUE_BOT_USER_ID: "nope" })).toThrow(/ERU_ISSUE_BOT_USER_ID/);
   });
 });
 

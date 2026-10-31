@@ -9,10 +9,9 @@ Eru keeps all state in one SQLite file (via better-sqlite3, WAL mode) plus OpenC
 | `repos` | Connected repositories: owner, name, forge, `default_branch`, `last_mapped_ref`, active selection |
 | `forge_credentials` | Forge tokens and the GitHub App private key — AES-256-GCM encrypted under `ERU_FORGE_TOKEN_KEY` (or the session secret) |
 | `pages` | Map pages per repo: `slug`, `title`, `body`, `sort_order` — upserted in place on refresh |
-| `settings` | `/config` values: models, operator login, GitHub App fields, encrypted eru-issue-bot credentials |
+| `settings` | `/config` values: models, operator login, GitHub App fields |
 | `ask_threads` | Ask thread metadata (session id, title, mapped ref) |
-| `github_webhook_deliveries` | GitHub delivery ids already seen (`X-GitHub-Delivery`, unique) |
-| `issue_refine_jobs` | Pending/done eru-issue-bot rewrite jobs (title/body snapshot, attempts, status) |
+| `issue_refine_jobs` | Pending/done eru-issue-bot rewrite jobs (title/body snapshot, attempts, status). Unique on `(owner, name, issue_number)` — GitHub retries `INSERT OR IGNORE`. |
 | `schema_migrations` | Applied schema migrations (`0001`–`0007`) |
 
 Migrations run at boot; Eru fails closed if they fail.

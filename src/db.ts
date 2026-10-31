@@ -135,18 +135,12 @@ CREATE TABLE IF NOT EXISTS ask_threads (
 CREATE INDEX IF NOT EXISTS ask_threads_repo_idx ON ask_threads (repo_id, updated_at DESC);
 `;
 
-// Issue bot (#37): GitHub deliveries are recorded first (UNIQUE delivery id)
-// so retries are no-ops. Jobs that pass the author filter live in
-// issue_refine_jobs and are claimed by the in-process worker.
+// Issue bot (#37): one job per issue (UNIQUE owner/name/issue_number). GitHub
+// retries INSERT OR IGNORE. The in-process worker claims pending rows.
 const ISSUE_BOT_SQL = `
-CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
-  delivery_id TEXT PRIMARY KEY,
-  received_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS issue_refine_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  delivery_id TEXT NOT NULL UNIQUE,
+  delivery_id TEXT NOT NULL,
   installation_id TEXT NOT NULL,
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -158,7 +152,8 @@ CREATE TABLE IF NOT EXISTS issue_refine_jobs (
   run_after TEXT NOT NULL,
   last_error TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE (owner, name, issue_number)
 );
 CREATE INDEX IF NOT EXISTS issue_refine_jobs_poll_idx ON issue_refine_jobs (status, run_after, id);
 CREATE INDEX IF NOT EXISTS issue_refine_jobs_repo_idx ON issue_refine_jobs (owner, name, created_at);
@@ -382,14 +377,7 @@ export interface IssueRefineJob {
 
 const ISSUE_JOB_COLUMNS = `id, delivery_id AS deliveryId, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
 
-/** Insert a delivery id. Returns false when GitHub already sent this delivery. */
-export function recordWebhookDelivery(db: SqliteDb, deliveryId: string, at: string): boolean {
-  const result = db
-    .prepare(`INSERT OR IGNORE INTO github_webhook_deliveries (delivery_id, received_at) VALUES (?, ?)`)
-    .run(deliveryId, at);
-  return result.changes > 0;
-}
-
+/** Insert a job. Returns undefined when that issue is already queued. */
 export function enqueueIssueRefineJob(
   db: SqliteDb,
   job: {
@@ -402,19 +390,19 @@ export function enqueueIssueRefineJob(
     body: string;
   },
   at: string,
-): number {
+): number | undefined {
   const row = db
     .prepare(
-      `INSERT INTO issue_refine_jobs (
+      `INSERT OR IGNORE INTO issue_refine_jobs (
          delivery_id, installation_id, owner, name, issue_number, title, body,
          status, attempts, run_after, created_at, updated_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
        RETURNING id`,
     )
-    .get(job.deliveryId, job.installationId, job.owner, job.name, job.issueNumber, job.title, job.body, at, at, at) as {
-    id: number;
-  };
-  return row.id;
+    .get(job.deliveryId, job.installationId, job.owner, job.name, job.issueNumber, job.title, job.body, at, at, at) as
+    | { id: number }
+    | undefined;
+  return row?.id;
 }
 
 export function countRecentIssueRefineJobs(db: SqliteDb, owner: string, name: string, since: string): number {
@@ -448,8 +436,10 @@ export function claimDueIssueRefineJob(db: SqliteDb, at: string): IssueRefineJob
         )
         .get(at) as IssueRefineJob | undefined;
       if (!row) return undefined;
-      db.prepare(`UPDATE issue_refine_jobs SET status = 'running', updated_at = ? WHERE id = ?`).run(at, row.id);
-      return { ...row, status: "running" as const, updatedAt: at };
+      db.prepare(
+        `UPDATE issue_refine_jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`,
+      ).run(at, row.id);
+      return { ...row, status: "running" as const, attempts: row.attempts + 1, updatedAt: at };
     })();
 }
 
@@ -473,19 +463,12 @@ export function failIssueRefineJob(db: SqliteDb, id: number, at: string, error: 
   );
 }
 
-export function retryIssueRefineJob(
-  db: SqliteDb,
-  id: number,
-  at: string,
-  runAfter: string,
-  attempts: number,
-  error: string,
-): void {
+export function retryIssueRefineJob(db: SqliteDb, id: number, at: string, runAfter: string, error: string): void {
   db.prepare(
     `UPDATE issue_refine_jobs
-     SET status = 'pending', attempts = ?, run_after = ?, last_error = ?, updated_at = ?
+     SET status = 'pending', run_after = ?, last_error = ?, updated_at = ?
      WHERE id = ?`,
-  ).run(attempts, runAfter, error, at, id);
+  ).run(runAfter, error, at, id);
 }
 
 /** Jobs left `running` after a crash go back on the queue. */

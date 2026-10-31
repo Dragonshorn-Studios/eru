@@ -4,16 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  claimDueIssueRefineJob,
   deleteForgeCredential,
   deleteSetting,
   deleteStalePages,
+  enqueueIssueRefineJob,
   getForgeCredential,
+  getIssueRefineJob,
   getPage,
   getPrimaryRepo,
   getSetting,
   listPages,
   migrate,
   openDb,
+  recoverIssueRefineJobs,
   setForgeCredential,
   setSetting,
   upsertConnectedRepo,
@@ -32,8 +36,8 @@ describe("sqlite stub schema", () => {
     expect(names).toContain("pages");
     expect(names).toContain("forge_credentials");
     expect(names).toContain("schema_migrations");
-    expect(names).toContain("github_webhook_deliveries");
     expect(names).toContain("issue_refine_jobs");
+    expect(names).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(db)).toBeUndefined();
     db.exec(
       `INSERT INTO repos (forge, owner, name, last_mapped_ref, created_at) VALUES ('github', 'acme', 'box', 'main', datetime('now'))`,
@@ -86,8 +90,8 @@ describe("sqlite stub schema", () => {
     const tables = legacy.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[];
     expect(tables.map((t) => t.name)).toContain("forge_credentials");
     expect(tables.map((t) => t.name)).toContain("settings");
-    expect(tables.map((t) => t.name)).toContain("github_webhook_deliveries");
     expect(tables.map((t) => t.name)).toContain("issue_refine_jobs");
+    expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
     expect(migrations.n).toBe(7);
@@ -221,6 +225,39 @@ describe("repo auth source and page mapped_ref", () => {
     const page = getPage(db, repo, "arch")!;
     expect(page.mappedRef).toBe("main");
     expect(page.body).toBe("v2");
+    db.close();
+  });
+});
+
+describe("issue refine jobs", () => {
+  const job = {
+    deliveryId: "deliv-1",
+    installationId: "555",
+    owner: "acme",
+    name: "box",
+    issueNumber: 12,
+    title: "The lights flicker",
+    body: "hello",
+  };
+
+  it("dedupes on owner/name/issue_number and increments attempts on claim", () => {
+    const db = openDb(":memory:");
+    const at = "2026-01-01T00:00:00Z";
+    const first = enqueueIssueRefineJob(db, job, at);
+    const second = enqueueIssueRefineJob(db, { ...job, deliveryId: "deliv-2", title: "other" }, at);
+    expect(first).toBeDefined();
+    expect(second).toBeUndefined();
+    expect(getIssueRefineJob(db, first!)!.attempts).toBe(0);
+
+    const claimed = claimDueIssueRefineJob(db, at);
+    expect(claimed?.id).toBe(first);
+    expect(claimed?.attempts).toBe(1);
+    expect(getIssueRefineJob(db, first!)!.attempts).toBe(1);
+
+    recoverIssueRefineJobs(db, at);
+    expect(getIssueRefineJob(db, first!)!.status).toBe("pending");
+    expect(getIssueRefineJob(db, first!)!.attempts).toBe(1);
+    expect(claimDueIssueRefineJob(db, at)?.attempts).toBe(2);
     db.close();
   });
 });

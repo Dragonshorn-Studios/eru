@@ -5,28 +5,21 @@ import {
   enqueueIssueRefineJob,
   listIssueRefineJobs,
   openDb,
-  recordWebhookDelivery,
 } from "./db.js";
 import {
   COMMENT_COMPLETE,
   COMMENT_FAILED,
   COMMENT_NEEDS_INFO,
-  ISSUE_BOT_APP_NAME,
+  GITHUB_ISSUE_BODY_MAX,
   ISSUE_BOT_MARKER,
-  ISSUE_BOT_SETUP_PATH,
-  ISSUE_BOT_WEBHOOK_PATH,
+  ISSUE_BOT_MAX_BODY_BYTES,
   LABEL_AGENT_READY,
   LABEL_FAILED,
   LABEL_NEEDS_INFO,
   LABEL_REFINED,
   composeIssueBody,
-  convertGithubAppManifest,
   createIssueBot,
-  githubAppInstallUrl,
   hasIssueBotMarker,
-  issueBotManifest,
-  issueBotManifestRegisterUrl,
-  lookupGithubBotUserId,
   openQuestionsEmpty,
   parseRefinedMarkdown,
   shouldEnqueueIssue,
@@ -174,6 +167,9 @@ function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCal
     if (path.includes("/issues/") && path.endsWith("/labels") && method === "POST") {
       return json(200, []);
     }
+    if (path.includes("/issues/") && path.endsWith("/comments") && method === "GET") {
+      return json(200, []);
+    }
     if (path.includes("/issues/") && path.endsWith("/comments") && method === "POST") {
       return json(201, { id: 2 });
     }
@@ -236,9 +232,17 @@ describe("enqueue filter", () => {
   const opts = { botUserId: BOT_USER_ID, trustedBotIds: [TRUSTED_BOT_ID] };
 
   it("enqueues an owner-opened issue that mentions the bot", () => {
-    expect(shouldEnqueueIssue(openedPayload({ association: "OWNER" }), opts)).toEqual({
+    const decision = shouldEnqueueIssue(openedPayload({ association: "OWNER" }), opts);
+    expect(decision).toEqual({
       enqueue: true,
-      reason: "ok",
+      target: {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: "The hallway lamp is dead.\n\n@eru-issue-bot\n",
+      },
     });
     expect(shouldEnqueueIssue(openedPayload({ association: "MEMBER" }), opts).enqueue).toBe(true);
     expect(shouldEnqueueIssue(openedPayload({ association: "COLLABORATOR" }), opts).enqueue).toBe(true);
@@ -265,8 +269,8 @@ describe("enqueue filter", () => {
 
   it("enqueues an allowlisted bot even when author_association is NONE", () => {
     expect(
-      shouldEnqueueIssue(openedPayload({ association: "NONE", senderId: TRUSTED_BOT_ID }), opts),
-    ).toEqual({ enqueue: true, reason: "ok" });
+      shouldEnqueueIssue(openedPayload({ association: "NONE", senderId: TRUSTED_BOT_ID }), opts).enqueue,
+    ).toBe(true);
   });
 
   it("skips issues that already carry the marker", () => {
@@ -296,27 +300,59 @@ describe("refined body", () => {
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
     expect(parseRefinedMarkdown("sorry").ok).toBe(false);
   });
+
+  it("truncates a long original so the composed body stays under GitHub's limit", () => {
+    const original = "a".repeat(70_000);
+    const composed = composeIssueBody(refinedTemplate(), original);
+    expect(composed.length).toBeLessThanOrEqual(GITHUB_ISSUE_BODY_MAX);
+    expect(composed).toContain("truncated");
+    expect(composed).toContain("<summary>Original</summary>");
+  });
+
+  it("neutralizes @mentions in model output", () => {
+    const parsed = parseRefinedMarkdown(`${refinedTemplate("")}\ncc @evil-user and @acme/team\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.text).toContain("`@evil-user`");
+    expect(parsed.text).toContain("`@acme/team`");
+    expect(parsed.text).not.toMatch(/(^|[^`])@evil-user\b/);
+  });
 });
 
 describe("POST /webhooks/github", () => {
-  it("rejects a bad signature and does not record the delivery", async () => {
+  it("rejects a bad signature and does not enqueue a job", async () => {
     const { app, db } = testApp({});
     const payload = openedPayload({});
     const res = await postWebhook(app, payload, { "X-Hub-Signature-256": sign(JSON.stringify(payload), "wrong-secret-16++") });
     expect(res.status).toBe(401);
     expect(listIssueRefineJobs(db)).toEqual([]);
-    const n = db.prepare(`SELECT COUNT(*) AS n FROM github_webhook_deliveries`).get() as { n: number };
-    expect(n.n).toBe(0);
   });
 
-  it("ignores a duplicate delivery id", async () => {
+  it("ignores a second webhook for the same issue", async () => {
     const { app, db } = testApp({});
     const payload = openedPayload({});
-    const first = await postWebhook(app, payload, { "X-GitHub-Delivery": "same-deliv" });
-    const second = await postWebhook(app, payload, { "X-GitHub-Delivery": "same-deliv" });
+    const first = await postWebhook(app, payload, { "X-GitHub-Delivery": "deliv-a" });
+    const second = await postWebhook(app, payload, { "X-GitHub-Delivery": "deliv-b" });
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
     expect(listIssueRefineJobs(db)).toHaveLength(1);
+  });
+
+  it("rejects a payload larger than ISSUE_BOT_MAX_BODY_BYTES", async () => {
+    const { app } = testApp({});
+    const body = "x".repeat(ISSUE_BOT_MAX_BODY_BYTES + 1);
+    const res = await app.request("/webhooks/github", {
+      method: "POST",
+      body,
+      headers: {
+        "Content-Type": "text/plain",
+        "Content-Length": String(body.length),
+        "X-GitHub-Event": "issues",
+        "X-GitHub-Delivery": "too-big",
+        "X-Hub-Signature-256": sign(body),
+      },
+    });
+    expect(res.status).toBe(413);
   });
 
   it("does not enqueue a stranger, own bot, or marker; does enqueue owner and allowlisted bot", async () => {
@@ -421,7 +457,7 @@ describe("issue refine worker", () => {
     expect(comment?.body).toEqual({ body: COMMENT_NEEDS_INFO });
   });
 
-  it("skips write-back when the live issue already carries the marker", async () => {
+  it("finishes labels and comment when the live body already carries the marker", async () => {
     const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
     const calls: GhCall[] = [];
     const { db, bot } = testApp({
@@ -430,7 +466,6 @@ describe("issue refine worker", () => {
         calls,
       }),
     });
-    recordWebhookDelivery(db, "deliv-marker-live", "2026-01-01T00:00:00Z");
     enqueueIssueRefineJob(
       db,
       {
@@ -441,6 +476,36 @@ describe("issue refine worker", () => {
         issueNumber: 12,
         title: "The lights flicker",
         body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
+    expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_REFINED))).toBe(true);
+    expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
+    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
+  });
+
+  it("skips when the job snapshot already carries the marker", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const marked = composeIssueBody(refinedTemplate(), original);
+    const calls: GhCall[] = [];
+    const { db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: marked, calls }),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        deliveryId: "deliv-marker-job",
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: marked,
       },
       "2026-01-01T00:00:00Z",
     );
@@ -467,76 +532,5 @@ describe("issue refine worker", () => {
     expect(JSON.stringify(labelAdds)).toContain(LABEL_FAILED);
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comments.some((c) => (c.body as { body: string }).body === COMMENT_FAILED)).toBe(true);
-  });
-});
-
-describe("github app manifest", () => {
-  it("builds a private Issues-only app pointed at this Eru", () => {
-    const manifest = issueBotManifest("https://eru.example/");
-    expect(manifest.name).toBe(ISSUE_BOT_APP_NAME);
-    expect(manifest.url).toBe("https://eru.example");
-    expect(manifest.public).toBe(false);
-    expect(manifest.default_events).toEqual(["issues"]);
-    expect(manifest.default_permissions).toEqual({ issues: "write", metadata: "read" });
-    expect(manifest.hook_attributes).toEqual({ url: `https://eru.example${ISSUE_BOT_WEBHOOK_PATH}`, active: true });
-    expect(manifest.redirect_url).toBe(`https://eru.example${ISSUE_BOT_SETUP_PATH}`);
-    expect(JSON.stringify(manifest.default_permissions)).not.toMatch(/contents|actions|administration/);
-  });
-
-  it("registers on a personal account or a valid org login", () => {
-    expect(issueBotManifestRegisterUrl()).toBe("https://github.com/settings/apps/new");
-    expect(issueBotManifestRegisterUrl("Acme-Org")).toBe("https://github.com/organizations/Acme-Org/settings/apps/new");
-    expect(issueBotManifestRegisterUrl("../evil")).toBeUndefined();
-    expect(issueBotManifestRegisterUrl("a/b")).toBeUndefined();
-    expect(githubAppInstallUrl("eru-issue-bot")).toBe(
-      "https://github.com/apps/eru-issue-bot/installations/new",
-    );
-    expect(githubAppInstallUrl("not a slug")).toBeUndefined();
-  });
-
-  it("converts a manifest code into app credentials and looks up the bot user", async () => {
-    const fetches: string[] = [];
-    const fetchImpl: FetchLike = async (url, init) => {
-      fetches.push(`${init?.method ?? "GET"} ${url}`);
-      if (String(url).includes("/app-manifests/goodcode1/conversions")) {
-        return new Response(
-          JSON.stringify({
-            id: 4242,
-            slug: "eru-issue-bot",
-            pem: APP_PEM,
-            webhook_secret: WEBHOOK_SECRET,
-            client_secret: "never-store-me",
-          }),
-          { status: 201, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (String(url).includes("/users/eru-issue-bot%5Bbot%5D") || String(url).includes("/users/eru-issue-bot[bot]")) {
-        return new Response(JSON.stringify({ id: BOT_USER_ID, login: "eru-issue-bot[bot]" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response("nope", { status: 404 });
-    };
-    const converted = await convertGithubAppManifest("goodcode1", fetchImpl);
-    expect(converted).toEqual({
-      appId: "4242",
-      slug: "eru-issue-bot",
-      privateKey: APP_PEM.trim(),
-      webhookSecret: WEBHOOK_SECRET,
-    });
-    expect(await lookupGithubBotUserId("eru-issue-bot", fetchImpl)).toBe(BOT_USER_ID);
-    expect(fetches.some((line) => line.includes("never-store-me"))).toBe(false);
-  });
-
-  it("rejects a short code, a failed conversion, and a payload without a PEM", async () => {
-    expect(await convertGithubAppManifest("short")).toBeUndefined();
-    const fail: FetchLike = async () => new Response("nope", { status: 404 });
-    expect(await convertGithubAppManifest("goodcode1", fail)).toBeUndefined();
-    const bad: FetchLike = async () =>
-      new Response(JSON.stringify({ id: 1, slug: "x", pem: "not-a-key", webhook_secret: WEBHOOK_SECRET }), {
-        status: 201,
-      });
-    expect(await convertGithubAppManifest("goodcode1", bad)).toBeUndefined();
   });
 });

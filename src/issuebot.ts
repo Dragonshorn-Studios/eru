@@ -3,8 +3,7 @@
  *
  * Issue title/body are untrusted user data. They go to the model as text only
  * (no tools, no repo, no secrets) and are never logged. App private key,
- * webhook secret, and installation tokens stay in env, encrypted SQLite
- * settings, or memory — never logs or git.
+ * webhook secret, and installation tokens stay in env / memory.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -12,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "hono";
 import { safeEqual } from "./auth.js";
-import { MIN_WEBHOOK_SECRET, type IssueBotConfig } from "./config.js";
+import type { IssueBotConfig } from "./config.js";
 import {
   claimDueIssueRefineJob,
   completeIssueRefineJob,
@@ -20,7 +19,6 @@ import {
   enqueueIssueRefineJob,
   failIssueRefineJob,
   recoverIssueRefineJobs,
-  recordWebhookDelivery,
   retryIssueRefineJob,
   skipIssueRefineJob,
   type IssueRefineJob,
@@ -34,19 +32,16 @@ import {
   type FetchLike,
   type GithubAppClient,
 } from "./forge.js";
-import { opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
+import { opencodeModel, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 import { markWorkspaceRoot } from "./util.js";
 
 export const ISSUE_BOT_MENTION = "@eru-issue-bot";
 export const ISSUE_BOT_MARKER = "<!-- eru-issue-bot:v1 -->";
-export const ISSUE_BOT_APP_NAME = "eru-issue-bot";
 export const ISSUE_BOT_MAX_ATTEMPTS = 3;
 export const ISSUE_BOT_WEBHOOK_PATH = "/webhooks/github";
-export const ISSUE_BOT_CREATE_PATH = "/config/issue-bot/create";
-export const ISSUE_BOT_SETUP_PATH = "/config/issue-bot/setup";
 export const ISSUE_BOT_MAX_BODY_BYTES = 1_000_000;
-export const ISSUE_BOT_SETUP_TTL_MS = 60 * 60 * 1000;
+export const GITHUB_ISSUE_BODY_MAX = 65_536;
 
 export const LABEL_REFINED = "eru:refined";
 export const LABEL_AGENT_READY = "agent-ready";
@@ -72,146 +67,12 @@ const TEMPLATE_HEADINGS = [
 ] as const;
 const EMPTY_OPEN_QUESTIONS = /^(none|n\/a|na|nil|-|—|–)?$/i;
 const MENTION_RE = /@eru-issue-bot\b/gi;
+const AT_MENTION_RE =
+  /(^|[^A-Za-z0-9_`])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\/[A-Za-z0-9._-]+)?)/g;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const POLL_IDLE_MS = 2_000;
 const DEFAULT_BACKOFF_MS = [5_000, 20_000, 80_000];
-const GITHUB_WEB_BASE = "https://github.com";
-const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const GITHUB_APP_SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
-const MANIFEST_CODE_RE = /^[A-Za-z0-9_-]{8,128}$/;
-
-export interface IssueBotManifest {
-  name: string;
-  url: string;
-  hook_attributes: { url: string; active: boolean };
-  redirect_url: string;
-  setup_url: string;
-  description: string;
-  public: false;
-  default_events: ["issues"];
-  default_permissions: { issues: "write"; metadata: "read" };
-}
-
-export interface ConvertedGithubApp {
-  appId: string;
-  slug: string;
-  privateKey: string;
-  webhookSecret: string;
-}
-
-/** Homepage, webhook, and redirect URLs GitHub needs to register eru-issue-bot. */
-export function issueBotPublicUrls(publicUrl: string): { home: string; webhook: string; setup: string } {
-  const home = publicUrl.replace(/\/+$/, "");
-  return {
-    home,
-    webhook: `${home}${ISSUE_BOT_WEBHOOK_PATH}`,
-    setup: `${home}${ISSUE_BOT_SETUP_PATH}`,
-  };
-}
-
-export function issueBotManifest(publicUrl: string): IssueBotManifest {
-  const urls = issueBotPublicUrls(publicUrl);
-  return {
-    name: ISSUE_BOT_APP_NAME,
-    url: urls.home,
-    hook_attributes: { url: urls.webhook, active: true },
-    redirect_url: urls.setup,
-    setup_url: `${urls.home}/config`,
-    description:
-      "Rewrites newly opened issues that mention @eru-issue-bot into an agent-ready brief. Issues read/write only.",
-    public: false,
-    default_events: ["issues"],
-    default_permissions: { issues: "write", metadata: "read" },
-  };
-}
-
-/** Personal account, or an org login. Undefined when the org slug is invalid. */
-export function issueBotManifestRegisterUrl(org = ""): string | undefined {
-  const trimmed = org.trim();
-  if (!trimmed) return `${GITHUB_WEB_BASE}/settings/apps/new`;
-  if (!GITHUB_LOGIN_RE.test(trimmed)) return undefined;
-  return `${GITHUB_WEB_BASE}/organizations/${encodeURIComponent(trimmed)}/settings/apps/new`;
-}
-
-export function githubAppInstallUrl(slug: string): string | undefined {
-  if (!GITHUB_APP_SLUG_RE.test(slug)) return undefined;
-  return `${GITHUB_WEB_BASE}/apps/${encodeURIComponent(slug)}/installations/new`;
-}
-
-export async function convertGithubAppManifest(
-  code: string,
-  fetchImpl: FetchLike = fetch,
-  apiBase: string = GITHUB_API_BASE,
-): Promise<ConvertedGithubApp | undefined> {
-  if (!MANIFEST_CODE_RE.test(code)) return undefined;
-  const url = `${apiBase.replace(/\/+$/, "")}/app-manifests/${encodeURIComponent(code)}/conversions`;
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: forgeHeaders(""),
-      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
-    });
-  } catch (error) {
-    console.warn("issuebot: GitHub App manifest conversion request failed:", error instanceof Error ? error.message : error);
-    return undefined;
-  }
-  if (!response.ok) {
-    console.warn(`issuebot: GitHub App manifest conversion failed with status=${response.status}`);
-    return undefined;
-  }
-  let body: { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown };
-  try {
-    body = (await response.json()) as { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown };
-  } catch {
-    console.warn("issuebot: GitHub App manifest conversion returned a non-JSON body");
-    return undefined;
-  }
-  const appId = typeof body.id === "number" && Number.isInteger(body.id) && body.id > 0 ? String(body.id) : undefined;
-  const slug = typeof body.slug === "string" ? body.slug.trim() : "";
-  const privateKey = typeof body.pem === "string" ? body.pem.trim() : "";
-  const webhookSecret = typeof body.webhook_secret === "string" ? body.webhook_secret.trim() : "";
-  if (!appId || !privateKey.includes("PRIVATE KEY") || webhookSecret.length < MIN_WEBHOOK_SECRET) {
-    console.warn("issuebot: GitHub App manifest conversion returned a malformed payload");
-    return undefined;
-  }
-  return { appId, slug: GITHUB_APP_SLUG_RE.test(slug) ? slug : "", privateKey, webhookSecret };
-}
-
-export async function lookupGithubBotUserId(
-  slug: string,
-  fetchImpl: FetchLike = fetch,
-  apiBase: string = GITHUB_API_BASE,
-): Promise<number | undefined> {
-  if (!GITHUB_APP_SLUG_RE.test(slug)) return undefined;
-  const url = `${apiBase.replace(/\/+$/, "")}/users/${encodeURIComponent(`${slug}[bot]`)}`;
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      headers: forgeHeaders(""),
-      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
-    });
-  } catch (error) {
-    console.warn("issuebot: bot user lookup request failed:", error instanceof Error ? error.message : error);
-    return undefined;
-  }
-  if (!response.ok) {
-    console.warn(`issuebot: bot user lookup failed with status=${response.status}`);
-    return undefined;
-  }
-  let body: { id?: unknown };
-  try {
-    body = (await response.json()) as { id?: unknown };
-  } catch {
-    console.warn("issuebot: bot user lookup returned a non-JSON body");
-    return undefined;
-  }
-  if (typeof body.id !== "number" || !Number.isInteger(body.id) || body.id <= 0) {
-    console.warn("issuebot: bot user lookup returned a malformed id");
-    return undefined;
-  }
-  return body.id;
-}
+const ORIGINAL_TRUNCATED_NOTE = "\n\n… truncated";
 
 export type IssueRefineFn = (input: { title: string; body: string }) => Promise<string>;
 
@@ -263,15 +124,21 @@ export function stripIssueBotMention(text: string): string {
   return text.replace(MENTION_RE, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
 }
 
-export interface EnqueueDecision {
-  enqueue: boolean;
-  reason: string;
+export interface EnqueueTarget {
+  installationId: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+  title: string;
+  body: string;
 }
+
+export type EnqueueDecision = { enqueue: true; target: EnqueueTarget } | { enqueue: false; reason: string };
 
 /** Filter for `issues` `opened` events. Everything else is ignored. */
 export function shouldEnqueueIssue(
   payload: unknown,
-  opts: { botUserId?: number; trustedBotIds: number[] },
+  opts: { botUserId: number; trustedBotIds: number[] },
 ): EnqueueDecision {
   if (payload == null || typeof payload !== "object") return { enqueue: false, reason: "payload" };
   const body = payload as Record<string, unknown>;
@@ -286,7 +153,7 @@ export function shouldEnqueueIssue(
   const sender = asRecord(body.sender);
   const senderId = asPositiveInt(sender?.id);
   if (senderId === undefined) return { enqueue: false, reason: "sender" };
-  if (opts.botUserId !== undefined && senderId === opts.botUserId) {
+  if (senderId === opts.botUserId) {
     return { enqueue: false, reason: "own-bot" };
   }
 
@@ -306,7 +173,17 @@ export function shouldEnqueueIssue(
   if (!ownerLogin || !repoName || number === undefined || installationId === undefined) {
     return { enqueue: false, reason: "target" };
   }
-  return { enqueue: true, reason: "ok" };
+  return {
+    enqueue: true,
+    target: {
+      installationId: String(installationId),
+      owner: ownerLogin,
+      name: repoName,
+      issueNumber: number,
+      title: typeof issue.title === "string" ? issue.title : "",
+      body: issueBody,
+    },
+  };
 }
 
 export function openQuestionsEmpty(markdown: string): boolean {
@@ -332,14 +209,13 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string } | 
       return { ok: false, error: `missing heading: ${heading}` };
     }
   }
-  text = stripIssueBotMention(text).trim();
+  text = neutralizeAtMentions(stripIssueBotMention(text)).trim();
   if (!text) return { ok: false, error: "empty" };
   return { ok: true, text };
 }
 
 export function composeIssueBody(refined: string, original: string): string {
-  const originalSafe = neutralizeDetails(original);
-  return [
+  const head = [
     ISSUE_BOT_MARKER,
     "",
     stripIssueBotMention(refined).trim(),
@@ -347,11 +223,15 @@ export function composeIssueBody(refined: string, original: string): string {
     "<details>",
     "<summary>Original</summary>",
     "",
-    originalSafe,
-    "",
-    "</details>",
-    "",
   ].join("\n");
+  const tail = "\n</details>\n";
+  const budget = GITHUB_ISSUE_BODY_MAX - head.length - tail.length;
+  let originalSafe = neutralizeDetails(original);
+  if (originalSafe.length > budget) {
+    const keep = Math.max(0, budget - ORIGINAL_TRUNCATED_NOTE.length);
+    originalSafe = originalSafe.slice(0, keep) + ORIGINAL_TRUNCATED_NOTE;
+  }
+  return head + originalSafe + tail;
 }
 
 export function issueBotBackoffMs(attempt: number): number {
@@ -365,7 +245,7 @@ export function createIssueRefiner(opts: OpenCodeOptions): IssueRefineFn {
       await writeFile(join(workdir, "opencode.json"), JSON.stringify(ISSUE_BOT_WORKSPACE_CONFIG));
       await markWorkspaceRoot(workdir);
       const args = ["run", "--format", "default"];
-      const runModel = opts.model;
+      const runModel = opencodeModel(opts);
       if (runModel) args.push("-m", runModel);
       args.push("--", refinePrompt(title, body));
       const timeoutMs = opencodeTimeout(opts);
@@ -416,6 +296,13 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   }
 
   async function handleWebhook(c: Context): Promise<Response> {
+    const lengthHeader = c.req.header("content-length") ?? c.req.header("Content-Length");
+    if (lengthHeader) {
+      const declared = Number(lengthHeader);
+      if (Number.isFinite(declared) && declared > ISSUE_BOT_MAX_BODY_BYTES) {
+        return c.text("payload too large", 413);
+      }
+    }
     const raw = await c.req.text();
     if (Buffer.byteLength(raw, "utf8") > ISSUE_BOT_MAX_BODY_BYTES) {
       return c.text("payload too large", 413);
@@ -426,11 +313,6 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     }
     const deliveryId = (c.req.header("x-github-delivery") ?? c.req.header("X-GitHub-Delivery") ?? "").trim();
     if (!deliveryId) return c.text("missing delivery", 400);
-    const at = iso();
-    const fresh = recordWebhookDelivery(db, deliveryId, at);
-    if (!fresh) {
-      return c.json({ ok: true, duplicate: true }, 202);
-    }
     const event = (c.req.header("x-github-event") ?? c.req.header("X-GitHub-Event") ?? "").trim();
     if (event !== "issues") {
       return c.json({ ok: true }, 202);
@@ -448,16 +330,16 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     if (!decision.enqueue) {
       return c.json({ ok: true }, 202);
     }
-    const parsed = parseEnqueueTarget(payload);
-    if (!parsed) return c.json({ ok: true }, 202);
+    const parsed = decision.target;
+    const at = iso();
     const hourAgo = iso(now() - 60 * 60 * 1000);
     if (countRecentIssueRefineJobs(db, parsed.owner, parsed.name, hourAgo) >= config.hourlyCap) {
       console.log(`issuebot: hourly cap ${parsed.owner}/${parsed.name}`);
       return c.json({ ok: true }, 202);
     }
-    enqueueIssueRefineJob(db, { deliveryId, ...parsed }, at);
-    console.log(`issuebot: queued ${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
-    if (!stopped) void processDue();
+    const id = enqueueIssueRefineJob(db, { deliveryId, ...parsed }, at);
+    if (id) console.log(`issuebot: queued ${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
+    if (id && !stopped) void processDue();
     return c.json({ ok: true }, 202);
   }
 
@@ -489,9 +371,18 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
         `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
       );
       const liveBody = typeof live.body === "string" ? live.body : job.body;
-      if (hasIssueBotMarker(liveBody) || hasIssueBotMarker(job.body)) {
+      if (hasIssueBotMarker(job.body)) {
         skipIssueRefineJob(db, job.id, at, "marker");
         console.log(`issuebot: skip ${label} (marker)`);
+        return;
+      }
+      if (hasIssueBotMarker(liveBody)) {
+        // Body PATCH already landed (labels/comment failed, or the process
+        // crashed). Finish write-back idempotently instead of skipping.
+        const agentReady = openQuestionsEmpty(refinedPortion(liveBody));
+        await finishWriteBack(fetchImpl, apiBase, token.value, job, agentReady);
+        completeIssueRefineJob(db, job.id, iso());
+        console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
         return;
       }
       await addReaction(fetchImpl, apiBase, token.value, job);
@@ -511,21 +402,12 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
         `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}`,
         { body: newBody },
       );
-      const labels = [LABEL_REFINED, agentReady ? LABEL_AGENT_READY : LABEL_NEEDS_INFO];
-      await addLabels(fetchImpl, apiBase, token.value, job, labels);
-      await addComment(
-        fetchImpl,
-        apiBase,
-        token.value,
-        job,
-        agentReady ? COMMENT_COMPLETE : COMMENT_NEEDS_INFO,
-      );
+      await finishWriteBack(fetchImpl, apiBase, token.value, job, agentReady);
       completeIssueRefineJob(db, job.id, iso());
       console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed";
-      const attempts = job.attempts + 1;
-      if (attempts >= ISSUE_BOT_MAX_ATTEMPTS) {
+      if (job.attempts >= ISSUE_BOT_MAX_ATTEMPTS) {
         await applyFailure(job, message).catch((failErr) => {
           console.log(
             `issuebot: failure write-back ${label} —`,
@@ -533,12 +415,12 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
           );
         });
         failIssueRefineJob(db, job.id, iso(), clipError(message));
-        console.log(`issuebot: failed ${label} after ${attempts} attempts`);
+        console.log(`issuebot: failed ${label} after ${job.attempts} attempts`);
         return;
       }
-      const runAfter = iso(now() + backoff(attempts));
-      retryIssueRefineJob(db, job.id, iso(), runAfter, attempts, clipError(message));
-      console.log(`issuebot: retry ${label} attempt=${attempts}`);
+      const runAfter = iso(now() + backoff(job.attempts));
+      retryIssueRefineJob(db, job.id, iso(), runAfter, clipError(message));
+      console.log(`issuebot: retry ${label} attempt=${job.attempts}`);
     }
   }
 
@@ -555,7 +437,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     const liveBody = typeof live.body === "string" ? live.body : job.body;
     if (hasIssueBotMarker(liveBody)) return;
     await addLabels(fetchImpl, apiBase, token.value, job, [LABEL_FAILED]).catch(() => {});
-    await addComment(fetchImpl, apiBase, token.value, job, COMMENT_FAILED).catch(() => {});
+    await ensureComment(fetchImpl, apiBase, token.value, job, COMMENT_FAILED).catch(() => {});
   }
 
   function start(): void {
@@ -622,33 +504,16 @@ function refinePrompt(title: string, body: string): string {
   ].join("\n");
 }
 
-function parseEnqueueTarget(payload: unknown): {
-  installationId: string;
-  owner: string;
-  name: string;
-  issueNumber: number;
-  title: string;
-  body: string;
-} | undefined {
-  if (payload == null || typeof payload !== "object") return undefined;
-  const body = payload as Record<string, unknown>;
-  const issue = asRecord(body.issue);
-  const repo = asRecord(body.repository);
-  const owner = asRecord(repo?.owner);
-  const installation = asRecord(body.installation);
-  const ownerLogin = typeof owner?.login === "string" ? owner.login : "";
-  const repoName = typeof repo?.name === "string" ? repo.name : "";
-  const number = asPositiveInt(issue?.number);
-  const installationId = asPositiveInt(installation?.id);
-  if (!issue || !ownerLogin || !repoName || number === undefined || installationId === undefined) return undefined;
-  return {
-    installationId: String(installationId),
-    owner: ownerLogin,
-    name: repoName,
-    issueNumber: number,
-    title: typeof issue.title === "string" ? issue.title : "",
-    body: typeof issue.body === "string" ? issue.body : "",
-  };
+async function finishWriteBack(
+  fetchImpl: FetchLike,
+  apiBase: string,
+  token: string,
+  job: Pick<IssueRefineJob, "owner" | "name" | "issueNumber">,
+  agentReady: boolean,
+): Promise<void> {
+  const labels = [LABEL_REFINED, agentReady ? LABEL_AGENT_READY : LABEL_NEEDS_INFO];
+  await addLabels(fetchImpl, apiBase, token, job, labels);
+  await ensureComment(fetchImpl, apiBase, token, job, agentReady ? COMMENT_COMPLETE : COMMENT_NEEDS_INFO);
 }
 
 async function addReaction(
@@ -700,13 +565,21 @@ async function addLabels(
   if (!added.ok) throw new Error(`labels:${added.status}`);
 }
 
-async function addComment(
+async function ensureComment(
   fetchImpl: FetchLike,
   apiBase: string,
   token: string,
   job: Pick<IssueRefineJob, "owner" | "name" | "issueNumber">,
   body: string,
 ): Promise<void> {
+  const comments = await githubJson<Array<{ body?: unknown }>>(
+    fetchImpl,
+    apiBase,
+    token,
+    "GET",
+    `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}/comments`,
+  );
+  if (comments.some((comment) => comment.body === body)) return;
   await githubJson(
     fetchImpl,
     apiBase,
@@ -783,8 +656,18 @@ function headingSection(markdown: string, heading: string): string | undefined {
   return next ? rest.slice(0, next.index) : rest;
 }
 
+function refinedPortion(body: string): string {
+  const idx = body.indexOf("<details>");
+  return (idx >= 0 ? body.slice(0, idx) : body).trim();
+}
+
 function neutralizeDetails(original: string): string {
   return original.replace(/<\/details>/gi, "&lt;/details&gt;");
+}
+
+function neutralizeAtMentions(text: string): string {
+  AT_MENTION_RE.lastIndex = 0;
+  return text.replace(AT_MENTION_RE, "$1`@$2`");
 }
 
 function clipError(message: string): string {

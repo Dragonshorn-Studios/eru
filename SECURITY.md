@@ -22,7 +22,7 @@ When forge connect lands (issue #2), tokens are least privilege (read the target
 
 ## GitHub webhooks (eru-issue-bot)
 
-`POST /webhooks/github` is a public path authenticated by `X-Hub-Signature-256` (HMAC-SHA256, compared with `timingSafeEqual`). Missing or invalid signatures are rejected. Deliveries are deduped on `X-GitHub-Delivery`. Issue title and body are untrusted user data: they are sent to the model as text only (no tools, no repo, no secrets in context) and are never logged. The App private key and webhook secret live in env or in SQLite (AES-256-GCM, same envelope as forge tokens) after a Config-page save or GitHub App manifest conversion; installation tokens stay in memory. They are never logged, rendered back, or committed. The manifest callback (`GET /config/issue-bot/setup`) requires an operator session and a single-use `state` value.
+`POST /webhooks/github` is a public path authenticated by `X-Hub-Signature-256` (HMAC-SHA256, compared with `timingSafeEqual`). Missing or invalid signatures are rejected. Repeat deliveries of the same issue are ignored (`UNIQUE(owner, name, issue_number)` + `INSERT OR IGNORE`). Issue title and body are untrusted user data: they are sent to the model as text only (no tools, no repo, no secrets in context) and are never logged. The App private key, webhook secret, and installation tokens live in env / memory only. OpenCode children that see issue text do not inherit `ERU_*` secrets.
 
 ## Secrets and exfil
 

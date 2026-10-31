@@ -55,7 +55,7 @@ export interface IssueBotConfig {
   privateKey: string;
   webhookSecret: string;
   /** GitHub user id of `eru-issue-bot[bot]` — loop guard compares `sender.id`. */
-  botUserId?: number;
+  botUserId: number;
   trustedBotIds: number[];
   hourlyCap: number;
 }
@@ -235,13 +235,13 @@ function loadIssueBotConfig(env: NodeJS.ProcessEnv): IssueBotConfig | undefined 
   if (webhookSecret.length < MIN_WEBHOOK_SECRET) {
     throw new Error("eru: ERU_ISSUE_BOT_WEBHOOK_SECRET is too short");
   }
-  let botUserId: number | undefined;
-  if (botUserRaw) {
-    if (!/^\d+$/.test(botUserRaw)) {
-      throw new Error("eru: ERU_ISSUE_BOT_USER_ID is not a number");
-    }
-    botUserId = Number(botUserRaw);
+  if (!botUserRaw) {
+    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_USER_ID");
   }
+  if (!/^\d+$/.test(botUserRaw)) {
+    throw new Error("eru: ERU_ISSUE_BOT_USER_ID is not a number");
+  }
+  const botUserId = Number(botUserRaw);
   const hourlyCap = parseInteger(env.ERU_ISSUE_BOT_HOURLY_CAP, DEFAULT_ISSUE_BOT_HOURLY_CAP);
   if (!Number.isInteger(hourlyCap) || hourlyCap < 1 || hourlyCap > ISSUE_BOT_HOURLY_CAP_MAX) {
     throw new Error("eru: ERU_ISSUE_BOT_HOURLY_CAP is invalid");
