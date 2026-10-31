@@ -679,7 +679,10 @@ export interface WebhookLogEntry {
 }
 
 const WEBHOOK_LOG_COLUMNS = `id, at, forge, origin, owner, name, issue_number AS issueNumber, delivery, event, action, outcome, reason, detail, title, job_id AS jobId`;
-const WEBHOOK_LOG_KEEP = 200;
+/** Signed deliveries (queued and ignored). Rejected rows use a separate cap. */
+export const WEBHOOK_LOG_KEEP = 200;
+/** Bad signatures are unauthenticated. They must not evict signed deliveries. */
+export const WEBHOOK_REJECTED_KEEP = 40;
 
 /** Operator-visible decision. Title is truncated; the issue body and the signature are never stored. */
 export function insertWebhookLog(
@@ -724,10 +727,28 @@ export function insertWebhookLog(
       (row.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200),
       row.jobId ?? null,
     );
-  db.prepare(
-    `DELETE FROM webhook_log WHERE id NOT IN (SELECT id FROM webhook_log ORDER BY id DESC LIMIT ${WEBHOOK_LOG_KEEP})`,
-  ).run();
+  pruneWebhookLog(db, row.outcome);
   return Number(inserted.lastInsertRowid);
+}
+
+function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
+  if (outcome === "rejected") {
+    db.prepare(
+      `DELETE FROM webhook_log
+        WHERE outcome = 'rejected'
+          AND id NOT IN (
+            SELECT id FROM webhook_log WHERE outcome = 'rejected' ORDER BY id DESC LIMIT ?
+          )`,
+    ).run(WEBHOOK_REJECTED_KEEP);
+    return;
+  }
+  db.prepare(
+    `DELETE FROM webhook_log
+      WHERE outcome != 'rejected'
+        AND id NOT IN (
+          SELECT id FROM webhook_log WHERE outcome != 'rejected' ORDER BY id DESC LIMIT ?
+        )`,
+  ).run(WEBHOOK_LOG_KEEP);
 }
 
 export function listWebhookLogs(db: SqliteDb, limit = 80): WebhookLogEntry[] {

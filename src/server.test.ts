@@ -8,6 +8,7 @@ import type { Config } from "./config.js";
 import {
   completeIssueRefineJob,
   enqueueIssueRefineJob,
+  insertWebhookLog,
   getForgeCredential,
   getSetting,
   setSetting,
@@ -1962,5 +1963,52 @@ describe("refine tab", () => {
     const own = await instance.app.request(`/refine/${other}`, { headers: { Cookie: cookie } });
     expect(own.status).toBe(200);
     expect(await own.text()).toContain("Cart secret title");
+  });
+
+  it("opens the requested webhook even when it is outside the recent list", async () => {
+    const instance = app();
+    const oldest = insertWebhookLog(instance.db, {
+      at: "2026-01-01T00:00:00Z",
+      forge: "github",
+      outcome: "ignored",
+      reason: "mention",
+      detail: "OLDEST-DELIVERY-SENTENCE",
+      title: "Old lamp",
+      owner: "acme",
+      name: "box",
+      issueNumber: 1,
+    });
+    for (let i = 0; i < 85; i++) {
+      insertWebhookLog(instance.db, {
+        at: "2026-01-02T00:00:00Z",
+        forge: "github",
+        outcome: "ignored",
+        reason: "mention",
+        detail: `newer delivery ${i}`,
+        title: `Newer ${i}`,
+        owner: "acme",
+        name: "box",
+        issueNumber: i + 2,
+      });
+    }
+    const anon = await instance.app.request(`/refine/log/${oldest}`, { redirect: "manual" });
+    expect(anon.status).toBe(302);
+    expect(anon.headers.get("location")).toContain("/login");
+
+    const loggedIn = await login(instance.app);
+    const cookie = cookieLine(loggedIn).split(";")[0];
+    const missing = await instance.app.request("/refine/log/99999", { headers: { Cookie: cookie } });
+    expect(missing.status).toBe(404);
+
+    const page = await instance.app.request(`/refine/log/${oldest}`, { headers: { Cookie: cookie } });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("OLDEST-DELIVERY-SENTENCE");
+    expect(html).toContain(`href="/refine/log/${oldest}" aria-current="page"`);
+
+    const home = await instance.app.request("/refine", { headers: { Cookie: cookie } });
+    const homeHtml = await home.text();
+    expect(homeHtml).toContain("newer delivery 84");
+    expect(homeHtml).not.toContain("OLDEST-DELIVERY-SENTENCE");
   });
 });

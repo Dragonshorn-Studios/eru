@@ -973,7 +973,12 @@ export function refinePage(
   logs: WebhookLogEntry[] = [],
   focusLogId?: number,
 ): string {
-  const focusLog = logs.find((entry) => entry.id === focusLogId) ?? (logs.length > 0 && focusId === undefined ? logs[0] : undefined);
+  const focusLog =
+    focusLogId !== undefined
+      ? logs.find((entry) => entry.id === focusLogId)
+      : logs.length > 0 && focusId === undefined
+        ? logs[0]
+        : undefined;
   const focus = jobs.find((job) => job.id === focusId) ?? (focusLog ? undefined : jobs[0]);
   let article: string;
   if (focusLog) {

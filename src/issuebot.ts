@@ -199,7 +199,11 @@ export interface WebhookAck {
 }
 
 /** Operator sentence. No issue body and no webhook secret. */
-export function explainWebhookDecision(reason: string, facts: WebhookFacts = emptyWebhookFacts()): string {
+export function explainWebhookDecision(
+  reason: string,
+  facts: WebhookFacts = emptyWebhookFacts(),
+  forge = "",
+): string {
   const where = facts.owner && facts.name ? `${facts.owner}/${facts.name}` : "this repository";
   const action = clipFact(facts.action) || "unknown";
   const association = clipFact(facts.association) || "unknown";
@@ -208,11 +212,16 @@ export function explainWebhookDecision(reason: string, facts: WebhookFacts = emp
       return `Queued. The issue mentions @eru-issue-bot and ${where} is connected.`;
     case "duplicate":
       return "Ignored. This issue is already queued.";
-    case "unconnected":
-      return `Ignored. ${where} is not connected in Eru. Connect the repo, then open or edit an issue that mentions @eru-issue-bot.`;
+    case "unconnected": {
+      const again = forge === FORGE_GITLAB ? "open an issue" : "open or edit an issue";
+      return `Ignored. ${where} is not connected in Eru. Connect the repo, then ${again} that mentions @eru-issue-bot.`;
+    }
     case "mention":
       return "Ignored. Neither the title nor the body mentions @eru-issue-bot. The GitHub App name is not the mention.";
     case "action":
+      if (forge === FORGE_GITLAB) {
+        return `Ignored. The action was “${action}”. Eru rewrites a GitLab issue when it is opened and mentions @eru-issue-bot.`;
+      }
       return `Ignored. The action was “${action}”. Eru rewrites an issue when it is opened or edited and mentions @eru-issue-bot.`;
     case "author":
       return `Ignored. GitHub author association was ${association}, not owner, member, or collaborator.`;
@@ -563,7 +572,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     jobId?: number | null;
   }): WebhookAck {
     const facts = row.facts ?? emptyWebhookFacts();
-    const detail = explainWebhookDecision(row.reason, facts).slice(0, 500);
+    const detail = explainWebhookDecision(row.reason, facts, row.forge).slice(0, 500);
     const repo =
       facts.owner && facts.name ? `${facts.owner.slice(0, 200)}/${facts.name.slice(0, 200)}` : null;
     const event = clipFact(row.event ?? "") || null;

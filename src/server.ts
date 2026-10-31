@@ -512,7 +512,9 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const id = Number(c.req.param("id"));
     const entry = Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
     if (!entry) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), refineCatches(db), undefined, listWebhookLogs(db), id));
+    const listed = listWebhookLogs(db);
+    const logs = listed.some((row) => row.id === entry.id) ? listed : [entry, ...listed];
+    return html(c, refinePage(appModel(c), refineCatches(db), undefined, logs, id));
   });
   app.get("/refine/:id", (c) => {
     const jobs = refineCatches(db);
