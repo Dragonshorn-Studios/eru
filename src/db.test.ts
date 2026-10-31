@@ -58,7 +58,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(11);
+    expect(migrations.n).toBe(12);
     again.close();
   });
 
@@ -103,7 +103,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(11);
+    expect(migrations.n).toBe(12);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -112,7 +112,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(11);
+    expect(after.n).toBe(12);
     legacy.close();
   });
 });
@@ -330,6 +330,7 @@ describe("issue refine jobs", () => {
     expect(stored.outcome).toBe("agent-ready");
     expect(stored.refined).toContain("The lamp.");
     expect(stored.why).toContain("agent-ready");
+    expect(stored.note).toBeNull();
 
     const githubHits = listIssueRefineJobsForRepo(db, { forge: "github", owner: "acme", name: "box", origin: "" });
     expect(githubHits.map((row) => row.id)).toEqual([cased, github]);

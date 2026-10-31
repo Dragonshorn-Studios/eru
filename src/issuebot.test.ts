@@ -3,15 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   enqueueIssueRefineJob,
+  getPrimaryRepo,
   listIssueRefineJobs,
   listWebhookLogs,
   openDb,
+  upsertPage,
   WEBHOOK_REJECTED_KEEP,
   upsertConnectedRepo,
 } from "./db.js";
 import {
   COMMENT_COMPLETE,
   COMMENT_FAILED,
+  forgeComment,
   COMMENT_NEEDS_INFO,
   GITHUB_ISSUE_BODY_MAX,
   ISSUE_BOT_MARKER,
@@ -372,6 +375,13 @@ describe("refined body", () => {
     expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
     expect(parseRefinedMarkdown("sorry").ok).toBe(false);
+    const withNote = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\nMailbox is in the map. OAuthToken is not.\n`);
+    expect(withNote.ok).toBe(true);
+    if (withNote.ok) {
+      expect(withNote.note).toBe("Mailbox is in the map. OAuthToken is not.");
+      expect(withNote.text).not.toContain("## Eru");
+      expect(withNote.text).not.toContain("OAuthToken");
+    }
   });
 
   it("truncates a long original so the composed body stays under GitHub's limit", () => {
@@ -685,6 +695,7 @@ describe("issue refine worker", () => {
     expect(job.outcome).toBe("agent-ready");
     expect(job.refined).toContain("## Problem");
     expect(job.why).toContain("agent-ready");
+    expect(job.note).toContain("no map yet");
     expect(listWebhookLogs(db).find((entry) => entry.jobId === job.id)).toMatchObject({
       outcome: "agent-ready",
       reason: "agent-ready",
@@ -694,12 +705,40 @@ describe("issue refine worker", () => {
     const patched = (patch?.body as { body: string }).body;
     expect(patched).toContain("<summary>Original</summary>");
     expect(patched).toContain(original.trim());
+    expect(patched).not.toContain("no map yet");
     expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/reactions"))).toBe(true);
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_REFINED))).toBe(true);
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
+    expect(comment?.body).toEqual({
+      body: forgeComment(COMMENT_COMPLETE, "I could not check the names. This repo has no map yet."),
+    });
+  });
+
+  it("posts Eru's name check and keeps it out of the issue body when the map exists", async () => {
+    const original = "Refresh OAuthToken in the hallway.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: original, calls }),
+      refine: async () => `${refinedTemplate("")}\n## Eru\nMailbox is in the map. OAuthToken is not.\n`,
+    });
+    const repoId = getPrimaryRepo(db)!.id;
+    upsertPage(db, repoId, { slug: "mail", title: "Mail", body: "Mailboxes live in the connections table.", sortOrder: 0 }, "t");
+    await postWebhook(app, openedPayload({ body: original }));
+    await bot.processDue();
+    const job = listIssueRefineJobs(db)[0];
+    expect(job.note).toBe("Mailbox is in the map. OAuthToken is not.");
+    const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
+    const patched = (patch?.body as { body: string }).body;
+    const brief = patched.slice(0, patched.indexOf("<details>"));
+    expect(brief).not.toContain("OAuthToken");
+    expect(brief).not.toContain("## Eru");
+    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comment?.body).toEqual({
+      body: forgeComment(COMMENT_COMPLETE, "Mailbox is in the map. OAuthToken is not."),
+    });
+    expect(String((comment?.body as { body: string }).body)).toContain("Curious about this one");
   });
 
   it("labels needs-info when Open questions is not empty", async () => {
@@ -714,7 +753,9 @@ describe("issue refine worker", () => {
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(JSON.stringify(labelAdds)).toContain(LABEL_NEEDS_INFO);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({ body: COMMENT_NEEDS_INFO });
+    expect(comment?.body).toEqual({
+      body: forgeComment(COMMENT_NEEDS_INFO, "I could not check the names. This repo has no map yet."),
+    });
   });
 
   it("finishes labels and comment when the live body already carries the marker", async () => {

@@ -276,6 +276,16 @@ a:hover { color: var(--ink); }
   color: var(--moss);
   margin: 0 0 1rem;
 }
+a.issue-link {
+  color: var(--ink);
+  text-decoration: none;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mint) 70%, white);
+  border: 1px solid color-mix(in srgb, var(--moss) 35%, white);
+}
+a.issue-link:hover { background: color-mix(in srgb, var(--lavender) 65%, white); }
+.eru-note { margin: 0.45rem 0 0.75rem; line-height: 1.45; }
 .cmd {
   font-family: var(--font-sans);
   font-size: 0.95rem;

@@ -922,18 +922,65 @@ function refineStory(job: IssueRefineJob, embed = false): string {
     : "";
   const head = embed
     ? `<p class="refine-kicker">Brief</p>`
-    : `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
+    : `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · ${issueNumberLink(job)}</p>
         <h2 class="page-title">${escapeHtml(job.title.trim() || "Untitled issue")}</h2>
         <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>`;
+  const note = job.note?.trim()
+    ? `<p class="refine-kicker">Eru</p><p class="eru-note">${escapeHtml(job.note.trim())}</p>`
+    : "";
   return `${head}
         <div class="refine-verdict ${tone.tone}">
           <p class="refine-kicker">Why</p>
           <p>${escapeHtml(refineWhy(job))}</p>
+          ${note}
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
           ${error}
         </div>
         ${brief}
         ${original}`;
+}
+
+function issueHref(target: {
+  forge: string;
+  origin: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+}): string | undefined {
+  const { forge, owner, name, issueNumber } = target;
+  if (!owner || !name || !Number.isInteger(issueNumber) || issueNumber < 1) return undefined;
+  const ownerPath = owner
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const repo = encodeURIComponent(name);
+  if (forge === "gitlab" || forge === "forgejo") {
+    let origin: URL;
+    try {
+      origin = new URL(target.origin);
+    } catch {
+      return undefined;
+    }
+    if (origin.protocol !== "https:" && origin.protocol !== "http:") return undefined;
+    const base = `${origin.origin}${origin.pathname.replace(/\/$/, "")}`;
+    const kind = forge === "gitlab" ? "/-/issues/" : "/issues/";
+    return `${base}/${ownerPath}/${repo}${kind}${issueNumber}`;
+  }
+  return `https://github.com/${ownerPath}/${repo}/issues/${issueNumber}`;
+}
+
+function issueNumberLink(target: {
+  forge: string;
+  origin: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+}): string {
+  const label = `#${target.issueNumber}`;
+  const href = issueHref(target);
+  if (!href) return escapeHtml(label);
+  return `<a class="issue-link" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
 }
 
 function logTone(entry: WebhookLogEntry): { tone: string; label: string } {
@@ -985,7 +1032,7 @@ function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined
         </div>`;
   return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(tone.label)}</p>
         <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
-        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
+        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · ${issueNumberLink({ forge: entry.forge, origin: entry.origin, owner: entry.owner, name: entry.name, issueNumber: entry.issueNumber })}` : ""} · ${escapeHtml(entry.at)}</p>
         ${verdict}
         ${job ? refineStory(job, true) : ""}`;
 }
