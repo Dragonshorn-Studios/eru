@@ -2,8 +2,8 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { opencodeModel, opencodeRunArgs, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
-import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import { opencodeModel, opencodeTimeout, runOpenCode, type OpenCodeOptions } from "./opencode.js";
+import { outputTail } from "./proc.js";
 import { markWorkspaceRoot } from "./util.js";
 
 const execFileP = promisify(execFile);
@@ -48,15 +48,13 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // the nearest .git ancestor of the temp dir and map that repo instead.
       await markWorkspaceRoot(workdir);
       const runModel = model ?? opencodeModel(opts);
-      // `run` first, then `--standalone`: a leading `--standalone` is the
-      // default TUI on current CLIs and exits with command help. `--` keeps
-      // the prompt from being swallowed as flags.
-      const args = opencodeRunArgs(refreshPrompt(repoLabel, ref), runModel);
       const timeoutMs = opencodeTimeout(opts);
       console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${timeoutMs}ms)`);
-      const child = await runChild(opts.bin, args, {
+      const child = await runOpenCode({
+        bin: opts.bin,
+        prompt: refreshPrompt(repoLabel, ref),
+        model: runModel,
         cwd: workdir,
-        env: opencodeChildEnv(),
         timeoutMs,
         maxBuffer: MAX_OUTPUT,
       });

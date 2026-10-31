@@ -35,7 +35,7 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_PORT` | `3000` | Container port (and host port in Compose) |
 | `ERU_SQLITE_PATH` | `./data/eru.sqlite` | SQLite file location |
 | `ERU_UI_USER` | — | GitHub login for the top-bar pill + avatar (also settable on `/config`) |
-| `ERU_OPENCODE_BIN` | `opencode` | Path to the OpenCode CLI; Compose defaults to `/opt/opencode/.opencode/bin/opencode`. Ask also spawns a supervised `opencode serve` on loopback (random port + per-boot basic-auth password, proxied at `/ask/oc/*`) — it never opens a second listening port |
+| `ERU_OPENCODE_BIN` | `opencode` | Path to the OpenCode CLI; Compose defaults to `/opt/opencode/.opencode/bin/opencode`. Eru reads `--version` and uses `run` on 1.x or `run --standalone` on 2.x. Ask also spawns a supervised `opencode serve` on loopback (random port + per-boot basic-auth password, proxied at `/ask/oc/*`) — it never opens a second listening port |
 | `ERU_OPENCODE_TIMEOUT_MS` | `120000` | Timeout for OpenCode invocations (also settable on `/config`) |
 | `ERU_OPENCODE_ASK_MODEL` | — | `provider/model` for Ask |
 | `ERU_OPENCODE_MAP_MODEL` | — | `provider/model` for map generation |

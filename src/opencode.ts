@@ -1,4 +1,4 @@
-import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
+import { opencodeChildEnv, outputTail, runChild, type ChildResult } from "./proc.js";
 
 export const ASK_MAX_QUESTION = 2000;
 const MAX_OUTPUT = 4 * 1024 * 1024;
@@ -19,17 +19,120 @@ export function opencodeModel(opts: Pick<OpenCodeOptions, "model">): string | un
   return typeof opts.model === "function" ? opts.model() : opts.model;
 }
 
+/** 1.x has no `--standalone`. 2.x rejects a shared service unless that flag is on `run`. */
+export type OpenCodeGeneration = 1 | 2;
+
+export interface OpenCodeVersion {
+  generation: OpenCodeGeneration;
+  version: string;
+}
+
+const generationCache = new Map<string, OpenCodeGeneration>();
+
+/** Test hook. Detection is cached for the process so map runs do not re-probe. */
+export function clearOpenCodeGenerationCache(): void {
+  generationCache.clear();
+}
+
 /**
- * OpenCode 2: `run` is the non-interactive command. `--standalone` belongs on
- * that command. Putting it first is parsed as the default TUI, which exits
- * with command help (`--no-replay`, `--replay-limit`) instead of mapping.
- * `--` keeps the prompt from being eaten as flags.
+ * Accept only a version line (`1.2.3`, `opencode 2.0.0`). Help pages mention
+ * other numbers and must not decide the generation.
  */
-export function opencodeRunArgs(prompt: string, model?: string): string[] {
-  const args = ["run", "--standalone"];
+export function parseOpenCodeVersion(text: string): OpenCodeVersion | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.trim().match(/^(?:opencode\s+)?v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/i);
+    if (!match) continue;
+    const major = Number(match[1]);
+    const version = `${match[1]}.${match[2]}.${match[3]}`;
+    if (major >= 2) return { generation: 2, version };
+    if (major === 0 || major === 1) return { generation: 1, version };
+  }
+  return undefined;
+}
+
+/**
+ * 1.x: `opencode run [-m model] -- prompt`.
+ * 2.x: `opencode run --standalone [-m model] -- prompt`.
+ * `--standalone` before `run` is the default TUI and exits with command help.
+ * `--` keeps the prompt from being swallowed as flags.
+ */
+export function opencodeRunArgs(prompt: string, model: string | undefined, generation: OpenCodeGeneration): string[] {
+  const args = ["run"];
+  if (generation === 2) args.push("--standalone");
   if (model) args.push("-m", model);
   args.push("--", prompt);
   return args;
+}
+
+export function opencodeModelsArgs(generation: OpenCodeGeneration): string[] {
+  return generation === 2 ? ["models", "--standalone"] : ["models"];
+}
+
+type Probe = typeof runChild;
+
+async function probeGeneration(bin: string, run: Probe, timeoutMs: number): Promise<OpenCodeGeneration> {
+  const cached = generationCache.get(bin);
+  if (cached) return cached;
+  const limits = { env: opencodeChildEnv(), timeoutMs, maxBuffer: 256_000 };
+  try {
+    const version = await run(bin, ["--version"], limits);
+    if (!version.timedOut) {
+      const parsed = parseOpenCodeVersion(`${version.stdout}\n${version.stderr}`);
+      if (parsed) {
+        generationCache.set(bin, parsed.generation);
+        console.log(`opencode: ${bin} is ${parsed.version} (${parsed.generation}.x)`);
+        return parsed.generation;
+      }
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw err;
+  }
+  try {
+    const help = await run(bin, ["run", "--help"], limits);
+    if (!help.timedOut) {
+      const generation: OpenCodeGeneration = /(?:^|\s)--standalone(?:\s|$)/.test(`${help.stdout}\n${help.stderr}`) ? 2 : 1;
+      generationCache.set(bin, generation);
+      console.log(`opencode: ${bin} detected as ${generation}.x from run --help`);
+      return generation;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw err;
+  }
+  return 1;
+}
+
+export async function detectOpenCodeGeneration(bin: string, timeoutMs = 8_000, run: Probe = runChild): Promise<OpenCodeGeneration> {
+  return probeGeneration(bin, run, timeoutMs);
+}
+
+/** Run a prompt. If the chosen generation prints CLI help, try the other once. */
+export async function runOpenCode(
+  input: {
+    bin: string;
+    prompt: string;
+    model?: string;
+    cwd?: string;
+    timeoutMs: number;
+    maxBuffer?: number;
+  },
+  run: Probe = runChild,
+): Promise<ChildResult> {
+  const probeTimeout = Math.min(input.timeoutMs, 8_000);
+  let generation = await probeGeneration(input.bin, run, probeTimeout);
+  const once = (gen: OpenCodeGeneration) =>
+    run(input.bin, opencodeRunArgs(input.prompt, input.model, gen), {
+      cwd: input.cwd,
+      env: opencodeChildEnv(),
+      timeoutMs: input.timeoutMs,
+      maxBuffer: input.maxBuffer,
+    });
+  const first = await once(generation);
+  const dumped = `${first.stderr}\n${first.stdout}`;
+  if (first.code === 0 || first.timedOut || !isCliHelpDump(dumped)) return first;
+  const flipped: OpenCodeGeneration = generation === 2 ? 1 : 2;
+  console.log(`opencode: ${generation}.x run printed command help, retrying as ${flipped}.x`);
+  generationCache.set(input.bin, flipped);
+  return once(flipped);
 }
 
 /** Yargs help is not an operator-facing reason. */
@@ -77,7 +180,8 @@ export function createModelDiscovery(opts: Pick<OpenCodeOptions, "bin" | "timeou
       if (!inflight) {
         inflight = (async () => {
           try {
-            const child = await runChild(opts.bin, ["models"], {
+            const generation = await detectOpenCodeGeneration(opts.bin, Math.min(opencodeTimeout(opts), 8_000));
+            const child = await runChild(opts.bin, opencodeModelsArgs(generation), {
               env: opencodeChildEnv(),
               timeoutMs: Math.min(opencodeTimeout(opts), 30_000),
               maxBuffer: MAX_OUTPUT,

@@ -34,7 +34,7 @@ export interface OpenCodeServe {
   stop(): Promise<void>;
 }
 
-const HEALTH_PATHS = ["/api/health", "/api/info"];
+const HEALTH_PATHS = ["/api/health", "/api/info", "/global/health"];
 const HEALTH_POLL_MS = 250;
 const DEFAULT_HEALTH_TIMEOUT_MS = 15_000;
 const RESTART_DELAY_MS = 1_000;

@@ -21,7 +21,7 @@ Eru is named after Chitanda Eru from the anime *Hyouka*. The catchphrase above i
 
 ## How it works
 
-Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a GitHub App or PAT, or a GitLab/Forgejo API token set on `/config`. Ask and Refresh shell out to the OpenCode CLI (2.0 `run --standalone`) inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Model output is untrusted text and is escaped before rendering.
+Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a GitHub App or PAT, or a GitLab/Forgejo API token set on `/config`. Ask and Refresh shell out to the OpenCode CLI inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Eru reads `opencode --version`: 1.x is `opencode run`, 2.x is `opencode run --standalone`. Model output is untrusted text and is escaped before rendering.
 
 ```
 GitHub / GitLab / Forgejo ──► forge adapter ──► tarball ──► OpenCode ──► map pages ──► SQLite ──► Brief / Ask UI
