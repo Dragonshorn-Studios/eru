@@ -25,6 +25,7 @@ import {
   LABEL_REFINED,
   composeIssueBody,
   createIssueBot,
+  type PrepareIssueSource,
   explainWebhookDecision,
   hasIssueBotMarker,
   openQuestionsEmpty,
@@ -208,7 +209,8 @@ function json(status: number, body: unknown): Response {
 
 function testApp(opts: {
   fetchImpl?: FetchLike;
-  refine?: (input: { title: string; body: string }) => Promise<string>;
+  refine?: (input: { title: string; body: string; checkout?: string }) => Promise<string>;
+  prepareSource?: PrepareIssueSource;
   now?: () => number;
   gitlab?: Config["gitlab"];
   forgejo?: Config["forgejo"];
@@ -239,6 +241,7 @@ function testApp(opts: {
     forgejo: config.forgejo,
     fetchImpl: opts.fetchImpl ?? (async () => json(500, {})),
     refine: opts.refine ?? (async () => refinedTemplate()),
+    prepareSource: opts.prepareSource,
     now: opts.now,
     backoffMs: () => 0,
   });
@@ -739,6 +742,39 @@ describe("issue refine worker", () => {
       body: forgeComment(COMMENT_COMPLETE, "Mailbox is in the map. OAuthToken is not."),
     });
     expect(String((comment?.body as { body: string }).body)).toContain("Curious about this one");
+  });
+
+  it("reads a checkout when one is prepared, and still cleans it up", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    let cleaned = false;
+    let saw = "";
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: original, calls }),
+      prepareSource: async () => ({
+        ok: true,
+        source: {
+          dir: "/tmp/eru-checkout",
+          pages: [],
+          mapped: true,
+          cleanup: async () => {
+            cleaned = true;
+          },
+        },
+      }),
+      refine: async (input) => {
+        saw = input.checkout ?? "";
+        return `${refinedTemplate("")}\n## Eru\nLamp is in the code. Widget is not.\n`;
+      },
+    });
+    await postWebhook(app, openedPayload({ body: original }));
+    await bot.processDue();
+    expect(saw).toBe("/tmp/eru-checkout");
+    expect(cleaned).toBe(true);
+    expect(listIssueRefineJobs(db)[0].note).toBe("Lamp is in the code. Widget is not.");
+    const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
+    const brief = String((patch?.body as { body: string }).body).split("<details>")[0];
+    expect(brief).not.toContain("Widget");
   });
 
   it("labels needs-info when Open questions is not empty", async () => {

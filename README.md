@@ -88,7 +88,7 @@ On GitHub this is the same App as mapping/login. A dedicated `ERU_ISSUE_BOT_*` A
 5. Subscribe to events: **Issues**.
 6. Install the App on the selected repositories, then Connect each one in Eru. Issue rewrite only runs on connected repos. Note the App ID, generate a PEM (mode 400), copy the client id/secret, and look up the bot user id at `https://api.github.com/users/<app-slug>%5Bbot%5D`.
 
-The bot uses the same OpenCode model as Ask (`ERU_OPENCODE_ASK_MODEL` / saved `/config` Ask model / `ERU_OPENCODE_MODEL`). Nagato's "Refine with Eru" checkbox only needs to append `@eru-issue-bot` on its own line at the end of the issue body.
+The bot uses the same OpenCode model as Ask (`ERU_OPENCODE_ASK_MODEL` / saved `/config` Ask model / `ERU_OPENCODE_MODEL`). It reads a checkout of the connected repo (read, glob, and grep only) so it can fill in what the issue left out. If that repo has no map yet, Eru creates one first. Nagato's "Refine with Eru" checkbox only needs to append `@eru-issue-bot` on its own line at the end of the issue body.
 
 ## Updating the OpenCode CLI
 
