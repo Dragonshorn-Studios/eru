@@ -52,7 +52,7 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_ISSUE_BOT_PRIVATE_KEY` / `ERU_ISSUE_BOT_PRIVATE_KEY_FILE` | — | Optional dedicated issue-bot PEM |
 | `ERU_ISSUE_BOT_WEBHOOK_SECRET` | — | Dedicated webhook HMAC secret when a dedicated App is set; otherwise an alias for `ERU_GITHUB_APP_WEBHOOK_SECRET` |
 | `ERU_ISSUE_BOT_USER_ID` | — | Dedicated bot user id when a dedicated App is set; otherwise an alias for `ERU_GITHUB_APP_BOT_USER_ID` |
-| `ERU_TRUSTED_BOT_IDS` | — | Comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER/MEMBER/COLLABORATOR |
+| `ERU_TRUSTED_BOT_IDS` | — | Comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER/MEMBER/COLLABORATOR. GitHub App bots (`type` Bot, or a `[bot]` login) are already accepted |
 | `ERU_ISSUE_BOT_HOURLY_CAP` | `20` | Max refine jobs enqueued per owner/repo per hour |
 | `ERU_GITLAB_URL` / `ERU_GITLAB_TOKEN` | — | Self-hosted GitLab origin + PAT (also settable on `/config`) |
 | `ERU_GITLAB_WEBHOOK_SECRET` | — | Token compared to `X-Gitlab-Token` on `POST /webhooks/gitlab` |

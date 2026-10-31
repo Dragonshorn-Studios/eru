@@ -87,6 +87,10 @@ function openedPayload(opts: {
   body?: string;
   association?: string;
   senderId?: number;
+  senderType?: string;
+  senderLogin?: string;
+  issueUserType?: string;
+  issueUserLogin?: string;
   action?: string;
   number?: number;
   title?: string;
@@ -97,7 +101,7 @@ function openedPayload(opts: {
   return {
     action: opts.action ?? "opened",
     installation: { id: opts.installationId ?? 555 },
-    sender: { id: opts.senderId ?? OWNER_ID, login: "owner" },
+    sender: { id: opts.senderId ?? OWNER_ID, login: opts.senderLogin ?? "owner", type: opts.senderType ?? "User" },
     repository: {
       name: opts.repo ?? "box",
       owner: { login: opts.owner ?? "acme" },
@@ -107,6 +111,9 @@ function openedPayload(opts: {
       title: opts.title ?? "The lights flicker",
       body: opts.body ?? "The hallway lamp is dead.\n\n@eru-issue-bot\n",
       author_association: opts.association ?? "OWNER",
+      ...(opts.issueUserType || opts.issueUserLogin
+        ? { user: { login: opts.issueUserLogin ?? "nagato[bot]", type: opts.issueUserType ?? "Bot" } }
+        : {}),
     },
   };
 }
@@ -305,6 +312,30 @@ describe("enqueue filter", () => {
     ).toBe(true);
   });
 
+  it("enqueues a GitHub App bot when author_association is NONE", () => {
+    const nagato = openedPayload({
+      association: "NONE",
+      senderId: 4242,
+      senderType: "Bot",
+      senderLogin: "nagato[bot]",
+    });
+    expect(shouldEnqueueIssue(nagato, opts).enqueue).toBe(true);
+    const byAuthor = openedPayload({
+      association: "NONE",
+      senderId: STRANGER_ID,
+      senderType: "User",
+      senderLogin: "editor",
+      issueUserType: "Bot",
+      issueUserLogin: "nagato[bot]",
+    });
+    expect(shouldEnqueueIssue(byAuthor, opts).enqueue).toBe(true);
+    const stranger = shouldEnqueueIssue(
+      openedPayload({ association: "NONE", senderId: STRANGER_ID, senderType: "User", senderLogin: "nagato-bot" }),
+      opts,
+    );
+    expect(stranger).toEqual({ enqueue: false, reason: "author" });
+  });
+
   it("skips issues that already carry the marker", () => {
     expect(
       shouldEnqueueIssue(openedPayload({ body: `${ISSUE_BOT_MARKER}\n\n@eru-issue-bot\n` }), opts),
@@ -315,7 +346,7 @@ describe("enqueue filter", () => {
   });
 
   it("tells GitLab that only an open is rewritten", () => {
-    const facts = { owner: "acme", name: "box", issueNumber: 12, title: "", action: "update", association: "" };
+    const facts = { owner: "acme", name: "box", issueNumber: 12, title: "", action: "update", association: "", sender: "" };
     expect(explainWebhookDecision("action", facts, "gitlab")).toContain("when it is opened");
     expect(explainWebhookDecision("action", facts, "gitlab")).not.toContain("edited");
     expect(explainWebhookDecision("action", facts, "github")).toContain("opened or edited");
@@ -446,6 +477,28 @@ describe("POST /webhooks/github", () => {
       } as RequestInit),
     );
     expect(res.status).toBe(413);
+  });
+
+  it("enqueues an issue opened by a GitHub App bot", async () => {
+    const { app, db } = testApp({});
+    const res = await postWebhook(
+      app,
+      openedPayload({
+        association: "NONE",
+        senderId: 4242,
+        senderType: "Bot",
+        senderLogin: "nagato[bot]",
+      }),
+      { "X-GitHub-Delivery": "d-nagato" },
+    );
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({
+      outcome: "queued",
+      reason: "queued",
+      repo: "acme/box",
+      issue: 12,
+    });
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
   });
 
   it("does not enqueue a stranger, own bot, or marker; does enqueue owner and allowlisted bot", async () => {

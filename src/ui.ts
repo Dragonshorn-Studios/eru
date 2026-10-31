@@ -108,11 +108,13 @@ const TABS = [
   { key: "brief", href: "/", label: "Brief" },
   { key: "ask", href: "/ask", label: "Ask" },
   { key: "refine", href: "/refine", label: "Refine" },
+  { key: "log", href: "/log", label: "Log" },
 ] as const;
 
 function isTabActive(key: string, path: string): boolean {
   if (key === "ask") return path === "/ask";
   if (key === "refine") return path === "/refine" || path.startsWith("/refine/");
+  if (key === "log") return path === "/log" || path.startsWith("/log/");
   return path === "/" || path.startsWith("/brief");
 }
 
@@ -938,7 +940,7 @@ function logTone(entry: WebhookLogEntry): { tone: string; label: string } {
   return { tone: "is-open", label: "ignored" };
 }
 
-function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined): string {
+function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hrefFor: (id: number) => string): string {
   const items = logs
     .map((entry) => {
       const tone = logTone(entry);
@@ -946,7 +948,7 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined): s
       const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : entry.forge;
       const num = entry.issueNumber ? `#${entry.issueNumber}` : entry.event || entry.outcome;
       const title = entry.detail || entry.title.trim() || entry.outcome;
-      return `<li><a href="/refine/log/${entry.id}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
+      return `<li><a href="${hrefFor(entry.id)}"${current}><span class="refine-num">${escapeHtml(num)}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span><span class="refine-where">${escapeHtml(where)}</span></a></li>`;
     })
     .join("");
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
@@ -972,31 +974,40 @@ export function refinePage(
   focusId?: number,
   logs: WebhookLogEntry[] = [],
   focusLogId?: number,
+  scope: "repo" | "all" = "repo",
 ): string {
+  const all = scope === "all";
   const focusLog =
     focusLogId !== undefined
       ? logs.find((entry) => entry.id === focusLogId)
       : logs.length > 0 && focusId === undefined
         ? logs[0]
         : undefined;
-  const focus = jobs.find((job) => job.id === focusId) ?? (focusLog ? undefined : jobs[0]);
+  const focus = jobs.find((job) => job.id === focusId) ?? (focusLog || all ? undefined : jobs[0]);
+  const repoName = model.repo ? `${model.repo.owner}/${model.repo.name}` : "";
   let article: string;
   if (focusLog) {
     const job = focusLog.jobId ? jobs.find((item) => item.id === focusLog.jobId) : undefined;
     article = webhookLogStory(focusLog, job);
+  } else if (all) {
+    article = `<h2 class="page-title">No webhooks yet</h2>
+        <p class="page-lead">Every delivery Eru receives is listed here, for every repository, including the ones it ignores.</p>`;
   } else if (!model.repo && !focus) {
     article = `<h2 class="page-title">No repo connected</h2>
-        <p class="page-lead">Webhook decisions show up here once a repository is connected. <a href="/connect">Connect a repo</a>.</p>`;
+        <p class="page-lead">This tab lists webhooks for the selected repo. <a href="/connect">Connect a repo</a>, or open <a href="/log">all webhooks</a>.</p>`;
   } else if (!focus) {
-    article = `<h2 class="page-title">No webhooks yet</h2>
-        <p class="page-lead">Every delivery Eru accepts is listed here, including the ones it ignores. Mention <code>@eru-issue-bot</code> in the issue title or body — the GitHub App name is not the mention — on a repo that is connected.</p>`;
+    article = `<h2 class="page-title">No webhooks for this repo</h2>
+        <p class="page-lead">Deliveries for ${repoName ? `<span class="path">${escapeHtml(repoName)}</span>` : "the selected repo"} show up here. Mention <code>@eru-issue-bot</code> in the issue title or body — the GitHub App name is not the mention. Other repositories are on <a href="/log">all webhooks</a>.</p>`;
   } else {
     article = refineStory(focus);
   }
-  const list = logs.length > 0 ? webhookLogList(logs, focusLog?.id) : refineCatchList(jobs, focus?.id);
-  const repoLine = `<p class="kicker">Webhook log</p><p class="refine-repo">every delivery, and why Eru did or did not rewrite</p>`;
+  const hrefFor = (id: number) => (all ? `/log/${id}` : `/refine/log/${id}`);
+  const list = logs.length > 0 ? webhookLogList(logs, focusLog?.id, hrefFor) : all ? "" : refineCatchList(jobs, focus?.id);
+  const repoLine = all
+    ? `<p class="kicker">All webhooks</p><p class="refine-repo">every delivery, every repository</p><p class="refine-repo"><a href="/refine">This repo</a></p>`
+    : `<p class="kicker">This repo</p><p class="refine-repo">${repoName ? escapeHtml(repoName) : "no repo selected"}</p><p class="refine-repo"><a href="/log">All webhooks</a></p>`;
   return layout(
-    "Eru · Refine",
+    all ? "Eru · Log" : "Eru · Refine",
     `<body>
   <a class="skip" href="#main">Skip to content</a>
   <div class="shell">

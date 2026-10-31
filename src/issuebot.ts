@@ -173,10 +173,11 @@ export interface WebhookFacts {
   title: string;
   action: string;
   association: string;
+  sender: string;
 }
 
 export function emptyWebhookFacts(): WebhookFacts {
-  return { owner: "", name: "", issueNumber: null, title: "", action: "", association: "" };
+  return { owner: "", name: "", issueNumber: null, title: "", action: "", association: "", sender: "" };
 }
 
 function clipFact(value: string): string {
@@ -223,8 +224,11 @@ export function explainWebhookDecision(
         return `Ignored. The action was “${action}”. Eru rewrites a GitLab issue when it is opened and mentions @eru-issue-bot.`;
       }
       return `Ignored. The action was “${action}”. Eru rewrites an issue when it is opened or edited and mentions @eru-issue-bot.`;
-    case "author":
-      return `Ignored. GitHub author association was ${association}, not owner, member, or collaborator.`;
+    case "author": {
+      const who = clipFact(facts.sender);
+      const named = who ? ` for ${who}` : "";
+      return `Ignored. GitHub author association was ${association}${named}. Eru rewrites issues from an owner, member, collaborator, or a GitHub App bot.`;
+    }
     case "own-bot":
       return "Ignored. The sender is the issue bot, so refining it would loop.";
     case "marker":
@@ -257,7 +261,18 @@ export function githubWebhookFacts(payload: unknown): WebhookFacts {
   const owner = asRecord(repo?.owner);
   if (typeof owner?.login === "string") facts.owner = owner.login;
   if (typeof repo?.name === "string") facts.name = repo.name;
+  const sender = asRecord(body.sender);
+  if (typeof sender?.login === "string") facts.sender = sender.login;
   return facts;
+}
+
+/** GitHub sets type Bot and reserves the [bot] login suffix. A user cannot claim either. */
+export function isGithubBotAccount(account: Record<string, unknown> | undefined): boolean {
+  if (!account) return false;
+  const type = typeof account.type === "string" ? account.type : "";
+  if (type.toLowerCase() === "bot") return true;
+  const login = typeof account.login === "string" ? account.login : "";
+  return login.toLowerCase().endsWith("[bot]");
 }
 
 export function gitlabWebhookFacts(payload: unknown): WebhookFacts {
@@ -318,7 +333,8 @@ export function shouldEnqueueIssue(
 
   const association = typeof issue.author_association === "string" ? issue.author_association : "";
   const trusted = opts.trustedBotIds.includes(senderId);
-  if (!TRUSTED_ASSOCIATIONS.has(association) && !trusted) {
+  const bot = isGithubBotAccount(sender) || isGithubBotAccount(asRecord(issue.user));
+  if (!TRUSTED_ASSOCIATIONS.has(association) && !trusted && !bot) {
     return { enqueue: false, reason: "author" };
   }
 
