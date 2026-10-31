@@ -2037,7 +2037,9 @@ describe("refine tab", () => {
     expect(log.status).toBe(200);
     expect(logHtml).toContain("LAMP-ONLY-DELIVERY");
     expect(logHtml).toContain("newer delivery 84");
-    expect(logHtml).toContain('aria-current="page">Log');
+    expect(logHtml).toContain('class="pill pill-link" href="/log" aria-current="page">Log</a>');
+    expect(logHtml).toContain('class="pill pill-link" href="/config">Config</a>');
+    expect(logHtml).not.toContain('class="tab" href="/log"');
     const logDetail = await instance.app.request(`/log/${other}`, { headers: { Cookie: cookie } });
     expect(logDetail.status).toBe(200);
     expect(await logDetail.text()).toContain("LAMP-ONLY-DELIVERY");

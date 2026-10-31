@@ -95,6 +95,7 @@ function topbar(model: ChromeModel): string {
       ${addPill}
       ${mapped}
       <span class="grow"></span>
+      <a class="pill pill-link" href="/log"${model.path === "/log" || model.path.startsWith("/log/") ? ' aria-current="page"' : ""}>Log</a>
       <a class="pill pill-link" href="/config">Config</a>
       <span class="user-pill">
         ${model.user.avatarUrl ? `<img class="avatar" src="${escapeHtml(model.user.avatarUrl)}" alt="" width="24" height="24"/>` : `<span class="avatar avatar-mono" aria-hidden="true">${escapeHtml(model.user.name.slice(0, 2))}</span>`}
@@ -108,13 +109,11 @@ const TABS = [
   { key: "brief", href: "/", label: "Brief" },
   { key: "ask", href: "/ask", label: "Ask" },
   { key: "refine", href: "/refine", label: "Refine" },
-  { key: "log", href: "/log", label: "Log" },
 ] as const;
 
 function isTabActive(key: string, path: string): boolean {
   if (key === "ask") return path === "/ask";
   if (key === "refine") return path === "/refine" || path.startsWith("/refine/");
-  if (key === "log") return path === "/log" || path.startsWith("/log/");
   return path === "/" || path.startsWith("/brief");
 }
 

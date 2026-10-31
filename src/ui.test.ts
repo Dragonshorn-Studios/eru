@@ -15,7 +15,12 @@ describe("chrome copy", () => {
     expect(html).toContain("Brief");
     expect(html).toContain("Ask");
     expect(html).toContain("Refine");
-    expect(html).toContain('class="tab" href="/log">Log');
+    expect(html).toContain('class="pill pill-link" href="/log">Log</a>');
+    expect(html).toContain('class="pill pill-link" href="/config">Config</a>');
+    expect(html).not.toContain('class="tab" href="/log"');
+    const header = html.slice(html.indexOf("<header"), html.indexOf("</header>"));
+    expect(header.indexOf('href="/log"')).toBeGreaterThan(-1);
+    expect(header.indexOf('href="/log"')).toBeLessThan(header.indexOf('href="/config"'));
     expect(html).toContain("last mapped @main");
     expect(html).toContain('href="/ask"');
     expect(html).toContain("not a checkout job, not DeepWiki.com");
