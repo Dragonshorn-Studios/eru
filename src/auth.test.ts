@@ -34,6 +34,9 @@ describe("session helpers", () => {
     expect(safeNextPath("https://evil.test")).toBe("/");
     expect(safeNextPath("//evil.test")).toBe("/");
     expect(safeNextPath("/login")).toBe("/");
+    expect(safeNextPath("/brief/auth?ref=main")).toBe("/brief/auth?ref=main");
+    expect(safeNextPath("/%09/evil.test")).toBe("/");
+    expect(safeNextPath("/%0a/evil.test")).toBe("/");
   });
 
   it("keeps health, login, and an exact asset allowlist public", () => {
@@ -44,6 +47,7 @@ describe("session helpers", () => {
     expect(isPublicPath("/assets/apple-touch-icon.png")).toBe(true);
     expect(isPublicPath("/assets/eru.css")).toBe(true);
     expect(isPublicPath("/assets/htmx.min.js")).toBe(true);
+    expect(isPublicPath("/webhooks/github")).toBe(true);
     expect(isPublicPath("/assets/")).toBe(false);
     expect(isPublicPath("/assets/secret.css")).toBe(false);
     expect(isPublicPath("/assets/eru.css.bak")).toBe(false);

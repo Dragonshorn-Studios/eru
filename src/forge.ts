@@ -131,7 +131,7 @@ export async function verifyGithubRepo(
 export type TarballError = "invalid" | "notfound" | "auth" | "unreachable" | "toobig";
 export type TarballResult = { ok: true; data: Buffer } | { ok: false; error: TarballError };
 
-function forgeHeaders(token: string): Record<string, string> {
+export function forgeHeaders(token: string): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "User-Agent": "eru",
@@ -259,6 +259,8 @@ export interface GithubAppClient {
   installationId(): Promise<AppResult<string>>;
   /** Mint (or reuse a cached) installation access token. */
   installationToken(): Promise<AppResult<string>>;
+  /** Mint (or reuse a cached) token for a specific installation id. */
+  installationTokenFor(installationId: string): Promise<AppResult<string>>;
   /** Repositories the installation can read. */
   listRepos(): Promise<AppResult<AppRepo[]>>;
 }
@@ -268,7 +270,7 @@ export function createGithubAppClient(
   fetchImpl: FetchLike = fetch,
   apiBase: string = GITHUB_API_BASE,
 ): GithubAppClient {
-  let cachedToken: { token: string; expiresAtMs: number } | undefined;
+  const cachedTokens = new Map<string, { token: string; expiresAtMs: number }>();
 
   async function installationId(): Promise<AppResult<string>> {
     if (creds.installationId) return { ok: true, value: creds.installationId };
@@ -289,15 +291,14 @@ export function createGithubAppClient(
     return { ok: true, value: String(ids[0]) };
   }
 
-  async function installationToken(): Promise<AppResult<string>> {
-    if (cachedToken && cachedToken.expiresAtMs - TOKEN_REFRESH_MARGIN_MS > Date.now()) {
-      return { ok: true, value: cachedToken.token };
+  async function installationTokenFor(installationId: string): Promise<AppResult<string>> {
+    const cached = cachedTokens.get(installationId);
+    if (cached && cached.expiresAtMs - TOKEN_REFRESH_MARGIN_MS > Date.now()) {
+      return { ok: true, value: cached.token };
     }
-    const install = await installationId();
-    if (!install.ok) return install;
     const res = await appFetch(
       creds,
-      `/app/installations/${encodeURIComponent(install.value)}/access_tokens`,
+      `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
       fetchImpl,
       apiBase,
       { method: "POST" },
@@ -312,11 +313,17 @@ export function createGithubAppClient(
     const body = data as { token?: unknown; expires_at?: unknown };
     if (typeof body?.token !== "string" || !body.token) return { ok: false, error: "unreachable" };
     const expiresAtMs = typeof body.expires_at === "string" ? Date.parse(body.expires_at) : NaN;
-    cachedToken = {
+    cachedTokens.set(installationId, {
       token: body.token,
       expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + APP_JWT_TTL_SECONDS * 1000,
-    };
+    });
     return { ok: true, value: body.token };
+  }
+
+  async function installationToken(): Promise<AppResult<string>> {
+    const install = await installationId();
+    if (!install.ok) return install;
+    return installationTokenFor(install.value);
   }
 
   async function listRepos(): Promise<AppResult<AppRepo[]>> {
@@ -361,5 +368,5 @@ export function createGithubAppClient(
     return { ok: true, value: repos };
   }
 
-  return { installationId, installationToken, listRepos };
+  return { installationId, installationToken, installationTokenFor, listRepos };
 }

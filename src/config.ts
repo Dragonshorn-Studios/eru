@@ -11,6 +11,9 @@ export const DEFAULT_OPENCODE_BIN = "opencode";
 export const DEFAULT_OPENCODE_TIMEOUT_MS = 120_000;
 export const OPENCODE_TIMEOUT_MIN_MS = 1_000;
 export const OPENCODE_TIMEOUT_MAX_MS = 600_000;
+export const DEFAULT_ISSUE_BOT_HOURLY_CAP = 20;
+export const ISSUE_BOT_HOURLY_CAP_MAX = 1_000;
+export const MIN_WEBHOOK_SECRET = 16;
 
 export function parseOpenCodeTimeout(raw: string): number | undefined {
   if (!/^\d+$/.test(raw)) return undefined;
@@ -43,6 +46,18 @@ export interface Config {
   oauthClientSecret?: string;
   oauthAdminIds: number[];
   uiLocalLogin: boolean;
+  /** Present only when the eru-issue-bot GitHub App is fully configured. */
+  issueBot?: IssueBotConfig;
+}
+
+export interface IssueBotConfig {
+  appId: string;
+  privateKey: string;
+  webhookSecret: string;
+  /** GitHub user id of `eru-issue-bot[bot]` — loop guard compares `sender.id`. */
+  botUserId: number;
+  trustedBotIds: number[];
+  hourlyCap: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -86,7 +101,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const askWorkdir = env.ERU_ASK_WORKDIR?.trim() || undefined;
 
   const githubAppId = optionalDigits(env, "ERU_GITHUB_APP_ID");
-  const githubAppPrivateKey = loadAppPrivateKey(env);
+  const githubAppPrivateKey = loadPem(
+    env,
+    "ERU_GITHUB_APP_PRIVATE_KEY",
+    "ERU_GITHUB_APP_PRIVATE_KEY_FILE",
+  );
   const githubAppInstallationId = optionalDigits(env, "ERU_GITHUB_APP_INSTALLATION_ID");
   if (githubAppId && !githubAppPrivateKey) {
     throw new Error("eru: ERU_GITHUB_APP_ID needs ERU_GITHUB_APP_PRIVATE_KEY or ERU_GITHUB_APP_PRIVATE_KEY_FILE");
@@ -105,7 +124,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (Boolean(oauthClientId) !== Boolean(oauthClientSecret)) {
     throw new Error("eru: set both ERU_OAUTH_CLIENT_ID and ERU_OAUTH_CLIENT_SECRET (or neither)");
   }
-  const oauthAdminIds = parseIdList(env.ERU_OAUTH_ADMIN_IDS);
+  const oauthAdminIds = parseIdList(env.ERU_OAUTH_ADMIN_IDS, "ERU_OAUTH_ADMIN_IDS");
+  const issueBot = loadIssueBotConfig(env);
   const publicUrl = env.ERU_PUBLIC_URL?.trim().replace(/\/+$/, "") ?? "";
   const uiLocalLogin = parseBooleanEnv(env.ERU_UI_LOCAL_LOGIN);
   if (oauthClientId) {
@@ -142,15 +162,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oauthClientSecret,
     oauthAdminIds,
     uiLocalLogin,
+    issueBot,
   };
 }
 
-function parseIdList(raw: string | undefined): number[] {
+function parseIdList(raw: string | undefined, key: string): number[] {
   const value = raw?.trim();
   if (!value) return [];
   const ids = value.split(",").map((piece) => Number(piece.trim()));
   if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
-    throw new Error("eru: ERU_OAUTH_ADMIN_IDS must be comma-separated numeric GitHub user ids");
+    throw new Error(`eru: ${key} must be comma-separated numeric GitHub user ids`);
   }
   return ids;
 }
@@ -166,26 +187,73 @@ function optionalDigits(env: NodeJS.ProcessEnv, key: string): string | undefined
 
 // PEM can come inline (with literal \n escapes) or from a file path; the file
 // wins when both are set so operators can rotate by moving a file.
-function loadAppPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
-  const file = env.ERU_GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+function loadPem(env: NodeJS.ProcessEnv, inlineKey: string, fileKey: string): string | undefined {
+  const file = env[fileKey]?.trim();
   if (file) {
     let pem: string;
     try {
       pem = readFileSync(file, "utf8").trim();
     } catch {
-      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is unreadable");
+      throw new Error(`eru: ${fileKey} is unreadable`);
     }
     if (!pem.includes("PRIVATE KEY")) {
-      throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY_FILE is not a PEM private key");
+      throw new Error(`eru: ${fileKey} is not a PEM private key`);
     }
     return pem;
   }
-  const inline = env.ERU_GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
+  const inline = env[inlineKey]?.replace(/\\n/g, "\n").trim();
   if (!inline) return undefined;
   if (!inline.includes("PRIVATE KEY")) {
-    throw new Error("eru: ERU_GITHUB_APP_PRIVATE_KEY is not a PEM private key");
+    throw new Error(`eru: ${inlineKey} is not a PEM private key`);
   }
   return inline;
+}
+
+function loadIssueBotConfig(env: NodeJS.ProcessEnv): IssueBotConfig | undefined {
+  const appId = optionalDigits(env, "ERU_ISSUE_BOT_APP_ID");
+  const privateKey = loadPem(env, "ERU_ISSUE_BOT_PRIVATE_KEY", "ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
+  const webhookSecret = env.ERU_ISSUE_BOT_WEBHOOK_SECRET?.trim() || undefined;
+  const botUserRaw = env.ERU_ISSUE_BOT_USER_ID?.trim();
+  const hourlyRaw = env.ERU_ISSUE_BOT_HOURLY_CAP?.trim();
+  const any =
+    Boolean(appId) ||
+    Boolean(privateKey) ||
+    Boolean(webhookSecret) ||
+    Boolean(botUserRaw) ||
+    Boolean(env.ERU_TRUSTED_BOT_IDS?.trim()) ||
+    Boolean(hourlyRaw);
+  if (!any) return undefined;
+  if (!appId) {
+    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_APP_ID");
+  }
+  if (!privateKey) {
+    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_PRIVATE_KEY or ERU_ISSUE_BOT_PRIVATE_KEY_FILE");
+  }
+  if (!webhookSecret) {
+    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_WEBHOOK_SECRET");
+  }
+  if (webhookSecret.length < MIN_WEBHOOK_SECRET) {
+    throw new Error("eru: ERU_ISSUE_BOT_WEBHOOK_SECRET is too short");
+  }
+  if (!botUserRaw) {
+    throw new Error("eru: issue bot needs ERU_ISSUE_BOT_USER_ID");
+  }
+  if (!/^\d+$/.test(botUserRaw)) {
+    throw new Error("eru: ERU_ISSUE_BOT_USER_ID is not a number");
+  }
+  const botUserId = Number(botUserRaw);
+  const hourlyCap = parseInteger(env.ERU_ISSUE_BOT_HOURLY_CAP, DEFAULT_ISSUE_BOT_HOURLY_CAP);
+  if (!Number.isInteger(hourlyCap) || hourlyCap < 1 || hourlyCap > ISSUE_BOT_HOURLY_CAP_MAX) {
+    throw new Error("eru: ERU_ISSUE_BOT_HOURLY_CAP is invalid");
+  }
+  return {
+    appId,
+    privateKey,
+    webhookSecret,
+    botUserId,
+    trustedBotIds: parseIdList(env.ERU_TRUSTED_BOT_IDS, "ERU_TRUSTED_BOT_IDS"),
+    hourlyCap,
+  };
 }
 
 function requiredOrDefault(env: NodeJS.ProcessEnv, key: string, fallback: string): string {

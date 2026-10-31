@@ -44,6 +44,12 @@ Rotation story: there is no re-encryption migration. If `ERU_FORGE_TOKEN_KEY` (o
 | `ERU_GITHUB_APP_ID` | — | GitHub App ID |
 | `ERU_GITHUB_APP_PRIVATE_KEY` / `ERU_GITHUB_APP_PRIVATE_KEY_FILE` | — | App private key, inline or file path |
 | `ERU_GITHUB_APP_INSTALLATION_ID` | — | Installation ID (auto-detected when omitted) |
+| `ERU_ISSUE_BOT_APP_ID` | — | GitHub App ID for `eru-issue-bot` (Issues read/write only) |
+| `ERU_ISSUE_BOT_PRIVATE_KEY` / `ERU_ISSUE_BOT_PRIVATE_KEY_FILE` | — | Issue-bot App private key, inline or file path |
+| `ERU_ISSUE_BOT_WEBHOOK_SECRET` | — | HMAC secret for `POST /webhooks/github` (`X-Hub-Signature-256`) |
+| `ERU_ISSUE_BOT_USER_ID` | — | GitHub user id of `eru-issue-bot[bot]` (loop guard) |
+| `ERU_TRUSTED_BOT_IDS` | — | Comma-separated GitHub user ids allowed to trigger a rewrite besides OWNER/MEMBER/COLLABORATOR |
+| `ERU_ISSUE_BOT_HOURLY_CAP` | `20` | Max refine jobs enqueued per owner/repo per hour |
 | `ERU_OAUTH_CLIENT_ID` / `ERU_OAUTH_CLIENT_SECRET` | — | GitHub OAuth App credentials — both or neither |
 | `ERU_OAUTH_ADMIN_IDS` | — | Comma-separated numeric GitHub user ids allowed to sign in (required with OAuth) |
 | `ERU_PUBLIC_URL` | — | Public URL Eru is reached at, e.g. `https://eru.example` (required with OAuth) |
@@ -62,3 +68,7 @@ Setting `ERU_OAUTH_CLIENT_ID` + `ERU_OAUTH_CLIENT_SECRET` enables a "Sign in wit
 Sessions carry the GitHub identity (login + avatar) in the signed cookie; the OAuth token is used once to fetch the profile and then discarded.
 
 Every field that exists on `/config` (models, operator login, GitHub App) can also be set here — a saved value overrides the env var, and the page marks it.
+
+## eru-issue-bot
+
+Optional. Configured from env only (`ERU_ISSUE_BOT_*`). When App ID, private key, webhook secret, and bot user id all resolve, Eru accepts GitHub `issues` webhooks at `POST /webhooks/github` and rewrites newly opened issues that mention `@eru-issue-bot`. This is a **separate** GitHub App from the mapping one: permissions are Issues read/write and Metadata read only. Setup steps live in the [README](../README.md#eru-issue-bot). Partial env config fails closed at boot. The webhook secret, private key, and minted installation tokens are never logged or rendered back.

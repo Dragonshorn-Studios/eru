@@ -174,6 +174,7 @@ const PUBLIC_PATHS = new Set([
   "/assets/eru-icon.png",
   "/assets/eru.css",
   "/assets/htmx.min.js",
+  "/webhooks/github",
 ]);
 
 export function isPublicPath(path: string): boolean {
@@ -206,7 +207,14 @@ export function safeNextPath(raw: string | undefined | null): string {
   } catch {
     return "/";
   }
+  if (/[\u0000-\u001F\u007F]/.test(value)) return "/";
   if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/";
   if (value.startsWith("/login") || value.startsWith("/logout") || value.startsWith("/assets/")) return "/";
+  try {
+    const resolved = new URL(value, "http://eru.local");
+    if (resolved.origin !== "http://eru.local") return "/";
+  } catch {
+    return "/";
+  }
   return value;
 }

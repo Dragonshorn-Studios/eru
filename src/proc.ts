@@ -74,8 +74,13 @@ export function outputTail(...texts: string[]): string {
 }
 
 export function opencodeChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("ERU_")) continue;
+    env[key] = value;
+  }
   return {
-    ...process.env,
+    ...env,
     TERM: "dumb",
     OPENCODE_DISABLE_AUTOUPDATE: "true",
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",

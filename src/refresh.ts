@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
+import { opencodeModel, opencodeTimeout, type OpenCodeOptions } from "./opencode.js";
 import { opencodeChildEnv, outputTail, runChild } from "./proc.js";
 import { markWorkspaceRoot } from "./util.js";
 
@@ -48,7 +48,7 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // the nearest .git ancestor of the temp dir and map that repo instead.
       await markWorkspaceRoot(workdir);
       const args = ["run", "--format", "default"];
-      const runModel = model ?? opts.model;
+      const runModel = model ?? opencodeModel(opts);
       if (runModel) args.push("-m", runModel);
       // `--` guards the prompt: opencode args are yargs-parsed and array
       // options can otherwise swallow a trailing positional (maomao learned

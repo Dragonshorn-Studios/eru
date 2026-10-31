@@ -8,11 +8,15 @@ export interface OpenCodeOptions {
   // A number for fixed timeouts, or a getter when the timeout can be
   // reconfigured at runtime (the /config page resolves it per call).
   timeoutMs: number | (() => number);
-  model?: string;
+  model?: string | (() => string | undefined);
 }
 
 export function opencodeTimeout(opts: Pick<OpenCodeOptions, "timeoutMs">): number {
   return typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
+}
+
+export function opencodeModel(opts: Pick<OpenCodeOptions, "model">): string | undefined {
+  return typeof opts.model === "function" ? opts.model() : opts.model;
 }
 
 export interface ModelSnapshot {

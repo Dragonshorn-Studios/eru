@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -94,6 +95,12 @@ import { opencodeAuthPath, ProviderCredentialStore } from "./providers.js";
 import { createMappingTracker, type MappingTracker } from "./mapping.js";
 import { createMapRefresher, extractTarball, isValidMapRef, type RefreshRunner } from "./refresh.js";
 import {
+  ISSUE_BOT_MAX_BODY_BYTES,
+  ISSUE_BOT_WEBHOOK_PATH,
+  createIssueBot,
+  type IssueBot,
+} from "./issuebot.js";
+import {
   APP_ERRORS,
   appPage,
   askPage,
@@ -121,6 +128,8 @@ export interface AppOptions {
   modelDiscovery?: ModelDiscovery;
   providerStore?: ProviderCredentialStore;
   mappingTracker?: MappingTracker;
+  issueBot?: IssueBot;
+  issueBotAutoStart?: boolean;
 }
 
 type Env = {
@@ -146,6 +155,22 @@ export function createApp(opts: AppOptions): Hono<Env> {
   void modelDiscovery.refresh();
   const providers = opts.providerStore ?? new ProviderCredentialStore(opencodeAuthPath());
   const mapping = opts.mappingTracker ?? createMappingTracker();
+  const issueBot: IssueBot | undefined =
+    opts.issueBot ??
+    (config.issueBot
+      ? createIssueBot({
+          db,
+          config: config.issueBot,
+          fetchImpl,
+          openCode: {
+            bin: config.openCodeBin,
+            timeoutMs: () => resolveTimeout(config, db).value,
+            model: () => resolveModel(config, db, "ask").value,
+          },
+          now,
+        })
+      : undefined);
+  if (issueBot && opts.issueBotAutoStart !== false) issueBot.start();
 
   const oauthOn = oauthEnabled(config);
   const passwordLoginOn = !oauthOn || config.uiLocalLogin;
@@ -220,6 +245,18 @@ export function createApp(opts: AppOptions): Hono<Env> {
     db.prepare("SELECT 1 AS ok").get();
     return c.json({ ok: true });
   });
+
+  app.post(
+    ISSUE_BOT_WEBHOOK_PATH,
+    bodyLimit({
+      maxSize: ISSUE_BOT_MAX_BODY_BYTES,
+      onError: (c) => c.text("payload too large", 413),
+    }),
+    (c) => {
+      if (!issueBot) return c.text("not found", 404);
+      return issueBot.handleWebhook(c);
+    },
+  );
 
   app.get("/assets/eru.css", (c) => {
     c.header("Content-Type", "text/css; charset=utf-8");

@@ -20,6 +20,10 @@ OpenCode runs with deny `bash`, `edit`, `write`, and `webfetch`. Map refresh and
 
 When forge connect lands (issue #2), tokens are least privilege (read the target repo, nothing else by default). Never log tokens, session secrets, passwords, or raw cookies. Never commit `.env`.
 
+## GitHub webhooks (eru-issue-bot)
+
+`POST /webhooks/github` is a public path authenticated by `X-Hub-Signature-256` (HMAC-SHA256, compared with `timingSafeEqual`). Missing or invalid signatures are rejected. Repeat deliveries of the same issue are ignored (`UNIQUE(owner, name, issue_number)` + `INSERT OR IGNORE`). Issue title and body are untrusted user data: they are sent to the model as text only (no tools, no repo, no secrets in context) and are never logged. The App private key, webhook secret, and installation tokens live in env / memory only. OpenCode children that see issue text do not inherit `ERU_*` secrets.
+
 ## Secrets and exfil
 
 No secret exfil through Ask, logs, map pages, or error messages. Page bodies and model answers may describe a private repo; they must not echo env, cookies, or forge credentials.

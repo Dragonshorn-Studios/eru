@@ -77,6 +77,7 @@ function app(
       refreshRunner,
       providerStore,
       modelDiscovery,
+      issueBotAutoStart: false,
     }),
     config,
     db,
@@ -1386,6 +1387,7 @@ describe("provider keys on /config", () => {
     const html = await res.text();
     expect(html).toContain('href="#providers"');
     expect(html).toContain('href="#github-app"');
+    expect(html).not.toContain('href="#issue-bot"');
     expect(html).toContain("config-stage");
     expect(html).toContain("key from env <code>OPENAI_API_KEY</code>");
     expect(html).toContain("stored in auth.json ···ret9");
