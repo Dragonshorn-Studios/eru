@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAskEventStream, pinWorkspaceQuery, proxyPathAllowed, withSessionLocation } from "./askproxy.js";
+import { isAskEventStream, pinWorkspaceQuery, proxyPathAllowed, unwrapOcJson, withSessionLocation } from "./askproxy.js";
 
 describe("ask proxy allowlist", () => {
   it("treats OC1 and OC2 event streams as timeout-exempt", () => {
@@ -21,5 +21,13 @@ describe("ask proxy allowlist", () => {
     expect(kept).toEqual({ location: { directory: "/data/ask/thread" } });
     expect(proxyPathAllowed("/api/event")).toBe(true);
     expect(proxyPathAllowed("/event")).toBe(true);
+  });
+
+  it("unwraps an OpenCode data envelope so the client can read the session id", () => {
+    expect(unwrapOcJson(JSON.stringify({ data: { id: "ses_1", title: "Ask" } }))).toBe(
+      JSON.stringify({ id: "ses_1", title: "Ask" }),
+    );
+    expect(unwrapOcJson(JSON.stringify({ id: "ses_1" }))).toBe(JSON.stringify({ id: "ses_1" }));
+    expect(unwrapOcJson("not-json")).toBe("not-json");
   });
 });

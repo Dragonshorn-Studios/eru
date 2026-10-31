@@ -668,6 +668,27 @@ describe("ask threads and proxy", () => {
     expect(calls[1].body).toBe('{"parts":[{"type":"text","text":"hi"}]}');
   });
 
+  it("unwraps a wrapped OpenCode session before the Ask client reads the id", async () => {
+    const fetchImpl = async () =>
+      new Response(JSON.stringify({ data: { id: "ses_wrapped", title: "Ask" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const instance = app({}, fetchImpl, stubServe());
+    const auth = await authed(instance);
+    await seed(instance, [{ slug: "arch", title: "Arch", body: "b", sortOrder: 0 }]);
+    const { thread } = (await (await api(instance, auth, "/ask/api/threads", { method: "POST" })).json()) as {
+      thread: { id: string; sessionId: string | null };
+    };
+    expect(thread.sessionId).toBe("ses_wrapped");
+    const proxied = await api(instance, auth, `/ask/oc/${thread.id}/session`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(proxied.status).toBe(200);
+    expect(await proxied.json()).toEqual({ id: "ses_wrapped", title: "Ask" });
+  });
+
   it("refuses non-allowlisted upstream endpoints and missing auth on proxy calls", async () => {
     const instance = app({}, undefined, stubServe());
     const auth = await authed(instance);
