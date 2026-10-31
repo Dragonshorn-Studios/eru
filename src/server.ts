@@ -52,6 +52,7 @@ import {
   getSetting,
   listAllPages,
   listConnectedRepos,
+  listIssueRefineJobsForRepo,
   listPages,
   setForgeCredential,
   setLastMapped,
@@ -88,7 +89,7 @@ import {
   verifyForgejoRepo,
   verifyGitlabRepo,
 } from "./forges.js";
-import { createModelDiscovery, isValidModelName, unwrapOcData, type ModelDiscovery } from "./opencode.js";
+import { createModelDiscovery, isCliHelpDump, isValidModelName, unwrapOcData, type ModelDiscovery } from "./opencode.js";
 import { createOpenCodeServer, type OpenCodeServe } from "./askserver.js";
 import { askProxy } from "./askproxy.js";
 import {
@@ -127,6 +128,7 @@ import {
   REFRESH_TARBALL_ERRORS,
   refreshResultFragment,
   loginPage,
+  refinePage,
   themeCss,
   type ChromeModel,
   type ConfigForgeView,
@@ -502,6 +504,14 @@ export function createApp(opts: AppOptions): Hono<Env> {
     return html(c, appPage(model));
   });
   app.get("/ask", (c) => html(c, askPage(appModel(c))));
+
+  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db))));
+  app.get("/refine/:id", (c) => {
+    const jobs = refineCatches(db);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id < 1 || !jobs.some((job) => job.id === id)) return c.text("not found", 404);
+    return html(c, refinePage(appModel(c), jobs, id));
+  });
 
   // Ask API + proxy: thread metadata stays on Eru (SQLite), OpenCode session
   // traffic flows through /ask/oc/<threadId>/* to the loopback server.
@@ -1178,6 +1188,12 @@ function resolveUser(config: Config, db: SqliteDb): { name: string; source: Mode
 
 // The repo the UI acts on: the operator's pick, else the latest connect.
 // A stale stored id (repo row gone) falls back to primary.
+function refineCatches(db: SqliteDb) {
+  const repo = selectedRepo(db);
+  if (!repo) return [];
+  return listIssueRefineJobsForRepo(db, repo);
+}
+
 function selectedRepo(db: SqliteDb): MappedRepo | undefined {
   const stored = getSetting(db, SETTING_SELECTED_REPO);
   if (stored) {
@@ -1512,7 +1528,7 @@ async function refreshNotice(
       if (result.error === "unconfigured") {
         return { ok: false, notice: "OpenCode is not configured on this host (check ERU_OPENCODE_BIN)." };
       }
-      const detail = result.detail ? ` — ${result.detail.slice(-160)}` : " — check the service log.";
+      const detail = result.detail ? ` — ${mapFailureDetail(result.detail)}` : " — check the service log.";
       if (result.error === "nomap") {
         return { ok: false, notice: `OpenCode did not return map pages${detail}` };
       }
@@ -1558,6 +1574,13 @@ function ocFetch(
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     signal: AbortSignal.timeout(opts.timeoutMs ?? OC_FETCH_TIMEOUT_MS),
   });
+}
+
+function mapFailureDetail(detail: string): string {
+  if (isCliHelpDump(detail)) {
+    return "OpenCode printed command help instead of running. Check ERU_OPENCODE_BIN.";
+  }
+  return detail.slice(-160);
 }
 
 function chromeModel(

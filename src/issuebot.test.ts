@@ -499,6 +499,9 @@ describe("issue refine worker", () => {
     await bot.processDue();
     const job = listIssueRefineJobs(db)[0];
     expect(job.status).toBe("done");
+    expect(job.outcome).toBe("agent-ready");
+    expect(job.refined).toContain("## Problem");
+    expect(job.why).toContain("agent-ready");
     const patch = calls.find((c) => c.method === "PATCH" && /\/issues\/12$/.test(c.path));
     expect(patch?.body).toEqual({ body: expect.stringContaining(ISSUE_BOT_MARKER) });
     const patched = (patch?.body as { body: string }).body;
@@ -697,6 +700,8 @@ describe("issue refine worker", () => {
     db.prepare(`DELETE FROM repos`).run();
     await bot.processDue();
     expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    expect(listIssueRefineJobs(db)[0].outcome).toBe("skipped");
+    expect(listIssueRefineJobs(db)[0].why).toContain("no longer connected");
     expect(calls).toEqual([]);
   });
 });

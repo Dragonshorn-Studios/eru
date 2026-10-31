@@ -1,9 +1,10 @@
 import { CSRF_FIELD } from "./auth.js";
 import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
-import type { MapPage, PageTocEntry } from "./db.js";
+import type { IssueRefineJob, MapPage, PageTocEntry } from "./db.js";
 import type { AppError, AppRepo, GithubAppProbeResult, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { ASK_AGENT } from "./askthreads.js";
+import { briefSections, openQuestionsEmpty } from "./issuebot.js";
 import { renderMarkdown } from "./markdown.js";
 import { THEME_CSS } from "./theme.js";
 import type { ProviderCredentialStatus } from "./providers.js";
@@ -106,10 +107,12 @@ function topbar(model: ChromeModel): string {
 const TABS = [
   { key: "brief", href: "/", label: "Brief" },
   { key: "ask", href: "/ask", label: "Ask" },
+  { key: "refine", href: "/refine", label: "Refine" },
 ] as const;
 
 function isTabActive(key: string, path: string): boolean {
   if (key === "ask") return path === "/ask";
+  if (key === "refine") return path === "/refine" || path.startsWith("/refine/");
   return path === "/" || path.startsWith("/brief");
 }
 
@@ -861,6 +864,106 @@ export function appPage(model: ChromeModel): string {
       });
     })();
     </script>
+    ${foot(model)}
+  </div>
+</body>`,
+  );
+}
+
+function refineTone(job: IssueRefineJob): { tone: string; label: string } {
+  if (job.outcome === "agent-ready") return { tone: "is-ready", label: "agent-ready" };
+  if (job.outcome === "needs-info") return { tone: "is-open", label: "needs-info" };
+  if (job.outcome === "failed" || job.status === "failed") return { tone: "is-fail", label: "didn't land" };
+  if (job.outcome === "skipped") return { tone: "is-skip", label: "skipped" };
+  return { tone: "is-wait", label: job.status === "running" ? "rewriting" : "caught" };
+}
+
+function refineWhy(job: IssueRefineJob): string {
+  if (job.why) return job.why;
+  if (job.status === "failed") return "The rewrite did not land. The issue on the forge was left untouched.";
+  if (job.status === "done") return "Eru finished this before the story was kept.";
+  return "Eru caught this webhook and is still rewriting the issue.";
+}
+
+function refineCatchList(jobs: IssueRefineJob[], focusId: number | undefined): string {
+  if (jobs.length === 0) return `<p class="empty-hint">Nothing caught yet.</p>`;
+  const items = jobs
+    .map((job) => {
+      const tone = refineTone(job);
+      const current = job.id === focusId ? ` aria-current="page"` : "";
+      const title = job.title.trim() || "Untitled issue";
+      return `<li><a href="/refine/${job.id}"${current}><span class="refine-num">#${job.issueNumber}</span><span class="refine-item-title">${escapeHtml(title)}</span><span class="refine-pill ${tone.tone}">${tone.label}</span></a></li>`;
+    })
+    .join("");
+  return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
+}
+
+function refineStory(job: IssueRefineJob): string {
+  const tone = refineTone(job);
+  const sections = job.refined ? briefSections(job.refined) : [];
+  const cards = sections
+    .map((section) => {
+      const open =
+        section.heading === "Open questions" && !openQuestionsEmpty(`## Open questions\n${section.body}\n`);
+      const wide = section.heading === "Problem" || section.heading === "Done when" || section.heading === "Open questions";
+      const body = section.body
+        ? `<div class="page-body">${renderMarkdown(section.body)}</div>`
+        : `<p class="empty-hint">Nothing written here.</p>`;
+      return `<li class="refine-section${wide ? " is-wide" : ""}${open ? " is-open" : ""}"><p class="refine-heading">${escapeHtml(section.heading)}</p>${body}</li>`;
+    })
+    .join("");
+  const brief = cards
+    ? `<ol class="refine-sections">${cards}</ol>`
+    : `<p class="page-lead">${job.status === "failed" ? "No brief was kept." : "The brief is not ready yet."}</p>`;
+  const error = job.lastError ? `<p class="refine-error">${escapeHtml(job.lastError)}</p>` : "";
+  const original = job.body.trim()
+    ? `<details class="refine-original"><summary>What arrived</summary><div class="page-body">${renderMarkdown(job.body)}</div></details>`
+    : "";
+  return `<p class="refine-kicker">Caught · ${escapeHtml(job.forge)} · #${job.issueNumber}</p>
+        <h2 class="page-title">${escapeHtml(job.title.trim() || "Untitled issue")}</h2>
+        <p class="path">${escapeHtml(job.owner)}/${escapeHtml(job.name)} · ${escapeHtml(job.createdAt)}</p>
+        <div class="refine-verdict ${tone.tone}">
+          <p class="refine-kicker">Why</p>
+          <p>${escapeHtml(refineWhy(job))}</p>
+          <span class="refine-pill ${tone.tone}">${tone.label}</span>
+          ${error}
+        </div>
+        ${brief}
+        ${original}`;
+}
+
+export function refinePage(model: ChromeModel, jobs: IssueRefineJob[], focusId?: number): string {
+  const focus = jobs.find((job) => job.id === focusId) ?? jobs[0];
+  let article: string;
+  if (!model.repo) {
+    article = `<h2 class="page-title">No repo connected</h2>
+        <p class="page-lead">Caught webhooks show up here once a repository is connected. <a href="/connect">Connect a repo</a>.</p>`;
+  } else if (!focus) {
+    article = `<h2 class="page-title">No webhooks caught</h2>
+        <p class="page-lead">When a connected repo opens an issue that mentions <code>@eru-issue-bot</code>, Eru keeps it here — the brief it wrote, and why it landed as agent-ready or needs-info.</p>`;
+  } else {
+    article = refineStory(focus);
+  }
+  const repoLine = model.repo
+    ? `<p class="kicker">Caught</p><p class="refine-repo">${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)}</p>`
+    : `<p class="kicker">Caught</p>`;
+  return layout(
+    "Eru · Refine",
+    `<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    ${topbar(model)}
+    ${masthead(model)}
+    <main id="main" class="stage">
+      <aside class="card" aria-label="Caught webhooks">
+        ${repoLine}
+        <hr class="rule"/>
+        ${refineCatchList(jobs, focus?.id)}
+      </aside>
+      <article class="card" aria-label="Refinement">
+        ${article}
+      </article>
+    </main>
     ${foot(model)}
   </div>
 </body>`,

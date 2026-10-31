@@ -10,7 +10,7 @@ The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe comp
 
 ## `/` — Brief
 
-The home view. Top bar: Eru seal, the active repo (`owner / name`), `last mapped @ref`, a refresh icon button (re-maps the default branch, with a progress view while it runs), the segmented **Brief / Ask** tabs, **Config**, and the operator pill (GitHub avatar when `ERU_UI_USER` or the Operator setting names a login). Left column is the page table of contents; the right column renders the selected page.
+The home view. Top bar: Eru seal, the active repo (`owner / name`), `last mapped @ref`, a refresh icon button (re-maps the default branch, with a progress view while it runs), the segmented **Brief / Ask / Refine** tabs, **Config**, and the operator pill (GitHub avatar when `ERU_UI_USER` or the Operator setting names a login). Left column is the page table of contents; the right column renders the selected page.
 
 With no repo connected, the empty state points at `/connect`. With a repo that has no pages yet, it points at the refresh button.
 
@@ -29,6 +29,12 @@ Same shell, tab switched — but the stage is a full-page assistant-ui thread. A
 Under the hood each thread owns an isolated workspace under `ERU_ASK_WORKDIR` (default `<sqlite dir>/ask`): a `map/<slug>.md` snapshot of the durable map plus a deny-by-default `opencode.json` (read/glob/grep only — no bash, no edits, no checkout). The browser never talks to OpenCode directly: the island calls same-origin `/ask/oc/<threadId>/*`, and Eru's proxy injects the loopback basic-auth and workspace `directory=` server-side, allowlisting only the endpoints the adapter uses (session, event stream, permission/question replies).
 
 Threads persist across reloads — the OpenCode session id is recorded on the thread row and the conversation resumes where it left off. Answers render as markdown with map citations (`map/<slug>.md`) rewritten to `/brief/<slug>` links; citations to pages that do not exist stay plain text. Model output is never trusted as HTML.
+
+## The Refine tab
+
+Same shell, tab switched. The left column lists webhooks Eru caught for the **selected** repo — issue number, title, and a pill (`caught`, `rewriting`, `agent-ready`, `needs-info`, `didn't land`, `skipped`). The right column is the story: why that verdict landed, the brief split into the eight sections, and the original issue collapsed under **What arrived**.
+
+A catch from another repo is not listed and its URL is a 404. Issue text and the model brief are untrusted and rendered as escaped markdown. Jobs finished before this tab existed say the story was not kept.
 
 ## `/connect`
 

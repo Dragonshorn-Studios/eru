@@ -21,7 +21,7 @@ Eru is named after Chitanda Eru from the anime *Hyouka*. The catchphrase above i
 
 ## How it works
 
-Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a GitHub App or PAT, or a GitLab/Forgejo API token set on `/config`. Ask and Refresh shell out to the OpenCode CLI (2.0 `--standalone run`) inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Model output is untrusted text and is escaped before rendering.
+Eru is a single Node.js + Hono server. The operator UI is server-rendered HTML with HTMX — there is no client-side build. State lives in SQLite via better-sqlite3. Forge reads (repo verification, tarball download) go through a GitHub App or PAT, or a GitLab/Forgejo API token set on `/config`. Ask and Refresh shell out to the OpenCode CLI (2.0 `run --standalone`) inside a throwaway directory whose `opencode.json` denies every tool except read/glob/grep. Model output is untrusted text and is escaped before rendering.
 
 ```
 GitHub / GitLab / Forgejo ──► forge adapter ──► tarball ──► OpenCode ──► map pages ──► SQLite ──► Brief / Ask UI
@@ -72,6 +72,8 @@ One GitHub App is enough. Permissions: **Contents** Read, **Issues** Read & writ
 Self-hosted GitLab and Forgejo are configured on `/config` (or `ERU_GITLAB_*` / `ERU_FORGEJO_*`): base URL + API token lists and maps repos; an optional webhook secret turns on `@eru-issue-bot` at `POST /webhooks/gitlab` (`X-Gitlab-Token`) or `POST /webhooks/forgejo` (HMAC). Tokens stay encrypted. Nested GitLab groups use slashes in the owner field (`group/sub`).
 
 ## eru-issue-bot
+
+The **Refine** tab lists webhooks caught for the selected repo and shows the brief Eru wrote plus why it landed as agent-ready or needs-info.
 
 Rewrites newly opened issues mentioning `@eru-issue-bot` on **connected** repos into an agent-ready brief (Problem / Where / Is / Want / Context / Done when / Out of scope / Open questions), keeps the original collapsed, labels the issue, and comments. Same process as the rest of Eru: the webhook stores a job in SQLite and an in-process worker runs it. A signed webhook from a repo that is not connected returns 202 and is ignored.
 

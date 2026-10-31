@@ -14,11 +14,13 @@ describe("chrome copy", () => {
     });
     expect(html).toContain("Brief");
     expect(html).toContain("Ask");
+    expect(html).toContain("Refine");
     expect(html).toContain("last mapped @main");
     expect(html).toContain('href="/ask"');
     expect(html).toContain("not a checkout job, not DeepWiki.com");
     expect(html).toContain('class="tab" href="/" aria-current="page">Brief');
     expect(html).toContain('class="tab" href="/ask">Ask');
+    expect(html).toContain('class="tab" href="/refine">Refine');
     expect(html).not.toContain("Eruka");
     expect(html).not.toContain("Approve");
     expect(html).not.toContain("Golden");

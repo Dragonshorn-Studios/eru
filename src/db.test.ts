@@ -8,7 +8,9 @@ import {
   deleteForgeCredential,
   deleteSetting,
   deleteStalePages,
+  completeIssueRefineJob,
   enqueueIssueRefineJob,
+  listIssueRefineJobsForRepo,
   getForgeCredential,
   getIssueRefineJob,
   getPage,
@@ -51,7 +53,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(9);
+    expect(migrations.n).toBe(10);
     again.close();
   });
 
@@ -96,7 +98,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(9);
+    expect(migrations.n).toBe(10);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -105,7 +107,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(9);
+    expect(after.n).toBe(10);
     legacy.close();
   });
 });
@@ -301,6 +303,46 @@ describe("issue refine jobs", () => {
     expect(gitlab).toBeDefined();
     expect(github).not.toBe(gitlab);
     expect(getIssueRefineJob(db, gitlab!)!.forge).toBe("gitlab");
+    db.close();
+  });
+
+  it("keeps a refinement story and lists catches for the matching repo only", () => {
+    const db = openDb(":memory:");
+    const at = "2026-01-01T00:00:00Z";
+    const github = enqueueIssueRefineJob(db, { ...job, origin: "" }, at)!;
+    const cased = enqueueIssueRefineJob(db, { ...job, owner: "ACME", name: "BOX", issueNumber: 13 }, at)!;
+    const gitlab = enqueueIssueRefineJob(
+      db,
+      { ...job, forge: "gitlab", origin: "https://git.example", issueNumber: 12 },
+      at,
+    )!;
+    completeIssueRefineJob(db, github, at, {
+      outcome: "agent-ready",
+      refined: "## Problem\nThe lamp.",
+      why: "Open questions was empty, so Eru marked this agent-ready.",
+    });
+    const stored = getIssueRefineJob(db, github)!;
+    expect(stored.outcome).toBe("agent-ready");
+    expect(stored.refined).toContain("The lamp.");
+    expect(stored.why).toContain("agent-ready");
+
+    const githubHits = listIssueRefineJobsForRepo(db, { forge: "github", owner: "acme", name: "box", origin: "" });
+    expect(githubHits.map((row) => row.id)).toEqual([cased, github]);
+    const gitlabHits = listIssueRefineJobsForRepo(db, {
+      forge: "gitlab",
+      owner: "acme",
+      name: "box",
+      origin: "https://git.example",
+    });
+    expect(gitlabHits.map((row) => row.id)).toEqual([gitlab]);
+    expect(
+      listIssueRefineJobsForRepo(db, {
+        forge: "gitlab",
+        owner: "acme",
+        name: "box",
+        origin: "https://other.example",
+      }),
+    ).toEqual([]);
     db.close();
   });
 

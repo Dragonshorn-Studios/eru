@@ -8,7 +8,7 @@ Eru is a **separate** self-hosted app (Hyouka / Eru). It is **not** Maomao.
 
 - Capsule: `I'm curious about this repo.`
 - Lead: `Self-hosted OpenCode notes that stay with the repo. Page the map, then ask. Refresh when you want — not a checkout job, not DeepWiki.com.`
-- Chrome labels: `Brief` · `Ask` · `last mapped @ref`
+- Chrome labels: `Brief` · `Ask` · `Refine` · `last mapped @ref`
 
 Maomao is an ephemeral Repo brief on a checkout SHA. Eru is a **durable** repo map: pages live in SQLite, refresh updates them, Ask runs against the map.
 
