@@ -518,7 +518,18 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const repo = selectedRepo(db);
     const entry = repo && Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
     if (!entry || !repo || !logMatchesRepo(entry, repo)) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), refineCatches(db), undefined, withFocusedLog(logsForSelectedRepo(db), entry), id));
+    return html(
+      c,
+      refinePage(
+        appModel(c),
+        refineCatches(db),
+        undefined,
+        withFocusedLog(logsForSelectedRepo(db), entry),
+        id,
+        "repo",
+        clipNotice(c.req.query("notice")),
+      ),
+    );
   });
   app.get("/refine/:id", (c) => {
     const jobs = refineCatches(db);
@@ -532,8 +543,36 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const id = Number(c.req.param("id"));
     const entry = Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
     if (!entry) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), listIssueRefineJobs(db), undefined, withFocusedLog(listWebhookLogs(db), entry), id, "all"));
+    return html(
+      c,
+      refinePage(
+        appModel(c),
+        listIssueRefineJobs(db),
+        undefined,
+        withFocusedLog(listWebhookLogs(db), entry),
+        id,
+        "all",
+        clipNotice(c.req.query("notice")),
+      ),
+    );
   });
+
+  async function forceLoggedIssue(c: Context<Env>, allow: boolean): Promise<Response> {
+    const bot = issueBotNow();
+    if (!bot) return c.text("not found", 404);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id < 1) return c.text("not found", 404);
+    const entry = getWebhookLog(db, id);
+    if (!entry) return c.text("not found", 404);
+    const body = await c.req.parseBody();
+    const back = logReturnPath(typeof body.return === "string" ? body.return : undefined, id);
+    const result = await bot.forceRewrite(entry, { allow });
+    if (!result.ok) return c.redirect(`${back}?notice=${encodeURIComponent(result.detail)}`);
+    return c.redirect(back);
+  }
+
+  app.post("/log/:id/rewrite", (c) => forceLoggedIssue(c, false));
+  app.post("/log/:id/allow", (c) => forceLoggedIssue(c, true));
 
   // Ask API + proxy: thread metadata stays on Eru (SQLite), OpenCode session
   // traffic flows through /ask/oc/<threadId>/* to the loopback server.
@@ -1659,6 +1698,16 @@ async function refreshNotice(
   } finally {
     await rm(workdir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+function clipNotice(value: string | undefined): string {
+  if (!value) return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function logReturnPath(value: string | undefined, id: number): string {
+  if (value === `/log/${id}` || value === `/refine/log/${id}`) return value;
+  return `/log/${id}`;
 }
 
 // Authenticated fetch to the loopback OpenCode server: Eru is the only

@@ -222,6 +222,19 @@ const MIGRATIONS: Migration[] = [
       db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN note TEXT`);
     },
   },
+  {
+    name: "0013_webhook_sender.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(webhook_log)`).all() as { name: string }[];
+      if (columns.length === 0) return;
+      const names = new Set(columns.map((col) => col.name));
+      if (!names.has("sender_id")) db.exec(`ALTER TABLE webhook_log ADD COLUMN sender_id INTEGER`);
+      if (!names.has("sender_login")) db.exec(`ALTER TABLE webhook_log ADD COLUMN sender_login TEXT NOT NULL DEFAULT ''`);
+      if (!names.has("installation_id")) {
+        db.exec(`ALTER TABLE webhook_log ADD COLUMN installation_id TEXT NOT NULL DEFAULT ''`);
+      }
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -280,7 +293,10 @@ CREATE TABLE IF NOT EXISTS webhook_log (
   reason TEXT NOT NULL,
   detail TEXT NOT NULL,
   title TEXT NOT NULL DEFAULT '',
-  job_id INTEGER
+  job_id INTEGER,
+  sender_id INTEGER,
+  sender_login TEXT NOT NULL DEFAULT '',
+  installation_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS webhook_log_at_idx ON webhook_log (id DESC);
 `;
@@ -582,6 +598,54 @@ export function enqueueIssueRefineJob(
   return row?.id;
 }
 
+/**
+ * Insert a job, or reset a finished one so the operator can rewrite it again.
+ * A running job is left alone and this returns undefined.
+ */
+export function enqueueOrRestartIssueRefineJob(
+  db: SqliteDb,
+  job: {
+    forge?: string;
+    origin?: string;
+    installationId: string;
+    owner: string;
+    name: string;
+    issueNumber: number;
+    title: string;
+    body: string;
+  },
+  at: string,
+): number | undefined {
+  const inserted = enqueueIssueRefineJob(db, job, at);
+  if (inserted !== undefined) return inserted;
+  const forge = job.forge ?? "github";
+  const existing = db
+    .prepare(
+      `SELECT id, status FROM issue_refine_jobs
+        WHERE forge = ? AND owner = ? AND name = ? AND issue_number = ?`,
+    )
+    .get(forge, job.owner, job.name, job.issueNumber) as { id: number; status: string } | undefined;
+  if (!existing || existing.status === "running") return undefined;
+  const updated = db
+    .prepare(
+      `UPDATE issue_refine_jobs
+          SET status = 'pending', attempts = 0, title = ?, body = ?, installation_id = ?, origin = ?,
+              outcome = NULL, refined = NULL, why = NULL, note = NULL, last_error = NULL,
+              run_after = ?, updated_at = ?
+        WHERE id = ? AND status != 'running'`,
+    )
+    .run(
+      job.title,
+      job.body,
+      job.installationId,
+      job.origin ?? "",
+      at,
+      at,
+      existing.id,
+    );
+  return updated.changes === 0 ? undefined : existing.id;
+}
+
 export function countRecentIssueRefineJobs(
   db: SqliteDb,
   owner: string,
@@ -687,9 +751,12 @@ export interface WebhookLogEntry {
   detail: string;
   title: string;
   jobId: number | null;
+  senderId: number | null;
+  senderLogin: string;
+  installationId: string;
 }
 
-const WEBHOOK_LOG_COLUMNS = `id, at, forge, origin, owner, name, issue_number AS issueNumber, delivery, event, action, outcome, reason, detail, title, job_id AS jobId`;
+const WEBHOOK_LOG_COLUMNS = `id, at, forge, origin, owner, name, issue_number AS issueNumber, delivery, event, action, outcome, reason, detail, title, job_id AS jobId, sender_id AS senderId, sender_login AS senderLogin, installation_id AS installationId`;
 /** Signed deliveries (queued and ignored). Rejected rows use a separate cap. */
 export const WEBHOOK_LOG_KEEP = 200;
 /** Bad signatures are unauthenticated. They must not evict signed deliveries. */
@@ -713,14 +780,19 @@ export function insertWebhookLog(
     detail: string;
     title?: string;
     jobId?: number | null;
+    senderId?: number | null;
+    senderLogin?: string;
+    installationId?: string;
   },
 ): number {
+  const senderId =
+    typeof row.senderId === "number" && Number.isInteger(row.senderId) && row.senderId > 0 ? row.senderId : null;
   const inserted = db
     .prepare(
       `INSERT INTO webhook_log (
          at, forge, origin, owner, name, issue_number, delivery, event, action,
-         outcome, reason, detail, title, job_id
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         outcome, reason, detail, title, job_id, sender_id, sender_login, installation_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       row.at,
@@ -737,6 +809,9 @@ export function insertWebhookLog(
       row.detail.slice(0, 500),
       (row.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200),
       row.jobId ?? null,
+      senderId,
+      (row.senderLogin ?? "").replace(/\s+/g, " ").trim().slice(0, 80),
+      (row.installationId ?? "").slice(0, 40),
     );
   pruneWebhookLog(db, row.outcome);
   return Number(inserted.lastInsertRowid);
@@ -760,6 +835,13 @@ function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
           SELECT id FROM webhook_log WHERE outcome != 'rejected' ORDER BY id DESC LIMIT ?
         )`,
   ).run(WEBHOOK_LOG_KEEP);
+}
+
+/** The operator asked to rewrite this delivery. Settle-on-read copies the job outcome later. */
+export function queueWebhookLog(db: SqliteDb, id: number, jobId: number, detail: string): void {
+  db.prepare(
+    `UPDATE webhook_log SET outcome = 'queued', reason = 'forced', detail = ?, job_id = ? WHERE id = ?`,
+  ).run(detail.slice(0, 500), jobId, id);
 }
 
 /** A queued row keeps that label forever unless we copy the finished job onto it. */
