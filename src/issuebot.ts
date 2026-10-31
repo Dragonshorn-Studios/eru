@@ -75,7 +75,7 @@ export const LABEL_FAILED = "eru:refine-failed";
 export const COMMENT_COMPLETE =
   "Curious about this one. I rewrote it so an agent can pick it up. Your original is below, collapsed.";
 export const COMMENT_NEEDS_INFO =
-  "Curious about this one, but a few things are still open. Answer them and I'll mark it agent-ready.";
+  "Curious about this one, but a few things are still open. On GitHub, use Quote reply on the list below and write your answer under each question. I'll refine this when every question has an answer.";
 export const COMMENT_FAILED = "I got curious and tried. I couldn't rewrite this one, so your issue is untouched.";
 
 /** The forge comment: the curious line, then Eru's short take when there is one. */
@@ -108,7 +108,7 @@ export type IssueRefineFn = (input: {
   title: string;
   body: string;
   pages?: MapPage[];
-  /** When set, this directory is the repo checkout. The caller deletes it. */
+  /** Workspace parent. Source is in ./checkout. The caller deletes it. */
   checkout?: string;
 }) => Promise<string>;
 
@@ -506,11 +506,21 @@ export function openQuestionsEmpty(markdown: string): boolean {
   if (section === undefined) return false;
   const trimmed = section.trim();
   if (EMPTY_OPEN_QUESTIONS.test(trimmed)) return true;
-  const bullets = trimmed
+  return openQuestionLines(section).length === 0;
+}
+
+function openQuestionLines(section: string): string[] {
+  return section
     .split("\n")
     .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
-    .filter(Boolean);
-  return bullets.length > 0 && bullets.every((line) => EMPTY_OPEN_QUESTIONS.test(line));
+    .filter((line) => line.length > 0 && !EMPTY_OPEN_QUESTIONS.test(line));
+}
+
+/** The open questions a person can answer. Blank lines between them, so Quote reply makes one blockquote each. */
+export function answerSheet(markdown: string): string {
+  const section = headingSection(markdown, "Open questions");
+  if (section === undefined) return "";
+  return openQuestionLines(section).join("\n\n");
 }
 
 /** Pull the trailing ## Eru note out of the brief. The note is not part of the posted issue. */
@@ -881,7 +891,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     );
     return {
       title: typeof live.title === "string" ? live.title : job.title,
-      body: typeof live.body === "string" ? live.body : job.body,
+      body: typeof live.body === "string" ? live.body : "",
       token: token.value,
     };
   }
@@ -960,10 +970,15 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     agentReady: boolean,
     token?: string,
     note = "",
+    brief = "",
   ): Promise<void> {
     const labels = [LABEL_REFINED, agentReady ? LABEL_AGENT_READY : LABEL_NEEDS_INFO];
     await writeLabels(job, labels, token);
     await writeComment(job, forgeComment(agentReady ? COMMENT_COMPLETE : COMMENT_NEEDS_INFO, note), token);
+    if (!agentReady) {
+      const sheet = answerSheet(brief);
+      if (sheet) await writeComment(job, sheet, token);
+    }
   }
 
   async function processJob(job: IssueRefineJob): Promise<void> {
@@ -979,7 +994,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       if (hasIssueBotMarker(liveBody)) {
         const refined = refinedPortion(liveBody);
         const agentReady = openQuestionsEmpty(refined);
-        await finishForgeWriteBack(job, agentReady, live.token);
+        await finishForgeWriteBack(job, agentReady, live.token, "", refined);
         completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, refined, ""));
         console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
         return;
@@ -1008,12 +1023,12 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       const note = eruTake(parsed.note, { code: Boolean(checkout), map: pages.length > 0 });
       const agentReady = openQuestionsEmpty(parsed.text);
       const fresh = await liveIssue(job);
-      const freshBody = fresh.body || liveBody;
+      const freshBody = fresh.body;
       if (freshBody !== liveBody) {
         if (hasIssueBotMarker(freshBody)) {
           const refined = refinedPortion(freshBody);
           const ready = openQuestionsEmpty(refined);
-          await finishForgeWriteBack(job, ready, fresh.token ?? live.token);
+          await finishForgeWriteBack(job, ready, fresh.token ?? live.token, "", refined);
           completeIssueRefineJob(db, job.id, iso(), refineStory(ready, refined, ""));
           console.log(`issuebot: ${label} changed and already has a brief`);
           return;
@@ -1022,7 +1037,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       }
       const newBody = composeIssueBody(parsed.text, freshBody);
       await writeIssue(job, newBody, fresh.token ?? live.token);
-      await finishForgeWriteBack(job, agentReady, fresh.token ?? live.token, note);
+      await finishForgeWriteBack(job, agentReady, fresh.token ?? live.token, note, parsed.text);
       completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, parsed.text, note));
       console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
       } finally {
@@ -1117,7 +1132,7 @@ async function writeIssueMap(dir: string, pages: MapPage[]): Promise<void> {
 function refinePrompt(title: string, body: string, hadMap: boolean, hadCode: boolean): string {
   const check = hadCode
     ? [
-        "This directory is the repository checkout. Read the source with read, glob, or grep.",
+        "Read the source in ./checkout with read, glob, or grep. This directory also holds Eru's notes and config, which are not source.",
         "Do not run commands, edit files, or fetch the network.",
         "The issue was written by a person or another agent and may be incomplete or wrong. Flesh the brief out from the code.",
         "The repository source is in ./checkout. Read that. Do not treat anything outside ./checkout as source.",

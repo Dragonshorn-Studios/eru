@@ -19,6 +19,7 @@ import {
   COMMENT_FAILED,
   forgeComment,
   COMMENT_NEEDS_INFO,
+  answerSheet,
   GITHUB_ISSUE_BODY_MAX,
   ISSUE_BOT_MARKER,
   ISSUE_BOT_MAX_BODY_BYTES,
@@ -172,7 +173,7 @@ interface GhCall {
   body?: unknown;
 }
 
-function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCall[]; nextBodies?: string[] }): FetchLike {
+function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCall[]; nextBodies?: Array<string | null> }): FetchLike {
   return async (url, init) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const path = new URL(url).pathname;
@@ -198,7 +199,7 @@ function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCal
       return json(201, { name: (parsed as { name?: string })?.name });
     }
     if (/\/issues\/\d+$/.test(path) && method === "GET") {
-      const body = opts.nextBodies?.shift() ?? opts.issueBody;
+      const body = opts.nextBodies && opts.nextBodies.length > 0 ? opts.nextBodies.shift() : opts.issueBody;
       return json(200, { title: opts.issueTitle ?? "The lights flicker", body });
     }
     if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
@@ -383,6 +384,12 @@ describe("refined body", () => {
     expect(openQuestionsEmpty(refinedTemplate("None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
+    expect(answerSheet(refinedTemplate("What wattage?\n- Which fixture?"))).toBe("What wattage?\n\nWhich fixture?");
+    const many = Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`).join("\n");
+    expect(answerSheet(refinedTemplate(`${many}\n*None`)).split("\n\n")).toEqual(
+      Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`),
+    );
+    expect(answerSheet(refinedTemplate("*None"))).toBe("");
     expect(parseRefinedMarkdown("sorry").ok).toBe(false);
     const withNote = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\nMailbox is in the map. OAuthToken is not.\n`);
     expect(withNote.ok).toBe(true);
@@ -719,8 +726,9 @@ describe("issue refine worker", () => {
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_REFINED))).toBe(true);
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
-    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toEqual({
       body: forgeComment(COMMENT_COMPLETE, "I could not check the names. This repo has no map yet."),
     });
   });
@@ -836,10 +844,11 @@ describe("issue refine worker", () => {
     await bot.processDue();
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(JSON.stringify(labelAdds)).toContain(LABEL_NEEDS_INFO);
-    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({
-      body: forgeComment(COMMENT_NEEDS_INFO, "I could not check the names. This repo has no map yet."),
-    });
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([
+      forgeComment(COMMENT_NEEDS_INFO, "I could not check the names. This repo has no map yet."),
+      "What wattage should the bulb be?",
+    ]);
   });
 
   it("finishes labels and comment when the live body already carries the marker", async () => {
@@ -871,6 +880,51 @@ describe("issue refine worker", () => {
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
+  });
+
+  it("posts the question list when a marked issue still has open questions", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { db, bot } = testApp({
+      fetchImpl: githubMock({
+        issueBody: composeIssueBody(refinedTemplate("What wattage?"), original),
+        calls,
+      }),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([COMMENT_NEEDS_INFO, "What wattage?"]);
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("does not write the brief when the issue body is cleared while Eru is reading", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: original, calls, nextBodies: [original, null] }),
+      prepareSource: async () => ({
+        ok: true,
+        source: { dir: "/tmp/eru-checkout", pages: [], mapped: false, cleanup: async () => {} },
+      }),
+      refine: async () => refinedTemplate(""),
+      backoffMs: () => 60_000,
+    });
+    await postWebhook(app, openedPayload({ body: original }));
+    await bot.processDue();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(listIssueRefineJobs(db)[0].lastError).toContain("changed");
   });
 
   it("does not modify the issue body after three failed attempts", async () => {
