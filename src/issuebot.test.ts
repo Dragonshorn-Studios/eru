@@ -1,4 +1,7 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
@@ -26,6 +29,7 @@ import {
   LABEL_REFINED,
   composeIssueBody,
   createIssueBot,
+  createIssueRefiner,
   type PrepareIssueSource,
   explainWebhookDecision,
   hasIssueBotMarker,
@@ -169,7 +173,7 @@ interface GhCall {
   body?: unknown;
 }
 
-function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCall[] }): FetchLike {
+function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCall[]; nextBodies?: Array<string | null> }): FetchLike {
   return async (url, init) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const path = new URL(url).pathname;
@@ -195,7 +199,8 @@ function githubMock(opts: { issueBody: string; issueTitle?: string; calls: GhCal
       return json(201, { name: (parsed as { name?: string })?.name });
     }
     if (/\/issues\/\d+$/.test(path) && method === "GET") {
-      return json(200, { title: opts.issueTitle ?? "The lights flicker", body: opts.issueBody });
+      const body = opts.nextBodies && opts.nextBodies.length > 0 ? opts.nextBodies.shift() : opts.issueBody;
+      return json(200, { title: opts.issueTitle ?? "The lights flicker", body });
     }
     if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
       return json(200, { body: (parsed as { body?: string })?.body });
@@ -213,6 +218,7 @@ function testApp(opts: {
   refine?: (input: { title: string; body: string; checkout?: string }) => Promise<string>;
   prepareSource?: PrepareIssueSource;
   now?: () => number;
+  backoffMs?: () => number;
   gitlab?: Config["gitlab"];
   forgejo?: Config["forgejo"];
 }) {
@@ -244,7 +250,7 @@ function testApp(opts: {
     refine: opts.refine ?? (async () => refinedTemplate()),
     prepareSource: opts.prepareSource,
     now: opts.now,
-    backoffMs: () => 0,
+    backoffMs: opts.backoffMs ?? (() => 0),
   });
   const app = createApp({
     config,
@@ -379,6 +385,11 @@ describe("refined body", () => {
     expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
     expect(answerSheet(refinedTemplate("What wattage?\n- Which fixture?"))).toBe("What wattage?\n\nWhich fixture?");
+    const many = Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`).join("\n");
+    expect(answerSheet(refinedTemplate(`${many}\n*None`)).split("\n\n")).toEqual(
+      Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`),
+    );
+    expect(answerSheet(refinedTemplate("*None"))).toBe("");
     expect(parseRefinedMarkdown("sorry").ok).toBe(false);
     const withNote = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\nMailbox is in the map. OAuthToken is not.\n`);
     expect(withNote.ok).toBe(true);
@@ -715,8 +726,9 @@ describe("issue refine worker", () => {
     const labelAdds = calls.filter((c) => c.method === "POST" && c.path.endsWith("/issues/12/labels"));
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_REFINED))).toBe(true);
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
-    const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toEqual({
       body: forgeComment(COMMENT_COMPLETE, "I could not check the names. This repo has no map yet."),
     });
   });
@@ -779,6 +791,48 @@ describe("issue refine worker", () => {
     expect(brief).not.toContain("Widget");
   });
 
+  it("does not write the brief when the issue changes while Eru is reading", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({
+        issueBody: original,
+        calls,
+        nextBodies: [original, `${original}\nA person edited this.\n`],
+      }),
+      prepareSource: async () => ({
+        ok: true,
+        source: { dir: "/tmp/eru-checkout", pages: [], mapped: false, cleanup: async () => {} },
+      }),
+      refine: async () => refinedTemplate(""),
+      backoffMs: () => 60_000,
+    });
+    await postWebhook(app, openedPayload({ body: original }));
+    await bot.processDue();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    const job = listIssueRefineJobs(db)[0];
+    expect(job.status).toBe("pending");
+    expect(job.lastError).toContain("changed");
+  });
+
+  it("keeps a repo file named map when the map notes sit beside the checkout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "eru-guard-"));
+    const checkout = join(root, "checkout");
+    await mkdir(checkout);
+    await writeFile(join(checkout, "map"), "real-source\n");
+    const refine = createIssueRefiner({ bin: "opencode-not-installed", timeoutMs: 1000 });
+    await expect(
+      refine({
+        title: "t",
+        body: "b",
+        checkout: root,
+        pages: [{ id: 1, slug: "mail", title: "Mail", body: "boxes", sortOrder: 0, mappedRef: null, updatedAt: "t" }],
+      }),
+    ).rejects.toThrow();
+    expect(await readFile(join(checkout, "map"), "utf8")).toBe("real-source\n");
+    expect(await readFile(join(root, "eru-map", "map", "mail.md"), "utf8")).toContain("boxes");
+  });
+
   it("labels needs-info when Open questions is not empty", async () => {
     const original = "Something is wrong.\n\n@eru-issue-bot\n";
     const calls: GhCall[] = [];
@@ -826,6 +880,51 @@ describe("issue refine worker", () => {
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
     expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
+  });
+
+  it("posts the question list when a marked issue still has open questions", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { db, bot } = testApp({
+      fetchImpl: githubMock({
+        issueBody: composeIssueBody(refinedTemplate("What wattage?"), original),
+        calls,
+      }),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    await bot.processDue();
+    const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
+    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([COMMENT_NEEDS_INFO, "What wattage?"]);
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("does not write the brief when the issue body is cleared while Eru is reading", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: original, calls, nextBodies: [original, null] }),
+      prepareSource: async () => ({
+        ok: true,
+        source: { dir: "/tmp/eru-checkout", pages: [], mapped: false, cleanup: async () => {} },
+      }),
+      refine: async () => refinedTemplate(""),
+      backoffMs: () => 60_000,
+    });
+    await postWebhook(app, openedPayload({ body: original }));
+    await bot.processDue();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(listIssueRefineJobs(db)[0].lastError).toContain("changed");
   });
 
   it("does not modify the issue body after three failed attempts", async () => {
