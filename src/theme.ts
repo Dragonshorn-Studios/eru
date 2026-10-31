@@ -348,6 +348,7 @@ a:hover { color: var(--ink); }
   font-size: 0.82rem;
   color: color-mix(in srgb, var(--ink) 70%, white);
 }
+.refine-repo + .refine-repo { margin-top: 0.45rem; }
 .refine-toc a {
   align-items: flex-start;
   flex-wrap: wrap;

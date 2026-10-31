@@ -937,9 +937,22 @@ function refineStory(job: IssueRefineJob, embed = false): string {
 }
 
 function logTone(entry: WebhookLogEntry): { tone: string; label: string } {
-  if (entry.outcome === "queued") return { tone: "is-ready", label: "queued" };
-  if (entry.outcome === "rejected") return { tone: "is-fail", label: "rejected" };
-  return { tone: "is-open", label: "ignored" };
+  switch (entry.outcome) {
+    case "queued":
+      return { tone: "is-wait", label: "queued" };
+    case "agent-ready":
+      return { tone: "is-ready", label: "agent-ready" };
+    case "needs-info":
+      return { tone: "is-open", label: "needs-info" };
+    case "failed":
+      return { tone: "is-fail", label: "didn't land" };
+    case "skipped":
+      return { tone: "is-skip", label: "skipped" };
+    case "rejected":
+      return { tone: "is-fail", label: "rejected" };
+    case "ignored":
+      return { tone: "is-open", label: "ignored" };
+  }
 }
 
 function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hrefFor: (id: number) => string): string {
@@ -957,14 +970,23 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hr
 function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined): string {
   const tone = logTone(entry);
   const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : "no repository on the delivery";
-  return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(entry.outcome)}</p>
-        <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
-        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
-        <div class="refine-verdict ${tone.tone}">
+  const settled =
+    entry.outcome === "agent-ready" ||
+    entry.outcome === "needs-info" ||
+    entry.outcome === "failed" ||
+    entry.outcome === "skipped";
+  const verdict =
+    job && settled
+      ? ""
+      : `<div class="refine-verdict ${tone.tone}">
           <p class="refine-kicker">Why</p>
           <p>${escapeHtml(entry.detail)}</p>
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
-        </div>
+        </div>`;
+  return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(tone.label)}</p>
+        <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
+        <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · #${entry.issueNumber}` : ""} · ${escapeHtml(entry.at)}</p>
+        ${verdict}
         ${job ? refineStory(job, true) : ""}`;
 }
 

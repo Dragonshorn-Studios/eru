@@ -2007,6 +2007,10 @@ describe("refine tab", () => {
     expect(html).toContain("Automatically refresh expiring mailbox OAuth tokens");
     expect(html).toContain("The hallway light is out.");
     expect(html).toContain('class="pill pill-link" href="/log" aria-current="page">Log</a>');
+    expect(html).toContain(">agent-ready<");
+    expect(html).not.toContain(">queued<");
+    expect(html).not.toContain("Queued. The issue mentions");
+    expect(html.match(/Open questions was empty/g)).toHaveLength(1);
   });
 
   it("keeps Refine on the selected repo and lists every delivery on Log", async () => {
