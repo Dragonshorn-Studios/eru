@@ -256,7 +256,15 @@ async function appFetch(
   return { ok: true, value: res };
 }
 
+export interface GithubAppInfo {
+  id: string;
+  slug: string;
+  name: string;
+}
+
 export interface GithubAppClient {
+  /** GET /app — proves App ID + PEM by accepting the JWT. */
+  appInfo(): Promise<AppResult<GithubAppInfo>>;
   /** Resolve the installation to act as: the configured id, or the only one listed. */
   installationId(): Promise<AppResult<string>>;
   /** Mint (or reuse a cached) installation access token. */
@@ -273,6 +281,23 @@ export function createGithubAppClient(
   apiBase: string = GITHUB_API_BASE,
 ): GithubAppClient {
   const cachedTokens = new Map<string, { token: string; expiresAtMs: number }>();
+
+  async function appInfo(): Promise<AppResult<GithubAppInfo>> {
+    const res = await appFetch(creds, "/app", fetchImpl, apiBase);
+    if (!res.ok) return res;
+    let data: unknown;
+    try {
+      data = await res.value.json();
+    } catch {
+      return { ok: false, error: "unreachable" };
+    }
+    const body = data as { id?: unknown; slug?: unknown; name?: unknown };
+    const id = typeof body.id === "number" && Number.isInteger(body.id) && body.id > 0 ? String(body.id) : "";
+    const slug = typeof body.slug === "string" ? body.slug : "";
+    const name = typeof body.name === "string" ? body.name : slug;
+    if (!id || !slug) return { ok: false, error: "unreachable" };
+    return { ok: true, value: { id, slug, name } };
+  }
 
   async function installationId(): Promise<AppResult<string>> {
     if (creds.installationId) return { ok: true, value: creds.installationId };
@@ -370,5 +395,183 @@ export function createGithubAppClient(
     return { ok: true, value: repos };
   }
 
-  return { installationId, installationToken, installationTokenFor, listRepos };
+  return { appInfo, installationId, installationToken, installationTokenFor, listRepos };
+}
+
+export interface GithubAppProbeCheck {
+  ok: boolean;
+  detail: string;
+}
+
+export interface GithubAppProbeResult {
+  ok: boolean;
+  checks: GithubAppProbeCheck[];
+}
+
+export interface GithubAppProbeInput {
+  creds?: GithubAppCredentials;
+  webhookSecret?: string;
+  botUserId?: number;
+  oauth?: {
+    clientId?: string;
+    hasClientSecret: boolean;
+    adminIds: number[];
+    publicUrl: string;
+  };
+}
+
+function probeOrigin(publicUrl: string | undefined): string {
+  const origin = publicUrl?.trim().replace(/\/+$/, "") ?? "";
+  return origin || "https://<your-eru-host>";
+}
+
+export async function probeGithubApp(
+  input: GithubAppProbeInput,
+  fetchImpl: FetchLike = fetch,
+  apiBase: string = GITHUB_API_BASE,
+): Promise<GithubAppProbeResult> {
+  const checks: GithubAppProbeCheck[] = [];
+  const origin = probeOrigin(input.oauth?.publicUrl);
+  const callbackUrl = `${origin}/login/github/callback`;
+  const webhookUrl = `${origin}/webhooks/github`;
+  let mappingOk = false;
+  let slug = "";
+
+  if (!input.creds) {
+    checks.push({ ok: false, detail: "Save App ID and a private key first — mapping and the test both need them." });
+  } else {
+    const client = createGithubAppClient(input.creds, fetchImpl, apiBase);
+    const info = await client.appInfo();
+    if (!info.ok) {
+      checks.push({
+        ok: false,
+        detail:
+          info.error === "invalid"
+            ? "The private key could not sign a JWT — paste a PEM from the App's GitHub settings."
+            : info.error === "auth"
+              ? "GitHub refused the App JWT. Check that the App ID matches this private key."
+              : "Could not reach GitHub to verify the App.",
+      });
+    } else {
+      slug = info.value.slug;
+      checks.push({
+        ok: true,
+        detail: `GitHub accepted the App JWT — ${info.value.name} (${info.value.slug}, id ${info.value.id}).`,
+      });
+      const repos = await client.listRepos();
+      if (!repos.ok) {
+        checks.push({
+          ok: false,
+          detail:
+            repos.error === "noinstall"
+              ? "The App has no installations — install it on the account that owns the repos."
+              : repos.error === "ambiguous"
+                ? "The App is installed on several accounts — set an installation ID."
+                : repos.error === "auth"
+                  ? "GitHub refused an installation token. Check Contents read permission and the installation."
+                  : "Could not list installation repositories.",
+        });
+      } else {
+        mappingOk = true;
+        const install = input.creds.installationId ? `installation ${input.creds.installationId}` : "the installation";
+        const n = repos.value.length;
+        checks.push({
+          ok: true,
+          detail:
+            n === 0
+              ? `${install} can mint a token, but sees no repositories yet — install the App on a repo.`
+              : `${install} can see ${n} ${n === 1 ? "repository" : "repositories"}.`,
+        });
+      }
+    }
+  }
+
+  const oauth = input.oauth;
+  if (oauth?.clientId && oauth.hasClientSecret && oauth.adminIds.length > 0 && oauth.publicUrl) {
+    checks.push({
+      ok: true,
+      detail: `Sign in with GitHub is on. Callback URL on the App must be exactly ${callbackUrl}.`,
+    });
+  } else if (oauth?.clientId && oauth.hasClientSecret) {
+    const missing = [
+      oauth.adminIds.length === 0 ? "operator GitHub user ids" : "",
+      oauth.publicUrl ? "" : "public URL",
+    ].filter(Boolean);
+    checks.push({
+      ok: false,
+      detail: `Client ID and secret are set; add ${missing.join(" and ")} to turn on Sign in with GitHub. Callback URL: ${callbackUrl}.`,
+    });
+  } else {
+    checks.push({
+      ok: false,
+      detail: `Sign in with GitHub needs Client ID, Client secret, operator user ids, and public URL. Callback URL: ${callbackUrl}.`,
+    });
+  }
+
+  if (input.webhookSecret) {
+    checks.push({
+      ok: true,
+      detail: `Webhook secret is set. On the App, Webhook URL must be ${webhookUrl}, secret must match, and the App must subscribe to Issues.`,
+    });
+  } else {
+    checks.push({
+      ok: false,
+      detail: `Issue bot needs a webhook secret (16+ characters). Webhook URL: ${webhookUrl} — subscribe to Issues.`,
+    });
+  }
+
+  if (slug) {
+    const botLogin = `${slug}[bot]`;
+    const looked = await lookupGithubBotUser(fetchImpl, apiBase, botLogin);
+    if (!looked.ok) {
+      checks.push({
+        ok: false,
+        detail: `Could not look up ${botLogin} on GitHub — save the numeric id from api.github.com/users/${slug}%5Bbot%5D.`,
+      });
+    } else if (input.botUserId === looked.id) {
+      checks.push({ ok: true, detail: `Bot user id ${looked.id} matches ${botLogin} — issue webhooks can loop-guard.` });
+    } else if (input.botUserId) {
+      checks.push({
+        ok: false,
+        detail: `Saved bot user id ${input.botUserId} is not ${botLogin} (id ${looked.id}).`,
+      });
+    } else {
+      checks.push({
+        ok: false,
+        detail: `${botLogin} is id ${looked.id} — save it as Bot user id (with the webhook secret) to turn on @eru-issue-bot.`,
+      });
+    }
+  } else if (input.botUserId) {
+    checks.push({
+      ok: true,
+      detail: `Bot user id ${input.botUserId} is set. Confirm it is your-app[bot] at api.github.com/users/<slug>%5Bbot%5D.`,
+    });
+  }
+
+  return { ok: mappingOk, checks };
+}
+
+async function lookupGithubBotUser(
+  fetchImpl: FetchLike,
+  apiBase: string,
+  login: string,
+): Promise<{ ok: true; id: number } | { ok: false }> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${apiBase.replace(/\/+$/, "")}/users/${encodeURIComponent(login)}`, {
+      headers: forgeHeaders(""),
+      signal: AbortSignal.timeout(FORGE_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false };
+  }
+  if (!res.ok) return { ok: false };
+  try {
+    const body = (await res.json()) as { id?: unknown };
+    const id = typeof body.id === "number" ? body.id : Number(body.id);
+    if (!Number.isInteger(id) || id <= 0) return { ok: false };
+    return { ok: true, id };
+  } catch {
+    return { ok: false };
+  }
 }

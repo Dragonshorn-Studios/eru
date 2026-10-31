@@ -1,7 +1,7 @@
 import { CSRF_FIELD } from "./auth.js";
 import { OPENCODE_TIMEOUT_MAX_MS, OPENCODE_TIMEOUT_MIN_MS } from "./config.js";
 import type { MapPage, PageTocEntry } from "./db.js";
-import type { AppError, AppRepo, TarballError, VerifyError } from "./forge.js";
+import type { AppError, AppRepo, GithubAppProbeResult, TarballError, VerifyError } from "./forge.js";
 import { ASK_MAX_QUESTION } from "./opencode.js";
 import { ASK_AGENT } from "./askthreads.js";
 import { renderMarkdown } from "./markdown.js";
@@ -275,6 +275,7 @@ export interface ConfigView {
   discovered: { models: string[]; error?: string; updatedAt?: string };
   providers: ProviderCredentialStatus[];
   authPath: string;
+  appProbe?: GithubAppProbeResult;
 }
 
 export const APP_ERRORS: Record<AppError, string> = {
@@ -433,8 +434,9 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
         })();
         </script>
         <h3 id="github-app">GitHub App</h3>
-        <p class="mapped">One App covers mapping, Sign in with GitHub, and <code>@eru-issue-bot</code>. Permissions: Contents read, Issues read/write, Metadata read. Subscribe to Issues. Callback URL must be exactly <code>${escapeHtml((view.app.publicUrl || "https://eru.example") + "/login/github/callback")}</code>.</p>
-        <p class="field-hint">${view.app.loginReady ? "GitHub login is on." : "GitHub login needs Client ID, Client secret, operator user ids, and public URL."} ${view.app.issueBotReady ? "Issue webhooks are on." : "Issue bot needs webhook secret + bot user id on top of App ID and private key."}</p>
+        <p class="mapped">One App covers mapping, Sign in with GitHub, and <code>@eru-issue-bot</code>. Create it once, paste the values below, then test.</p>
+        ${githubAppSetup(view.app)}
+        ${view.appProbe ? appProbeBox(view.appProbe) : ""}
         <form class="connect-form" method="post" action="/config/github-app" autocomplete="off">
           ${csrfInput(model.csrf)}
           <label class="field">
@@ -484,7 +486,10 @@ export function configPage(model: ChromeModel, view: ConfigView, notice = ""): s
           </label>
           <button class="enter" type="submit">Save GitHub App</button>
         </form>
-        ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall || view.app.storedClientId || view.app.hasStoredClientSecret || view.app.hasStoredWebhook ? `<form class="config-refresh" method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
+        <div class="config-refresh">
+          <form method="post" action="/config/github-app/test">${csrfInput(model.csrf)}<button class="refresh-run" type="submit">Test app config</button></form>
+          ${view.app.hasStoredKey || view.app.storedAppId || view.app.storedInstall || view.app.storedClientId || view.app.hasStoredClientSecret || view.app.hasStoredWebhook ? `<form method="post" action="/config/github-app/remove">${csrfInput(model.csrf)}<button class="link-button" type="submit">Remove saved app config</button></form>` : ""}
+        </div>
         ${forgeInstanceSection(view.gitlab, model.csrf)}
         ${forgeInstanceSection(view.forgejo, model.csrf)}
         <h3 id="operator">Operator</h3>
@@ -551,10 +556,41 @@ function secretHint(
   return "not set";
 }
 
+function githubAppUrls(publicUrl: string): { callback: string; webhook: string } {
+  const origin = publicUrl.trim().replace(/\/+$/, "") || "https://<your-eru-host>";
+  return {
+    callback: `${origin}/login/github/callback`,
+    webhook: `${origin}/webhooks/github`,
+  };
+}
+
+function githubAppSetup(app: ConfigAppView): string {
+  const urls = githubAppUrls(app.publicUrl);
+  return `<ol class="setup-steps">
+          <li>GitHub → Settings → Developer settings → <strong>GitHub Apps</strong> → New GitHub App. Homepage URL can be this Eru origin.</li>
+          <li>Callback URL, exactly: <code>${escapeHtml(urls.callback)}</code> — save Public URL below so Eru uses the same origin. Where it lives on GitHub: App → <strong>Identifying and authorizing users</strong>.</li>
+          <li>Webhook URL: <code>${escapeHtml(urls.webhook)}</code>. Webhook secret: 16+ random characters, same value in the field below. Subscribe to <strong>Issues</strong>. Where it lives: App → <strong>Webhook</strong> and <strong>Subscribe to events</strong>. Rewrite only runs on repos connected in Eru.</li>
+          <li>Repository permissions: <strong>Contents</strong> Read, <strong>Issues</strong> Read &amp; write, <strong>Metadata</strong> Read-only. Uncheck everything else.</li>
+          <li>Install the App on the repos Eru should map, then <strong>Connect</strong> each one. Copy App ID, generate a private key (PEM), copy Client ID and Client secret from the App settings.</li>
+          <li>Bot user id: open <code>https://api.github.com/users/&lt;app-slug&gt;%5Bbot%5D</code> and copy the numeric <code>id</code>. That stops the bot from refining its own edits.</li>
+        </ol>
+        <p class="field-hint">${app.loginReady ? "GitHub login is on." : "GitHub login needs Client ID, Client secret, operator user ids, and public URL."} ${app.issueBotReady ? "Issue webhooks are on." : "Issue bot needs webhook secret + bot user id on top of App ID and private key."} Press <strong>Test app config</strong> after saving — it calls GitHub with the App JWT and does not send secrets back to this page.</p>`;
+}
+
+function appProbeBox(probe: GithubAppProbeResult): string {
+  const items = probe.checks
+    .map((check) => `<li class="${check.ok ? "ok" : "fail"}">${escapeHtml(check.detail)}</li>`)
+    .join("");
+  return `<div class="setup-check${probe.ok ? "" : " is-fail"}" id="github-app-test" role="status">
+          <p class="setup-check-title">${probe.ok ? "App credentials work." : "App config needs attention."}</p>
+          <ul>${items}</ul>
+        </div>`;
+}
+
 function forgeInstanceSection(view: ConfigForgeView, csrf: string): string {
   const stored = view.storedOrigin || view.hasStoredToken || view.hasStoredWebhook;
   return `<h3 id="${view.kind}">${escapeHtml(view.label)}</h3>
-        <p class="mapped">self-hosted ${escapeHtml(view.label)} — list and map repos with an API token; optional webhook secret turns on <code>@eru-issue-bot</code> at <code>${escapeHtml(view.webhookPath)}</code>.</p>
+        <p class="mapped">self-hosted ${escapeHtml(view.label)} — list and map repos with an API token; optional webhook secret turns on <code>@eru-issue-bot</code> at <code>${escapeHtml(view.webhookPath)}</code> for connected repos only.</p>
         <form class="connect-form" method="post" action="/config/${view.kind}" autocomplete="off">
           ${csrfInput(csrf)}
           <label class="field">

@@ -12,6 +12,7 @@ import {
   getForgeCredential,
   getIssueRefineJob,
   getPage,
+  findConnectedRepo,
   getPrimaryRepo,
   getRepo,
   getSetting,
@@ -131,6 +132,25 @@ describe("forge connect storage", () => {
     expect(getPrimaryRepo(db)!.name).toBe("box");
     const count = db.prepare(`SELECT COUNT(*) AS n FROM repos`).get() as { n: number };
     expect(count.n).toBe(2);
+    db.close();
+  });
+
+  it("finds a connected repo by forge identity, case-insensitive owner/name", () => {
+    const db = openDb(":memory:");
+    upsertConnectedRepo(db, { forge: "github", owner: "Acme", name: "Box" }, "2026-01-01T00:00:00Z");
+    upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.example" },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
+    expect(findConnectedRepo(db, { forge: "github", owner: "acme", name: "box" })?.name).toBe("Box");
+    expect(findConnectedRepo(db, { forge: "github", owner: "ACME", name: "BOX" })?.owner).toBe("Acme");
+    expect(findConnectedRepo(db, { forge: "github", owner: "acme", name: "cart" })).toBeUndefined();
+    expect(findConnectedRepo(db, { forge: "gitlab", owner: "acme", name: "box" })).toBeUndefined();
+    expect(
+      findConnectedRepo(db, { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.example" })?.forge,
+    ).toBe("gitlab");
     db.close();
   });
 

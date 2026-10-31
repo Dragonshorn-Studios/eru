@@ -5,6 +5,7 @@ import {
   enqueueIssueRefineJob,
   listIssueRefineJobs,
   openDb,
+  upsertConnectedRepo,
 } from "./db.js";
 import {
   COMMENT_COMPLETE,
@@ -200,6 +201,23 @@ function testApp(opts: {
   forgejo?: Config["forgejo"];
 }) {
   const db = openDb(":memory:");
+  upsertConnectedRepo(db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+  if (opts.gitlab) {
+    upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: opts.gitlab.origin },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
+  }
+  if (opts.forgejo) {
+    upsertConnectedRepo(
+      db,
+      { forge: "forgejo", owner: "acme", name: "box", origin: opts.forgejo.origin },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
+  }
   const config = gatedConfig({ gitlab: opts.gitlab, forgejo: opts.forgejo });
   const bot = createIssueBot({
     db,
@@ -446,6 +464,26 @@ describe("POST /webhooks/github", () => {
     const res = await app.request("/webhooks/github", { method: "POST", body: "{}" });
     expect(res.status).toBe(404);
   });
+
+  it("accepts a signed webhook from an unconnected repo without enqueueing", async () => {
+    const { app, db } = testApp({});
+    const res = await postWebhook(app, openedPayload({ owner: "other", repo: "lamp" }), {
+      "X-GitHub-Delivery": "d-unconnected",
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(listIssueRefineJobs(db)).toEqual([]);
+  });
+
+  it("enqueues a connected repo even when owner and name casing differ", async () => {
+    const { app, db } = testApp({});
+    const res = await postWebhook(app, openedPayload({ owner: "ACME", repo: "BOX" }), {
+      "X-GitHub-Delivery": "d-case",
+    });
+    expect(res.status).toBe(202);
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
+    expect(listIssueRefineJobs(db)[0]).toMatchObject({ owner: "ACME", name: "BOX" });
+  });
 });
 
 describe("issue refine worker", () => {
@@ -636,13 +674,40 @@ describe("issue refine worker", () => {
     expect(calls.some((c) => c.method === "POST" && c.path.includes("/issues/12/labels"))).toBe(true);
     expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/reactions"))).toBe(true);
   });
+
+  it("completes a queued job without forge writes when the repo is no longer connected", async () => {
+    const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+    const calls: GhCall[] = [];
+    const { db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: original, calls }),
+      refine: async () => refinedTemplate(""),
+    });
+    enqueueIssueRefineJob(
+      db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    db.prepare(`DELETE FROM repos`).run();
+    await bot.processDue();
+    expect(listIssueRefineJobs(db)[0].status).toBe("done");
+    expect(calls).toEqual([]);
+  });
 });
 
-function gitlabOpened(opts: { description?: string; action?: string; iid?: number } = {}): Record<string, unknown> {
+function gitlabOpened(
+  opts: { description?: string; action?: string; iid?: number; path?: string } = {},
+): Record<string, unknown> {
   return {
     object_kind: "issue",
     user: { id: OWNER_ID },
-    project: { path_with_namespace: "acme/box" },
+    project: { path_with_namespace: opts.path ?? "acme/box" },
     object_attributes: {
       action: opts.action ?? "open",
       iid: opts.iid ?? 12,
@@ -652,11 +717,13 @@ function gitlabOpened(opts: { description?: string; action?: string; iid?: numbe
   };
 }
 
-function forgejoOpened(opts: { body?: string; action?: string; number?: number } = {}): Record<string, unknown> {
+function forgejoOpened(
+  opts: { body?: string; action?: string; number?: number; owner?: string; repo?: string } = {},
+): Record<string, unknown> {
   return {
     action: opts.action ?? "opened",
     sender: { id: OWNER_ID },
-    repository: { name: "box", owner: { login: "acme" } },
+    repository: { name: opts.repo ?? "box", owner: { login: opts.owner ?? "acme" } },
     issue: {
       number: opts.number ?? 12,
       title: "The lights flicker",
@@ -700,6 +767,18 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
 
   function instanceApp() {
     const db = openDb(":memory:");
+    upsertConnectedRepo(
+      db,
+      { forge: "gitlab", owner: "acme", name: "box", origin: "https://git.example" },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
+    upsertConnectedRepo(
+      db,
+      { forge: "forgejo", owner: "acme", name: "box", origin: "https://git.example" },
+      "2026-01-01T00:00:00Z",
+      "instance",
+    );
     const config = gatedConfig({
       gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: GITLAB_SECRET },
       forgejo: { origin: "https://git.example", token: "tok", webhookSecret: FORGEJO_SECRET },
@@ -753,6 +832,25 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
     });
     expect(res.status).toBe(202);
     expect(listIssueRefineJobs(db)[0].forge).toBe("forgejo");
+  });
+
+  it("ignores a signed GitLab or Forgejo webhook from an unconnected repo", async () => {
+    const { app, db } = instanceApp();
+    const gitlab = await app.request("/webhooks/gitlab", {
+      method: "POST",
+      body: JSON.stringify(gitlabOpened({ path: "other/lamp" })),
+      headers: { "Content-Type": "application/json", "X-Gitlab-Event": "Issue Hook", "X-Gitlab-Token": GITLAB_SECRET },
+    });
+    expect(gitlab.status).toBe(202);
+    const payload = JSON.stringify(forgejoOpened({ owner: "other", repo: "lamp" }));
+    const sig = createHmac("sha256", FORGEJO_SECRET).update(payload).digest("hex");
+    const forgejo = await app.request("/webhooks/forgejo", {
+      method: "POST",
+      body: payload,
+      headers: { "Content-Type": "application/json", "X-Gitea-Event": "issues", "X-Gitea-Signature": sig },
+    });
+    expect(forgejo.status).toBe(202);
+    expect(listIssueRefineJobs(db)).toEqual([]);
   });
 
   it("returns 404 when GitLab or Forgejo webhook secrets are missing", async () => {
