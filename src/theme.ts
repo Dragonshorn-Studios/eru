@@ -341,6 +341,119 @@ a:hover { color: var(--ink); }
   font-size: 0.88em;
 }
 
+.refine-repo {
+  margin: -0.4rem 0 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: color-mix(in srgb, var(--ink) 70%, white);
+}
+.refine-toc a {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+}
+.refine-num {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--moss) 70%, var(--ink));
+}
+.refine-item-title {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.35;
+}
+.refine-kicker {
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 45%, white);
+  margin: 0 0 0.45rem;
+}
+.refine-pill {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  background: color-mix(in srgb, var(--pink) 70%, white);
+}
+.refine-pill.is-ready { background: color-mix(in srgb, var(--mint) 75%, white); }
+.refine-pill.is-open { background: color-mix(in srgb, var(--lavender) 80%, white); }
+.refine-pill.is-fail { background: color-mix(in srgb, var(--rose) 85%, white); }
+.refine-pill.is-skip { background: color-mix(in srgb, var(--moss) 40%, var(--cream)); }
+.refine-pill.is-wait { background: color-mix(in srgb, var(--pink) 75%, white); }
+.refine-verdict {
+  margin: 0 0 1.1rem;
+  padding: 0.95rem 1.15rem 1rem;
+  border-radius: 1.2rem;
+  background: color-mix(in srgb, var(--pink) 45%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 60%, var(--pink));
+}
+.refine-verdict.is-ready {
+  background: color-mix(in srgb, var(--mint) 50%, var(--cream));
+  border-color: color-mix(in srgb, white 55%, var(--mint));
+}
+.refine-verdict.is-open {
+  background: color-mix(in srgb, var(--lavender) 55%, var(--cream));
+  border-color: color-mix(in srgb, white 55%, var(--lavender));
+}
+.refine-verdict.is-fail {
+  background: color-mix(in srgb, var(--rose) 50%, var(--cream));
+  border-color: color-mix(in srgb, white 55%, var(--rose));
+}
+.refine-verdict.is-skip {
+  background: color-mix(in srgb, var(--moss) 28%, var(--cream));
+  border-color: color-mix(in srgb, white 55%, var(--moss));
+}
+.refine-verdict p { margin: 0 0 0.7rem; line-height: 1.5; }
+.refine-error {
+  margin: 0.7rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--ink) 65%, white);
+}
+.refine-sections {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+.refine-section {
+  background: color-mix(in srgb, white 62%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 65%, var(--lavender));
+  border-radius: 1.15rem;
+  padding: 0.85rem 1rem 0.35rem;
+}
+.refine-section.is-wide { grid-column: 1 / -1; }
+.refine-section.is-open {
+  background: color-mix(in srgb, var(--rose) 42%, var(--cream));
+  border-color: color-mix(in srgb, white 50%, var(--rose));
+}
+.refine-heading {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+}
+.refine-original {
+  margin-top: 1.1rem;
+  border-radius: 1.1rem;
+  background: color-mix(in srgb, var(--lavender) 28%, var(--cream));
+  border: 1px solid color-mix(in srgb, white 60%, var(--lavender));
+  padding: 0.7rem 1rem 0.2rem;
+}
+.refine-original summary {
+  cursor: pointer;
+  font-family: var(--font-serif);
+  margin-bottom: 0.6rem;
+}
+@media (max-width: 820px) {
+  .refine-sections { grid-template-columns: 1fr; }
+  .refine-section.is-wide { grid-column: auto; }
+}
+
 .ask-stage { grid-template-columns: 1fr; min-height: 0; }
 /* On /ask the shell is exactly one viewport: the island fills the card, the
    message pane scrolls inside it, and the composer stays pinned. */

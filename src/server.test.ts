@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import type { Config } from "./config.js";
 import {
+  completeIssueRefineJob,
+  enqueueIssueRefineJob,
   getForgeCredential,
   getSetting,
   setSetting,
@@ -835,6 +837,22 @@ describe("refresh map", () => {
     const nomap = app({}, okFetch, undefined, async () => ({ ok: false as const, error: "nomap" as const }));
     await seed(nomap, [], "tok");
     expect(await (await refreshPost(nomap)).text()).toContain("did not return map pages");
+
+    const help = app(
+      {},
+      okFetch,
+      undefined,
+      async () => ({
+        ok: false as const,
+        error: "failed" as const,
+        detail:
+          "e] --no-replay disable mini session history replay on resume and after resize [boolean] --replay-limit cap visible mini replay to the newest N messages [number]",
+      }),
+    );
+    await seed(help, [], "tok");
+    const notice = await (await refreshPost(help)).text();
+    expect(notice).toContain("printed command help");
+    expect(notice).not.toContain("--no-replay");
   });
 });
 
@@ -1845,5 +1863,92 @@ describe("github oauth login", () => {
     const res = await instance.request("/login/github", { redirect: "manual" });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/login");
+  });
+});
+
+describe("refine tab", () => {
+  const brief = [
+    "## Problem",
+    "The hallway light is out.",
+    "## Where",
+    "Hallway fixture.",
+    "## Is",
+    "Dead bulb.",
+    "## Want",
+    "A working light.",
+    "## Context",
+    "Night-time safety.",
+    "## Done when",
+    "The lamp turns on.",
+    "## Out of scope",
+    "Rewiring the house.",
+    "## Open questions",
+    "What wattage?",
+  ].join("\n");
+
+  it("shows caught webhooks for the selected repo and the reason the brief landed that way", async () => {
+    const instance = app();
+    const boxId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    const cartId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "cart" }, "2026-01-02T00:00:00Z");
+    setSetting(instance.db, "ui.selected_repo", String(boxId), "t");
+    const caught = enqueueIssueRefineJob(
+      instance.db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: "The hallway lamp is dead.\n\n<script>alert(1)</script>",
+      },
+      "2026-01-03T00:00:00Z",
+    )!;
+    completeIssueRefineJob(instance.db, caught, "2026-01-03T00:01:00Z", {
+      outcome: "needs-info",
+      refined: brief,
+      why: "Open questions still need an answer, so Eru left this as needs-info.",
+    });
+    const other = enqueueIssueRefineJob(
+      instance.db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "cart",
+        issueNumber: 4,
+        title: "Cart secret title",
+        body: "not this repo",
+      },
+      "2026-01-03T00:02:00Z",
+    )!;
+
+    const anon = await instance.app.request("/refine", { redirect: "manual" });
+    expect(anon.status).toBe(302);
+    expect(anon.headers.get("location")).toContain("/login");
+
+    const loggedIn = await login(instance.app);
+    const cookie = cookieLine(loggedIn).split(";")[0];
+    const page = await instance.app.request("/refine", { headers: { Cookie: cookie } });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('aria-current="page">Refine');
+    expect(html).toContain("The lights flicker");
+    expect(html).toContain("needs-info");
+    expect(html).toContain("Open questions still need an answer");
+    expect(html).toContain("What wattage?");
+    expect(html).toContain("What arrived");
+    expect(html).not.toContain("Cart secret title");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;");
+
+    setSetting(instance.db, "ui.selected_repo", String(cartId), "t");
+    const cart = await (await instance.app.request("/refine", { headers: { Cookie: cookie } })).text();
+    expect(cart).toContain("Cart secret title");
+    expect(cart).not.toContain("The lights flicker");
+
+    const missing = await instance.app.request(`/refine/${caught}`, { headers: { Cookie: cookie } });
+    expect(missing.status).toBe(404);
+    const own = await instance.app.request(`/refine/${other}`, { headers: { Cookie: cookie } });
+    expect(own.status).toBe(200);
+    expect(await own.text()).toContain("Cart secret title");
   });
 });

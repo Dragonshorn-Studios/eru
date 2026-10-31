@@ -19,12 +19,23 @@ export function opencodeModel(opts: Pick<OpenCodeOptions, "model">): string | un
   return typeof opts.model === "function" ? opts.model() : opts.model;
 }
 
-/** OpenCode 2.0: private server per invocation, no shared background service. */
+/**
+ * OpenCode 2: `run` is the non-interactive command. `--standalone` belongs on
+ * that command. Putting it first is parsed as the default TUI, which exits
+ * with command help (`--no-replay`, `--replay-limit`) instead of mapping.
+ * `--` keeps the prompt from being eaten as flags.
+ */
 export function opencodeRunArgs(prompt: string, model?: string): string[] {
-  const args = ["--standalone", "run"];
+  const args = ["run", "--standalone"];
   if (model) args.push("-m", model);
   args.push("--", prompt);
   return args;
+}
+
+/** Yargs help is not an operator-facing reason. */
+export function isCliHelpDump(text: string): boolean {
+  const flat = text.replace(/\s+/g, " ");
+  return /--[a-z0-9-]+/.test(flat) && /\[(boolean|number|string|count)\]/.test(flat);
 }
 
 /** OC2 JSON envelopes wrap the payload in `{ data }`. OC1 returned the value directly. */

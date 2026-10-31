@@ -48,10 +48,9 @@ export function createMapRefresher(opts: OpenCodeOptions): RefreshRunner {
       // the nearest .git ancestor of the temp dir and map that repo instead.
       await markWorkspaceRoot(workdir);
       const runModel = model ?? opencodeModel(opts);
-      // `--` guards the prompt: opencode args are yargs-parsed and array
-      // options can otherwise swallow a trailing positional (maomao learned
-      // this with --file). `--standalone` keeps OC2 off the shared background
-      // service so map runs cannot leak into another workspace.
+      // `run` first, then `--standalone`: a leading `--standalone` is the
+      // default TUI on current CLIs and exits with command help. `--` keeps
+      // the prompt from being swallowed as flags.
       const args = opencodeRunArgs(refreshPrompt(repoLabel, ref), runModel);
       const timeoutMs = opencodeTimeout(opts);
       console.log(`refresh ${repoLabel} @${ref}: OpenCode run starting (model=${runModel ?? "default"}, timeout=${timeoutMs}ms)`);

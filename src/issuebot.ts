@@ -289,6 +289,26 @@ export function shouldEnqueueForgejoIssue(
   };
 }
 
+export function briefSections(markdown: string): { heading: string; body: string }[] {
+  return TEMPLATE_HEADINGS.map((heading) => ({
+    heading,
+    body: (headingSection(markdown, heading) ?? "").trim(),
+  }));
+}
+
+const WHY_AGENT_READY = "Open questions was empty, so Eru marked this agent-ready.";
+const WHY_NEEDS_INFO = "Open questions still need an answer, so Eru left this as needs-info.";
+const WHY_SKIPPED = "The repo was no longer connected, so Eru did not write back.";
+const WHY_FAILED = "The rewrite did not land. The issue on the forge was left untouched.";
+
+function refineStory(agentReady: boolean, refined: string) {
+  return {
+    outcome: agentReady ? ("agent-ready" as const) : ("needs-info" as const),
+    refined: refined.replaceAll(ISSUE_BOT_MARKER, "").trim().slice(0, 64_000),
+    why: agentReady ? WHY_AGENT_READY : WHY_NEEDS_INFO,
+  };
+}
+
 export function openQuestionsEmpty(markdown: string): boolean {
   const section = headingSection(markdown, "Open questions");
   if (section === undefined) return false;
@@ -419,7 +439,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       console.log(`issuebot: hourly cap ${parsed.forge}:${parsed.owner}/${parsed.name}`);
       return jsonOk();
     }
-    const id = enqueueIssueRefineJob(db, parsed, at);
+    const id = enqueueIssueRefineJob(db, { ...parsed, origin: connectedOrigin(parsed.forge) }, at);
     if (id) console.log(`issuebot: queued ${parsed.forge}:${parsed.owner}/${parsed.name}#${parsed.issueNumber}`);
     if (id && !stopped) void processDue();
     return jsonOk();
@@ -632,7 +652,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   async function processJob(job: IssueRefineJob): Promise<void> {
     const label = `${job.forge}:${job.owner}/${job.name}#${job.issueNumber}`;
     if (!isConnected(job.forge, job.owner, job.name)) {
-      completeIssueRefineJob(db, job.id, iso());
+      completeIssueRefineJob(db, job.id, iso(), { outcome: "skipped", why: WHY_SKIPPED });
       console.log(`issuebot: skipped unconnected ${label}`);
       return;
     }
@@ -640,9 +660,10 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       const live = await liveIssue(job);
       const liveBody = live.body || job.body;
       if (hasIssueBotMarker(liveBody)) {
-        const agentReady = openQuestionsEmpty(refinedPortion(liveBody));
+        const refined = refinedPortion(liveBody);
+        const agentReady = openQuestionsEmpty(refined);
         await finishForgeWriteBack(job, agentReady, live.token);
-        completeIssueRefineJob(db, job.id, iso());
+        completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, refined));
         console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
         return;
       }
@@ -657,7 +678,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
       const newBody = composeIssueBody(parsed.text, liveBody);
       await writeIssue(job, newBody, live.token);
       await finishForgeWriteBack(job, agentReady, live.token);
-      completeIssueRefineJob(db, job.id, iso());
+      completeIssueRefineJob(db, job.id, iso(), refineStory(agentReady, parsed.text));
       console.log(`issuebot: refined ${label} (${agentReady ? "agent-ready" : "needs-info"})`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed";
@@ -668,7 +689,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
             failErr instanceof Error ? failErr.message : failErr,
           );
         });
-        failIssueRefineJob(db, job.id, iso(), clipError(message));
+        failIssueRefineJob(db, job.id, iso(), clipError(message), WHY_FAILED);
         console.log(`issuebot: failed ${label} after ${job.attempts} attempts`);
         return;
       }

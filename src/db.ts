@@ -196,6 +196,18 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    name: "0010_issue_refine_story.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(issue_refine_jobs)`).all() as { name: string }[];
+      if (columns.length === 0) return;
+      const names = new Set(columns.map((col) => col.name));
+      if (!names.has("origin")) db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT ''`);
+      if (!names.has("outcome")) db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN outcome TEXT`);
+      if (!names.has("refined")) db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN refined TEXT`);
+      if (!names.has("why")) db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN why TEXT`);
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -462,10 +474,18 @@ export function deleteStalePages(db: SqliteDb, repoId: number, keepSlugs: string
 }
 
 export type IssueRefineStatus = "pending" | "running" | "done" | "failed";
+export type IssueRefineOutcome = "agent-ready" | "needs-info" | "failed" | "skipped";
+
+export interface IssueRefineStory {
+  outcome: Exclude<IssueRefineOutcome, "failed">;
+  refined?: string | null;
+  why: string;
+}
 
 export interface IssueRefineJob {
   id: number;
   forge: string;
+  origin: string;
   installationId: string;
   owner: string;
   name: string;
@@ -473,6 +493,9 @@ export interface IssueRefineJob {
   title: string;
   body: string;
   status: IssueRefineStatus;
+  outcome: IssueRefineOutcome | null;
+  refined: string | null;
+  why: string | null;
   attempts: number;
   runAfter: string;
   lastError: string | null;
@@ -480,13 +503,14 @@ export interface IssueRefineJob {
   updatedAt: string;
 }
 
-const ISSUE_JOB_COLUMNS = `id, forge, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
+const ISSUE_JOB_COLUMNS = `id, forge, origin, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, outcome, refined, why, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
 
 /** Insert a job. Returns undefined when that issue is already queued. */
 export function enqueueIssueRefineJob(
   db: SqliteDb,
   job: {
     forge?: string;
+    origin?: string;
     installationId: string;
     owner: string;
     name: string;
@@ -499,13 +523,14 @@ export function enqueueIssueRefineJob(
   const row = db
     .prepare(
       `INSERT OR IGNORE INTO issue_refine_jobs (
-         forge, installation_id, owner, name, issue_number, title, body,
+         forge, origin, installation_id, owner, name, issue_number, title, body,
          status, attempts, run_after, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
        RETURNING id`,
     )
     .get(
       job.forge ?? "github",
+      job.origin ?? "",
       job.installationId,
       job.owner,
       job.name,
@@ -544,6 +569,22 @@ export function listIssueRefineJobs(db: SqliteDb): IssueRefineJob[] {
   return db.prepare(`SELECT ${ISSUE_JOB_COLUMNS} FROM issue_refine_jobs ORDER BY id ASC`).all() as IssueRefineJob[];
 }
 
+/** Newest catches for one connected repo. Blank origin matches jobs recorded before hosts were stored. */
+export function listIssueRefineJobsForRepo(
+  db: SqliteDb,
+  repo: { forge: string; owner: string; name: string; origin?: string },
+): IssueRefineJob[] {
+  return db
+    .prepare(
+      `SELECT ${ISSUE_JOB_COLUMNS} FROM issue_refine_jobs
+       WHERE forge = ? AND lower(owner) = lower(?) AND lower(name) = lower(?)
+         AND (origin = '' OR origin = ?)
+       ORDER BY id DESC
+       LIMIT 80`,
+    )
+    .all(repo.forge, repo.owner, repo.name, repo.origin ?? "") as IssueRefineJob[];
+}
+
 /** Claim the next due pending job. Single-process: no other worker races us. */
 export function claimDueIssueRefineJob(db: SqliteDb, at: string): IssueRefineJob | undefined {
   return db
@@ -563,16 +604,22 @@ export function claimDueIssueRefineJob(db: SqliteDb, at: string): IssueRefineJob
     })();
 }
 
-export function completeIssueRefineJob(db: SqliteDb, id: number, at: string): void {
-  db.prepare(`UPDATE issue_refine_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?`).run(at, id);
+export function completeIssueRefineJob(db: SqliteDb, id: number, at: string, story?: IssueRefineStory): void {
+  if (!story) {
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?`).run(at, id);
+    return;
+  }
+  db.prepare(
+    `UPDATE issue_refine_jobs
+     SET status = 'done', outcome = ?, refined = ?, why = ?, last_error = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(story.outcome, story.refined ?? null, story.why, at, id);
 }
 
-export function failIssueRefineJob(db: SqliteDb, id: number, at: string, error: string): void {
-  db.prepare(`UPDATE issue_refine_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?`).run(
-    error,
-    at,
-    id,
-  );
+export function failIssueRefineJob(db: SqliteDb, id: number, at: string, error: string, why?: string): void {
+  db.prepare(
+    `UPDATE issue_refine_jobs SET status = 'failed', outcome = 'failed', why = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+  ).run(why ?? null, error, at, id);
 }
 
 export function retryIssueRefineJob(db: SqliteDb, id: number, at: string, runAfter: string, error: string): void {
