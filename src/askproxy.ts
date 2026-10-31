@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { isMutating } from "./auth.js";
 import type { SqliteDb, MappedRepo } from "./db.js";
 import type { FetchLike } from "./forge.js";
+import { unwrapOcData } from "./opencode.js";
 import { ensureWorkspace, getThread, touchThread } from "./askthreads.js";
 
 /**
@@ -95,6 +96,19 @@ export function withSessionLocation(raw: ArrayBuffer | Uint8Array, workspace: st
   return new TextEncoder().encode(JSON.stringify(body));
 }
 
+/**
+ * OpenCode 2 answers `{ data: T }`. The Ask client reads `T` itself
+ * (`response.data.id`), so a wrapped session looks like it was never created.
+ */
+export function unwrapOcJson(text: string): string {
+  if (!text) return text;
+  try {
+    return JSON.stringify(unwrapOcData(JSON.parse(text)));
+  } catch {
+    return text;
+  }
+}
+
 export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response> {
   const threadId = c.req.param("threadId") ?? "";
   const prefix = `/ask/oc/${threadId}`;
@@ -167,5 +181,11 @@ export async function askProxy(c: Context, deps: AskProxyDeps): Promise<Response
   res.headers.forEach((value, key) => {
     if (!STRIP_RESPONSE_HEADERS.has(key.toLowerCase())) out.set(key, value);
   });
+  const type = res.headers.get("content-type") ?? "";
+  if (res.ok && !isAskEventStream(upstreamPath) && type.includes("json")) {
+    const text = await res.text();
+    out.delete("content-length");
+    return new Response(unwrapOcJson(text), { status: res.status, headers: out });
+  }
   return new Response(res.body, { status: res.status, headers: out });
 }
