@@ -99,24 +99,11 @@ export async function extractTarball(data: Buffer, destDir: string): Promise<voi
 }
 
 // Model output is untrusted: strict shape, bounded sizes, sanitized slugs.
+// OpenCode prints logs and tool lines before the array. The first `[` is often
+// one of those lines, so a slice from the first `[` to the last `]` does not parse.
 export function parseMapPages(stdout: string): MappedPageDraft[] | null {
-  let text = stdout.trim();
-  const fenced = text.match(/```(?:json)?\s*(\[[\s\S]*\])\s*```/);
-  if (fenced) text = fenced[1];
-  else {
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]");
-    if (start === -1 || end <= start) return null;
-    text = text.slice(start, end + 1);
-  }
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(raw)) return null;
+  const raw = findPageArray(stripAnsi(stdout));
+  if (!raw) return null;
 
   const pages: MappedPageDraft[] = [];
   const seen = new Set<string>();
@@ -144,6 +131,72 @@ export function parseMapPages(stdout: string): MappedPageDraft[] | null {
     });
   }
   return pages;
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+/** Last JSON array in the output that looks like map pages. `[]` if the only arrays are empty. */
+function findPageArray(text: string): unknown[] | null {
+  let pages: unknown[] | null = null;
+  let sawArray = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "[") continue;
+    const slice = balancedJsonSlice(text, i);
+    if (!slice) continue;
+    i += slice.length - 1;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(slice);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    sawArray = true;
+    if (parsed.some(isPageLike)) pages = parsed;
+  }
+  if (pages) return pages;
+  return sawArray ? [] : null;
+}
+
+function isPageLike(entry: unknown): boolean {
+  if (typeof entry !== "object" || entry === null) return false;
+  const record = entry as Record<string, unknown>;
+  return typeof record.slug === "string" || typeof record.title === "string";
+}
+
+/** JSON array starting at `[`, respecting strings so brackets inside page bodies do not end it. */
+function balancedJsonSlice(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth === 0) return ch === "]" ? text.slice(start, i + 1) : null;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
 }
 
 function refreshPrompt(repoLabel: string, ref: string): string {
