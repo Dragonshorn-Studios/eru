@@ -53,6 +53,7 @@ import {
   getSetting,
   listAllPages,
   listConnectedRepos,
+  getIssueRefineJob,
   getWebhookLog,
   listIssueRefineJobs,
   listIssueRefineJobsForRepo,
@@ -512,12 +513,14 @@ export function createApp(opts: AppOptions): Hono<Env> {
   });
   app.get("/ask", (c) => html(c, askPage(appModel(c))));
 
-  app.get("/refine", (c) => html(c, refinePage(appModel(c), refineCatches(db), undefined, logsForSelectedRepo(db))));
+  app.get("/refine", (c) =>
+    html(c, refinePage(appModel(c), refineCatches(db), undefined, logsForSelectedRepo(db), undefined, "repo", clipNotice(c.req.query("notice")))),
+  );
   app.get("/refine/log/:id", (c) => {
     const id = Number(c.req.param("id"));
     const repo = selectedRepo(db);
     const entry = repo && Number.isInteger(id) ? getWebhookLog(db, id) : undefined;
-    if (!entry || !repo || !logMatchesRepo(entry, repo)) return c.text("not found", 404);
+    if (!entry || !repo || !logMatchesRepo(entry, repo) || entry.outcome === "ignored") return c.text("not found", 404);
     return html(
       c,
       refinePage(
@@ -535,7 +538,21 @@ export function createApp(opts: AppOptions): Hono<Env> {
     const jobs = refineCatches(db);
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id < 1 || !jobs.some((job) => job.id === id)) return c.text("not found", 404);
-    return html(c, refinePage(appModel(c), jobs, id, logsForSelectedRepo(db)));
+    return html(c, refinePage(appModel(c), jobs, id, logsForSelectedRepo(db), undefined, "repo", clipNotice(c.req.query("notice"))));
+  });
+
+  app.post("/refine/:id/rerun", async (c) => {
+    const bot = issueBotNow();
+    if (!bot) return c.text("not found", 404);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id < 1) return c.text("not found", 404);
+    const job = getIssueRefineJob(db, id);
+    if (!job) return c.text("not found", 404);
+    const body = await c.req.parseBody();
+    const back = rerunReturnPath(typeof body.return === "string" ? body.return : undefined, id);
+    const result = await bot.rerun(job);
+    if (!result.ok) return c.redirect(`${back}?notice=${encodeURIComponent(result.detail)}`);
+    return c.redirect(back);
   });
 
   app.get("/log", (c) => html(c, refinePage(appModel(c), listIssueRefineJobs(db), undefined, listWebhookLogs(db), undefined, "all")));
@@ -1269,10 +1286,22 @@ function logMatchesRepo(entry: WebhookLogEntry, repo: MappedRepo): boolean {
   );
 }
 
+function clipNotice(value: string | undefined): string {
+  if (!value) return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function rerunReturnPath(value: string | undefined, jobId: number): string {
+  if (value === `/refine/${jobId}`) return value;
+  if (value && /^\/log\/\d+$/.test(value)) return value;
+  if (value && /^\/refine\/log\/\d+$/.test(value)) return value;
+  return `/refine/${jobId}`;
+}
+
 function logsForSelectedRepo(db: SqliteDb): WebhookLogEntry[] {
   const repo = selectedRepo(db);
   if (!repo) return [];
-  return listWebhookLogs(db, 80, webhookRepoFilter(repo));
+  return listWebhookLogs(db, 80, webhookRepoFilter(repo), { hideIgnored: true });
 }
 
 function withFocusedLog(logs: WebhookLogEntry[], entry: WebhookLogEntry): WebhookLogEntry[] {

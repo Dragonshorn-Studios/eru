@@ -899,7 +899,16 @@ function refineCatchList(jobs: IssueRefineJob[], focusId: number | undefined): s
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
 }
 
-function refineStory(job: IssueRefineJob, embed = false): string {
+function rerunForm(job: IssueRefineJob, csrf: string, back: string): string {
+  if (job.status === "pending" || job.status === "running") return "";
+  return `<form class="refine-actions" method="post" action="/refine/${job.id}/rerun">
+        ${csrfInput(csrf)}
+        <input type="hidden" name="return" value="${escapeHtml(back)}"/>
+        <button class="refresh-run" type="submit">Run Eru again</button>
+      </form>`;
+}
+
+function refineStory(job: IssueRefineJob, embed = false, csrf = "", back = ""): string {
   const tone = refineTone(job);
   const sections = job.refined ? briefSections(job.refined) : [];
   const cards = sections
@@ -936,6 +945,7 @@ function refineStory(job: IssueRefineJob, embed = false): string {
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
           ${error}
         </div>
+        ${rerunForm(job, csrf, back || `/refine/${job.id}`)}
         ${brief}
         ${original}`;
 }
@@ -1063,7 +1073,7 @@ function webhookLogStory(
         ${flash}
         ${forceForms(entry, csrf, back)}
         ${verdict}
-        ${job ? refineStory(job, true) : ""}`;
+        ${job ? refineStory(job, true, csrf, back) : ""}`;
 }
 
 export function refinePage(
@@ -1084,6 +1094,7 @@ export function refinePage(
         : undefined;
   const focus = jobs.find((job) => job.id === focusId) ?? (focusLog || all ? undefined : jobs[0]);
   const repoName = model.repo ? `${model.repo.owner}/${model.repo.name}` : "";
+  const flash = notice ? `<p class="flash">${escapeHtml(notice)}</p>` : "";
   let article: string;
   if (focusLog) {
     const job = focusLog.jobId ? jobs.find((item) => item.id === focusLog.jobId) : undefined;
@@ -1097,10 +1108,11 @@ export function refinePage(
         <p class="page-lead">This tab lists webhooks for the selected repo. <a href="/connect">Connect a repo</a>, or open <a href="/log">all webhooks</a>.</p>`;
   } else if (!focus) {
     article = `<h2 class="page-title">No webhooks for this repo</h2>
-        <p class="page-lead">Deliveries for ${repoName ? `<span class="path">${escapeHtml(repoName)}</span>` : "the selected repo"} show up here. Mention <code>@eru-issue-bot</code> in the issue title or body — the GitHub App name is not the mention. Other repositories are on <a href="/log">all webhooks</a>.</p>`;
+        <p class="page-lead">Deliveries Eru acted on for ${repoName ? `<span class="path">${escapeHtml(repoName)}</span>` : "the selected repo"} show up here. Ignored ones stay on <a href="/log">all webhooks</a>. Mention <code>@eru-issue-bot</code> in the issue title or body — the GitHub App name is not the mention.</p>`;
   } else {
-    article = refineStory(focus);
+    article = refineStory(focus, false, model.csrf, `/refine/${focus.id}`);
   }
+  article = `${flash}${article}`;
   const hrefFor = (id: number) => (all ? `/log/${id}` : `/refine/log/${id}`);
   const list = logs.length > 0 ? webhookLogList(logs, focusLog?.id, hrefFor) : all ? "" : refineCatchList(jobs, focus?.id);
   const repoLine = all

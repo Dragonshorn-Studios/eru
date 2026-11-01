@@ -589,6 +589,127 @@ export async function forgejoAddReaction(
   throw new Error(`forgejo:reaction:${res.status}`);
 }
 
+export async function gitlabRemoveMatchingNotes(
+  origin: string,
+  token: string,
+  owner: string,
+  name: string,
+  iid: number,
+  match: (body: string) => boolean,
+  fetchImpl: FetchLike,
+): Promise<void> {
+  const path = encodeURIComponent(`${owner}/${name}`);
+  const ids: number[] = [];
+  for (let page = 1; page <= COMMENT_PAGE_CAP; page++) {
+    const res = await jsonFetch(
+      fetchImpl,
+      `${forgeApiRoot(origin, "gitlab")}/projects/${path}/issues/${iid}/notes?per_page=100&page=${page}`,
+      gitlabHeaders(token),
+    );
+    if ("error" in res || !res.status || res.status >= 400) throw new Error("gitlab:notes");
+    const notes = Array.isArray(res.body) ? res.body : [];
+    for (const note of notes) {
+      const row = note as { id?: unknown; body?: unknown; system?: unknown };
+      if (row.system === true) continue;
+      if (typeof row.body === "string" && typeof row.id === "number" && match(row.body)) ids.push(row.id);
+    }
+    if (notes.length < 100) break;
+  }
+  for (const id of ids) {
+    const res = await gitlabRequest(origin, token, "DELETE", `/projects/${path}/issues/${iid}/notes/${id}`, undefined, fetchImpl);
+    if (!res.ok && res.status !== 404) throw new Error(`gitlab:note-delete:${res.status}`);
+  }
+}
+
+export async function gitlabRemoveLabels(
+  origin: string,
+  token: string,
+  owner: string,
+  name: string,
+  iid: number,
+  labels: string[],
+  fetchImpl: FetchLike,
+): Promise<void> {
+  if (labels.length === 0) return;
+  const path = encodeURIComponent(`${owner}/${name}`);
+  const res = await gitlabRequest(
+    origin,
+    token,
+    "PUT",
+    `/projects/${path}/issues/${iid}`,
+    { remove_labels: labels.join(",") },
+    fetchImpl,
+  );
+  if (!res.ok && res.status !== 404) throw new Error(`gitlab:labels:${res.status}`);
+}
+
+export async function forgejoRemoveMatchingComments(
+  origin: string,
+  token: string,
+  owner: string,
+  name: string,
+  number: number,
+  match: (body: string) => boolean,
+  fetchImpl: FetchLike,
+): Promise<void> {
+  const root = `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${number}/comments`;
+  const ids: number[] = [];
+  for (let page = 1; page <= COMMENT_PAGE_CAP; page++) {
+    const res = await jsonFetch(fetchImpl, `${root}?limit=50&page=${page}`, forgejoHeaders(token));
+    if ("error" in res || !res.status || res.status >= 400) throw new Error("forgejo:comments");
+    const comments = Array.isArray(res.body) ? res.body : [];
+    for (const comment of comments) {
+      const row = comment as { id?: unknown; body?: unknown };
+      if (typeof row.body === "string" && typeof row.id === "number" && match(row.body)) ids.push(row.id);
+    }
+    if (comments.length < 50) break;
+  }
+  for (const id of ids) {
+    const res = await forgejoRequest(
+      origin,
+      token,
+      "DELETE",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${id}`,
+      undefined,
+      fetchImpl,
+    );
+    if (!res.ok && res.status !== 404) throw new Error(`forgejo:comment-delete:${res.status}`);
+  }
+}
+
+export async function forgejoRemoveLabels(
+  origin: string,
+  token: string,
+  owner: string,
+  name: string,
+  number: number,
+  labels: string[],
+  fetchImpl: FetchLike,
+): Promise<void> {
+  if (labels.length === 0) return;
+  const list = await jsonFetch(
+    fetchImpl,
+    `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/labels?limit=50`,
+    forgejoHeaders(token),
+  );
+  if ("error" in list || !Array.isArray(list.body)) throw new Error("forgejo:labels");
+  const wanted = new Set(labels);
+  for (const row of list.body) {
+    const label = row as { id?: unknown; name?: unknown };
+    const id = typeof label.id === "number" ? label.id : Number(label.id);
+    if (typeof label.name !== "string" || !wanted.has(label.name) || !Number.isInteger(id) || id <= 0) continue;
+    const res = await forgejoRequest(
+      origin,
+      token,
+      "DELETE",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${number}/labels/${id}`,
+      undefined,
+      fetchImpl,
+    );
+    if (!res.ok && res.status !== 404) throw new Error(`forgejo:label-delete:${res.status}`);
+  }
+}
+
 function gitlabLabelColor(name: string): string {
   switch (name) {
     case "eru:refined":

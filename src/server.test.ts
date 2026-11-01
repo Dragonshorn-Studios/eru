@@ -2035,6 +2035,8 @@ describe("refine tab", () => {
     expect(html.match(/Open questions was empty/g)).toHaveLength(1);
     expect(html).toContain("Mailbox is in the map. Scheduler is not a name I found.");
     expect(html).toContain('class="issue-link" href="https://github.com/acme/box/issues/105"');
+    expect(html).toContain("Run Eru again");
+    expect(html).toContain(`action="/refine/${caught}/rerun"`);
   });
 
   it("lists a delivery with no issue number by its event", async () => {
@@ -2064,25 +2066,36 @@ describe("refine tab", () => {
     const oldest = insertWebhookLog(instance.db, {
       at: "2026-01-01T00:00:00Z",
       forge: "github",
-      outcome: "ignored",
-      reason: "mention",
+      outcome: "queued",
+      reason: "queued",
       detail: "OLDEST-DELIVERY-SENTENCE",
       title: "Old lamp",
       owner: "acme",
       name: "box",
       issueNumber: 1,
     });
+    const ignored = insertWebhookLog(instance.db, {
+      at: "2026-01-01T00:00:01Z",
+      forge: "github",
+      outcome: "ignored",
+      reason: "mention",
+      detail: "IGNORED-ON-BOX",
+      title: "Ignored lamp",
+      owner: "acme",
+      name: "box",
+      issueNumber: 2,
+    });
     for (let i = 0; i < 85; i++) {
       insertWebhookLog(instance.db, {
         at: "2026-01-02T00:00:00Z",
         forge: "github",
-        outcome: "ignored",
-        reason: "mention",
+        outcome: "queued",
+        reason: "queued",
         detail: `newer delivery ${i}`,
         title: `Newer ${i}`,
         owner: "acme",
         name: "box",
-        issueNumber: i + 2,
+        issueNumber: i + 3,
       });
     }
     const other = insertWebhookLog(instance.db, {
@@ -2106,6 +2119,8 @@ describe("refine tab", () => {
     expect(missing.status).toBe(404);
     const otherOnRefine = await instance.app.request(`/refine/log/${other}`, { headers: { Cookie: cookie } });
     expect(otherOnRefine.status).toBe(404);
+    const ignoredOnRefine = await instance.app.request(`/refine/log/${ignored}`, { headers: { Cookie: cookie } });
+    expect(ignoredOnRefine.status).toBe(404);
 
     const page = await instance.app.request(`/refine/log/${oldest}`, { headers: { Cookie: cookie } });
     expect(page.status).toBe(200);
@@ -2118,9 +2133,10 @@ describe("refine tab", () => {
     const homeHtml = await home.text();
     expect(homeHtml).toContain("newer delivery 84");
     expect(homeHtml).not.toContain("OLDEST-DELIVERY-SENTENCE");
+    expect(homeHtml).not.toContain("IGNORED-ON-BOX");
     const row = homeHtml.match(/<a class="refine-log-row"[^>]*>[\s\S]*?<\/a>/);
-    expect(row?.[0]).toContain("#86");
-    expect(row?.[0]).toContain("ignored");
+    expect(row?.[0]).toContain("#87");
+    expect(row?.[0]).toContain("queued");
     expect(row?.[0]).not.toContain("newer delivery");
     expect(homeHtml).not.toContain("LAMP-ONLY-DELIVERY");
     expect(homeHtml).toContain('href="/log"');
