@@ -644,9 +644,71 @@ function imageSrcIsKept(src: string): boolean {
   return !/^(?:javascript|data|vbscript):/i.test(value);
 }
 
+/** Markdown images, including URLs that contain balanced parentheses. */
+function markdownImages(text: string): Array<{ token: string; src: string }> {
+  const found: Array<{ token: string; src: string }> = [];
+  let i = 0;
+  while (i < text.length) {
+    const start = text.indexOf("![", i);
+    if (start < 0) break;
+    const altEnd = text.indexOf("](", start + 2);
+    if (altEnd < 0 || text.slice(start + 2, altEnd).includes("\n")) {
+      i = start + 2;
+      continue;
+    }
+    let depth = 1;
+    let quote = "";
+    let closed = -1;
+    for (let j = altEnd + 2; j < text.length; j++) {
+      const ch = text[j];
+      if (quote) {
+        if (ch === quote) quote = "";
+        else if (ch === "\n") break;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth === 0) {
+          closed = j;
+          break;
+        }
+      } else if (ch === "\n") break;
+    }
+    if (closed < 0) {
+      i = start + 2;
+      continue;
+    }
+    const inner = text.slice(altEnd + 2, closed);
+    let src = inner;
+    let titleQuote = "";
+    for (let k = 0; k < inner.length; k++) {
+      const ch = inner[k];
+      if (titleQuote) {
+        if (ch === titleQuote) titleQuote = "";
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        titleQuote = ch;
+        continue;
+      }
+      if (ch === " " || ch === "\t") {
+        src = inner.slice(0, k);
+        break;
+      }
+    }
+    found.push({ token: text.slice(start, closed + 1), src: src.trim() });
+    i = closed + 1;
+  }
+  return found;
+}
+
 /** Images from the issue, in order, so a rewrite can keep them above the collapsed original. */
 export function issueImages(text: string): string[] {
-  const markdownImage = /!\[[^\]]*\]\(([^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
   const htmlImage = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi;
   const found: string[] = [];
   const seen = new Set<string>();
@@ -656,8 +718,8 @@ export function issueImages(text: string): string[] {
     seen.add(image);
     found.push(image);
   };
-  for (const match of text.matchAll(markdownImage)) {
-    if (match[1] && imageSrcIsKept(match[1])) add(match[0]);
+  for (const image of markdownImages(text)) {
+    if (imageSrcIsKept(image.src)) add(image.token);
   }
   for (const match of text.matchAll(htmlImage)) {
     const src = match[1] || match[2];

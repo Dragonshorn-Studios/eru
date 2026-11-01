@@ -404,6 +404,9 @@ describe("refined body", () => {
     const htmlBrief = withHtml.slice(0, withHtml.indexOf("<details>"));
     expect(htmlBrief).toContain(htmlShot);
     expect(htmlBrief).not.toContain("javascript:");
+    const paren = "![shot](https://en.wikipedia.org/wiki/A_(b))";
+    const withParen = composeIssueBody(refinedTemplate(), paren);
+    expect(withParen.slice(0, withParen.indexOf("<details>"))).toContain(paren);
   });
 
   it("treats blank / None Open questions as agent-ready", () => {

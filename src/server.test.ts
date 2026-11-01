@@ -1921,6 +1921,24 @@ describe("repo reading progress", () => {
     }
     const status = await instance.app.request("/refresh/status", { headers: { Cookie: cookie } });
     await expect(status.json()).resolves.toMatchObject({ status: "running" });
+
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    const refresh = await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: session.csrf }),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
+        "HX-Request": "true",
+      },
+    });
+    const refreshHtml = await refresh.text();
+    expect(refreshHtml).toContain("already reading this repo for an issue");
+    expect(refreshHtml).not.toContain("Mapping —");
+    await expect(
+      (await instance.app.request("/refresh/status", { headers: { Cookie: cookie } })).json(),
+    ).resolves.toMatchObject({ status: "running" });
   });
 });
 

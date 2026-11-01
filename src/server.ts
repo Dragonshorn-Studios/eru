@@ -866,6 +866,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(refreshResultFragment("Connect a repo before refreshing."));
     }
+    const current = mapping.get(repo.id);
     if (mapping.start(repo.id, now())) {
       void refreshNotice(db, config, fetchImpl, refresh, now, githubApp, repo)
         .then((result) => mapping.finish(repo.id, result.ok ? "done" : "failed", result.notice, now()))
@@ -874,9 +875,13 @@ export function createApp(opts: AppOptions): Hono<Env> {
           mapping.finish(repo.id, "failed", "Refresh crashed — check the service log.", now());
         });
     }
+    const readingIssue = current?.status === "running" && current.kind === "explore";
+    const fragment = readingIssue
+      ? "Eru is already reading this repo for an issue. Refresh again after that finishes."
+      : "Mapping — the pane will reload when it finishes.";
     if (c.req.header("HX-Request") === "true") {
       c.header("Content-Type", "text/html; charset=utf-8");
-      return c.body(refreshResultFragment("Mapping — the pane will reload when it finishes."));
+      return c.body(refreshResultFragment(fragment));
     }
     return c.redirect("/");
   });
@@ -1695,10 +1700,13 @@ async function prepareIssueSource(
         dir: opened.workdir,
         pages,
         mapped,
-        cleanup: () =>
-          rm(opened.workdir, { recursive: true, force: true }).then(() => {
+        cleanup: async () => {
+          try {
+            await rm(opened.workdir, { recursive: true, force: true });
+          } finally {
             finish("done", notice);
-          }),
+          }
+        },
       },
     };
   } catch (err) {
