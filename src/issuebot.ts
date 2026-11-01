@@ -118,6 +118,10 @@ function clipToForgeComment(text: string, max: number): string {
 
 /** Hidden marker so a rerun can delete Eru's comments without matching a person's sentence. */
 export const ISSUE_BOT_COMMENT_MARKER = "<!-- eru-issue-bot:comment -->";
+/** Hidden marker in the brief. GitHub does not render it. It means Open questions is empty. */
+export const QUESTIONS_NONE_MARKER = "<!-- eru-issue-bot:questions none -->";
+/** Hidden marker on the line before one open question. */
+export const QUESTION_MARKER = "<!-- eru-issue-bot:question -->";
 
 /** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
@@ -671,6 +675,24 @@ export function openQuestionsEmpty(markdown: string): boolean {
   return openQuestionLines(section).length === 0;
 }
 
+/** Write the hidden question markers Eru reads back. A model-written copy is not kept. */
+export function stampOpenQuestions(markdown: string): string {
+  const section = headingSection(markdown, "Open questions");
+  if (section === undefined) return markdown;
+  const questions = openQuestionLines(stripQuestionMarkers(section));
+  const body =
+    questions.length === 0
+      ? `\n${QUESTIONS_NONE_MARKER}\nNone.\n`
+      : `\n${questions.map((question) => `${QUESTION_MARKER}\n${question}`).join("\n\n")}\n`;
+  return replaceHeadingSection(markdown, "Open questions", body);
+}
+
+function stripQuestionMarkers(text: string): string {
+  return text
+    .replaceAll(QUESTIONS_NONE_MARKER, "")
+    .replaceAll(QUESTION_MARKER, "");
+}
+
 /** The question text, without a list marker, checkbox, or wrapping quotes. */
 function visibleQuestionLine(line: string): string {
   return line
@@ -696,7 +718,42 @@ function isPlaceholderQuestion(line: string): boolean {
 }
 
 function openQuestionLines(section: string): string[] {
-  return section
+  const marked = markedQuestionLines(section);
+  if (marked.length > 0) {
+    const seen = new Set(marked.map((question) => normalizeQuestion(question)));
+    for (const question of heuristicQuestionLines(section)) {
+      if (question.includes("?") && !seen.has(normalizeQuestion(question))) marked.push(question);
+    }
+    return marked;
+  }
+  if (section.includes(QUESTIONS_NONE_MARKER)) {
+    const asked = heuristicQuestionLines(section).filter((question) => question.includes("?"));
+    if (asked.length === 0) return [];
+    return asked;
+  }
+  return heuristicQuestionLines(section);
+}
+
+/** The line after each question marker. That line is the question. */
+function markedQuestionLines(section: string): string[] {
+  const lines = section.split("\n");
+  const questions: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!(lines[i] ?? "").includes(QUESTION_MARKER)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const raw = lines[j] ?? "";
+      if (raw.includes(QUESTION_MARKER) || raw.includes(QUESTIONS_NONE_MARKER)) break;
+      const text = visibleQuestionLine(raw);
+      if (!text) continue;
+      questions.push(text);
+      break;
+    }
+  }
+  return questions;
+}
+
+function heuristicQuestionLines(section: string): string[] {
+  return stripQuestionMarkers(section)
     .split("\n")
     .map((line) => visibleQuestionLine(line))
     .filter((line) => line.length > 0 && !isPlaceholderQuestion(line));
@@ -808,7 +865,7 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string; not
     }
   }
   const split = splitEruNote(text);
-  text = neutralizeAtMentions(stripIssueBotMention(split.text)).trim();
+  text = stripQuestionMarkers(neutralizeAtMentions(stripIssueBotMention(split.text))).trim();
   const note = noteParagraph(neutralizeAtMentions(stripIssueBotMention(split.note)));
   if (!text) return { ok: false, error: "empty" };
   return { ok: true, text, note };
@@ -905,7 +962,7 @@ export function issueImages(text: string): string[] {
 }
 
 export function composeIssueBody(refined: string, original: string): string {
-  const brief = stripIssueBotMention(refined).trim();
+  const brief = stampOpenQuestions(stripIssueBotMention(refined).trim());
   const pictures = issueImages(original).filter((image) => !brief.includes(image));
   const head = [
     ISSUE_BOT_MARKER,
@@ -1945,7 +2002,7 @@ export function refinePrompt(
     "",
     TEMPLATE_HEADINGS.map((h) => `## ${h}`).join("\n"),
     "",
-    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty, or write None. A period is fine. Do not put a question there unless a person still has to decide.",
+    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty, or write None. A period is fine. Do not put a question there unless a person still has to decide. Do not write an HTML comment; Eru marks that section.",
     "If the issue includes images, keep each image in the brief. Do not leave screenshots only in the original.",
     ...(answers && answers.length > 0
       ? [
@@ -2118,6 +2175,17 @@ function labelColor(name: string): string {
     default:
       return "ededed";
   }
+}
+
+function replaceHeadingSection(markdown: string, heading: string, body: string): string {
+  const re = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "im");
+  const match = re.exec(markdown);
+  if (!match || match.index === undefined) return markdown;
+  const start = match.index + match[0].length;
+  const rest = markdown.slice(start);
+  const next = /^##\s+/im.exec(rest);
+  const end = next ? start + next.index : markdown.length;
+  return `${markdown.slice(0, start)}${body.endsWith("\n") ? body : `${body}\n`}${markdown.slice(end)}`;
 }
 
 function headingSection(markdown: string, heading: string): string | undefined {
