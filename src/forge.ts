@@ -511,12 +511,12 @@ export async function probeGithubApp(
   if (input.webhookSecret) {
     checks.push({
       ok: true,
-      detail: `Webhook secret is set. On the App, Webhook URL must be ${webhookUrl}, secret must match, and the App must subscribe to Issues.`,
+      detail: `Webhook secret is set. On the App, Webhook URL must be ${webhookUrl}, secret must match, and the App must subscribe to Issues and Issue comments.`,
     });
   } else {
     checks.push({
       ok: false,
-      detail: `Issue bot needs a webhook secret (16+ characters). Webhook URL: ${webhookUrl} — subscribe to Issues.`,
+      detail: `Issue bot needs a webhook secret (16+ characters). Webhook URL: ${webhookUrl} — subscribe to Issues and Issue comments.`,
     });
   }
 

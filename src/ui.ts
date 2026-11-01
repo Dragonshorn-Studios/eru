@@ -575,7 +575,7 @@ function githubAppSetup(app: ConfigAppView): string {
   return `<ol class="setup-steps">
           <li>GitHub → Settings → Developer settings → <strong>GitHub Apps</strong> → New GitHub App. Homepage URL can be this Eru origin.</li>
           <li>Callback URL, exactly: <code>${escapeHtml(urls.callback)}</code> — save Public URL below so Eru uses the same origin. Where it lives on GitHub: App → <strong>Identifying and authorizing users</strong>.</li>
-          <li>Webhook URL: <code>${escapeHtml(urls.webhook)}</code>. Webhook secret: 16+ random characters, same value in the field below. Subscribe to <strong>Issues</strong>. Where it lives: App → <strong>Webhook</strong> and <strong>Subscribe to events</strong>. Rewrite only runs on repos connected in Eru.</li>
+          <li>Webhook URL: <code>${escapeHtml(urls.webhook)}</code>. Webhook secret: 16+ random characters, same value in the field below. Subscribe to <strong>Issues</strong> and <strong>Issue comments</strong>. Where it lives: App → <strong>Webhook</strong> and <strong>Subscribe to events</strong>. Rewrite only runs on repos connected in Eru.</li>
           <li>Repository permissions: <strong>Contents</strong> Read, <strong>Issues</strong> Read &amp; write, <strong>Metadata</strong> Read-only. Uncheck everything else.</li>
           <li>Install the App on the repos Eru should map, then <strong>Connect</strong> each one. Copy App ID, generate a private key (PEM), copy Client ID and Client secret from the App settings.</li>
           <li>Bot user id: open <code>https://api.github.com/users/&lt;app-slug&gt;%5Bbot%5D</code> and copy the numeric <code>id</code>. That stops the bot from refining its own edits.</li>
