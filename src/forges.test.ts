@@ -8,6 +8,7 @@ import {
   forgejoAddLabels,
   forgejoEnsureComment,
   forgejoGetIssue,
+  forgejoRemoveLabels,
   gitlabEnsureNote,
   gitlabGetIssue,
   listForgejoRepos,
@@ -310,5 +311,36 @@ describe("issue writes", () => {
     };
     await forgejoEnsureComment("https://git.example", "tok", "acme", "box", 12, "done", spy);
     expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+});
+
+describe("forgejo label cleanup", () => {
+  it("deletes an Eru label that sits past the first page", async () => {
+    const deleted: string[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/labels") && method === "GET") {
+        const page = parsed.searchParams.get("page");
+        if (page === "2") {
+          return new Response(JSON.stringify([{ id: 99, name: "eru:refined" }]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(Array.from({ length: 50 }, (_, i) => ({ id: i + 1, name: `other-${i}` }))), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (method === "DELETE" && parsed.pathname.includes("/labels/")) {
+        deleted.push(parsed.pathname);
+        return new Response(null, { status: 204 });
+      }
+      return new Response("no", { status: 404 });
+    };
+    await forgejoRemoveLabels("https://git.example", "tok", "acme", "box", 12, ["eru:refined"], fetchImpl);
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).toContain("/issues/12/labels/99");
   });
 });

@@ -11,6 +11,8 @@ import {
   completeIssueRefineJob,
   enqueueIssueRefineJob,
   enqueueOrRestartIssueRefineJob,
+  requeueWebhookLogsForJob,
+  restartIssueRefineJob,
   listIssueRefineJobsForRepo,
   getForgeCredential,
   getIssueRefineJob,
@@ -698,6 +700,47 @@ describe("issue refine restart", () => {
       ),
     ).toBeUndefined();
     expect(getIssueRefineJob(db, id)?.title).toBe("new");
+    db.close();
+  });
+});
+
+describe("issue refine restart", () => {
+  it("hides ignored rows from a repo list and can queue a finished job again", () => {
+    const db = openDb(":memory:");
+    const log = (detail: string, extra: Record<string, unknown> = {}) => ({
+      at: "2026-01-01T00:00:00Z",
+      forge: "github",
+      outcome: "ignored" as const,
+      reason: "mention",
+      detail,
+      title: "lights",
+      ...extra,
+    });
+    insertWebhookLog(db, log("skip me", { owner: "acme", name: "box" }));
+    const job = enqueueIssueRefineJob(
+      db,
+      { installationId: "1", owner: "acme", name: "box", issueNumber: 4, title: "Lamp", body: "dead" },
+      "2026-01-01T00:00:00Z",
+    )!;
+    completeIssueRefineJob(db, job, "2026-01-01T00:01:00Z", { outcome: "agent-ready", why: "done", refined: "brief" });
+    const kept = insertWebhookLog(db, log("kept", {
+      owner: "acme",
+      name: "box",
+      outcome: "agent-ready",
+      reason: "agent-ready",
+      jobId: job,
+      issueNumber: 4,
+    }));
+    expect(listWebhookLogs(db, 80, { forge: "github", owner: "acme", name: "box" }, { hideIgnored: true }).map((entry) => entry.id)).toEqual([
+      kept,
+    ]);
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'running' WHERE id = ?`).run(job);
+    expect(restartIssueRefineJob(db, job, "2026-01-02T00:00:00Z", { title: "Lamp", body: "dead", installationId: "1" })).toBe(false);
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'done' WHERE id = ?`).run(job);
+    expect(restartIssueRefineJob(db, job, "2026-01-02T00:00:00Z", { title: "Lamp", body: "original", installationId: "9" })).toBe(true);
+    expect(getIssueRefineJob(db, job)).toMatchObject({ status: "pending", body: "original", outcome: null, note: null, attempts: 0 });
+    requeueWebhookLogsForJob(db, job, "Queued again by the operator.");
+    expect(getWebhookLog(db, kept)).toMatchObject({ outcome: "queued", reason: "rerun", detail: "Queued again by the operator." });
     db.close();
   });
 });

@@ -634,16 +634,27 @@ export function enqueueOrRestartIssueRefineJob(
               run_after = ?, updated_at = ?
         WHERE id = ? AND status != 'running'`,
     )
-    .run(
-      job.title,
-      job.body,
-      job.installationId,
-      job.origin ?? "",
-      at,
-      at,
-      existing.id,
-    );
+    .run(job.title, job.body, job.installationId, job.origin ?? "", at, at, existing.id);
   return updated.changes === 0 ? undefined : existing.id;
+}
+
+/** Put a finished job back on the queue. A running job is left alone. */
+export function restartIssueRefineJob(
+  db: SqliteDb,
+  id: number,
+  at: string,
+  job: { title: string; body: string; installationId: string },
+): boolean {
+  const updated = db
+    .prepare(
+      `UPDATE issue_refine_jobs
+          SET status = 'pending', attempts = 0, title = ?, body = ?, installation_id = ?,
+              outcome = NULL, refined = NULL, why = NULL, note = NULL, last_error = NULL,
+              run_after = ?, updated_at = ?
+        WHERE id = ? AND status != 'running'`,
+    )
+    .run(job.title, job.body, job.installationId, at, at, id);
+  return updated.changes > 0;
 }
 
 export function countRecentIssueRefineJobs(
@@ -878,11 +889,15 @@ export function listWebhookLogs(
   db: SqliteDb,
   limit = 80,
   repo?: { forge: string; owner: string; name: string; origin?: string },
+  opts?: { hideIgnored?: boolean },
 ): WebhookLogEntry[] {
   settleWebhookLogs(db);
   const cap = Math.max(1, Math.min(limit, WEBHOOK_LOG_KEEP));
+  const hidden = opts?.hideIgnored ? ` AND outcome != 'ignored'` : "";
   if (!repo) {
-    return db.prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log ORDER BY id DESC LIMIT ?`).all(cap) as WebhookLogEntry[];
+    return db
+      .prepare(`SELECT ${WEBHOOK_LOG_COLUMNS} FROM webhook_log WHERE 1 = 1${hidden} ORDER BY id DESC LIMIT ?`)
+      .all(cap) as WebhookLogEntry[];
   }
   return db
     .prepare(
@@ -891,9 +906,17 @@ export function listWebhookLogs(
           AND lower(owner) = lower(?)
           AND lower(name) = lower(?)
           AND lower(origin) = lower(?)
+          ${hidden}
         ORDER BY id DESC LIMIT ?`,
     )
     .all(repo.forge, repo.owner, repo.name, repo.origin ?? "", cap) as WebhookLogEntry[];
+}
+
+/** The operator asked to analyze this issue again. Settle-on-read copies the new outcome later. */
+export function requeueWebhookLogsForJob(db: SqliteDb, jobId: number, detail: string): void {
+  db.prepare(
+    `UPDATE webhook_log SET outcome = 'queued', reason = 'rerun', detail = ? WHERE job_id = ? AND outcome != 'rejected'`,
+  ).run(detail.slice(0, 500), jobId);
 }
 
 export function getWebhookLog(db: SqliteDb, id: number): WebhookLogEntry | undefined {

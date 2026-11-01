@@ -26,6 +26,8 @@ import {
   listAllPages,
   queueWebhookLog,
   recoverIssueRefineJobs,
+  requeueWebhookLogsForJob,
+  restartIssueRefineJob,
   retryIssueRefineJob,
   setSetting,
   type IssueRefineJob,
@@ -52,11 +54,15 @@ import {
   forgejoEnsureComment,
   forgejoGetIssue,
   forgejoPatchIssue,
+  forgejoRemoveLabels,
+  forgejoRemoveMatchingComments,
   gitlabAddLabels,
   gitlabAwardEyes,
   gitlabEnsureNote,
   gitlabGetIssue,
   gitlabPatchIssue,
+  gitlabRemoveLabels,
+  gitlabRemoveMatchingNotes,
   splitNamespace,
   verifyForgejoWebhookSignature,
   verifyGitlabWebhookToken,
@@ -108,14 +114,18 @@ function clipToForgeComment(text: string, max: number): string {
   return (word >= 80 ? window.slice(0, word) : window).trim();
 }
 
+/** Hidden marker so a rerun can delete Eru's comments without matching a person's sentence. */
+export const ISSUE_BOT_COMMENT_MARKER = "<!-- eru-issue-bot:comment -->";
+
 /** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
   const take = noteParagraph(note);
-  const text = take ? `${base}\n\n${take}` : base;
+  const lead = `${ISSUE_BOT_COMMENT_MARKER}\n${base}`;
+  const text = take ? `${lead}\n\n${take}` : lead;
   if (text.length <= GITHUB_ISSUE_BODY_MAX) return text;
-  const room = GITHUB_ISSUE_BODY_MAX - base.length - 2;
-  if (!take || room < 1) return base.slice(0, GITHUB_ISSUE_BODY_MAX);
-  return `${base}\n\n${clipToForgeComment(take, room)}`;
+  const room = GITHUB_ISSUE_BODY_MAX - lead.length - 2;
+  if (!take || room < 1) return lead.slice(0, GITHUB_ISSUE_BODY_MAX);
+  return `${lead}\n\n${clipToForgeComment(take, room)}`;
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -162,12 +172,19 @@ export interface ForceRewriteResult {
   detail: string;
 }
 
+export interface RerunResult {
+  ok: boolean;
+  detail: string;
+}
+
 export interface IssueBot {
   handleWebhook(c: Context): Promise<Response>;
   handleGitlabWebhook(c: Context): Promise<Response>;
   handleForgejoWebhook(c: Context): Promise<Response>;
   /** Operator override for an ignored delivery. `allow` stores the sender, then queues. */
   forceRewrite(entry: WebhookLogEntry, opts: { allow: boolean }): Promise<ForceRewriteResult>;
+  /** Clear Eru's last brief, comments, and labels, then analyze the issue again. */
+  rerun(job: IssueRefineJob): Promise<RerunResult>;
   processDue(): Promise<void>;
   start(): void;
   stop(): void;
@@ -639,6 +656,60 @@ export function composeIssueBody(refined: string, original: string): string {
     originalSafe = originalSafe.slice(0, keep) + ORIGINAL_TRUNCATED_NOTE;
   }
   return head + originalSafe + tail;
+}
+
+const ERU_COMMENT_PREFIXES = [
+  "Curious about this one. I rewrote it",
+  "Curious about this one, but a few things are still open.",
+  "I got curious and tried.",
+  "Couldn't rewrite this one.",
+  "Rewrote this so an agent can pick it up.",
+  "Not enough here to pin this down.",
+];
+
+const ERU_LABELS = [LABEL_REFINED, LABEL_AGENT_READY, LABEL_NEEDS_INFO, LABEL_FAILED];
+
+/** A comment Eru posted. A person's own reply is left in place. */
+export function isEruComment(body: string, sheet = ""): boolean {
+  const text = body.replace(/\r\n/g, "\n").trim();
+  if (!text) return false;
+  if (text.includes(ISSUE_BOT_COMMENT_MARKER)) return true;
+  const visible = text.replace(ISSUE_BOT_COMMENT_MARKER, "").trim();
+  if (ERU_COMMENT_PREFIXES.some((prefix) => visible.startsWith(prefix))) return true;
+  return Boolean(sheet.trim()) && visible === sheet.trim();
+}
+
+/** The issue text from before Eru wrote the brief. The collapsed Original block is that text. */
+export function originalFromBrief(body: string): string {
+  if (!hasIssueBotMarker(body)) return body;
+  const summary = "<summary>Original</summary>";
+  const start = body.indexOf(summary);
+  const end = body.lastIndexOf("</details>");
+  if (start < 0 || end < start) return body.replaceAll(ISSUE_BOT_MARKER, "").trim();
+  let original = body.slice(start + summary.length, end);
+  if (original.startsWith("\n")) original = original.slice(1);
+  if (original.endsWith("\n")) original = original.slice(0, -1);
+  if (original.endsWith("… truncated")) original = original.slice(0, -"… truncated".length);
+  return original.replace(/&lt;\/details&gt;/gi, "</details>");
+}
+
+function briefOriginalTruncated(body: string): boolean {
+  if (!hasIssueBotMarker(body)) return false;
+  const summary = "<summary>Original</summary>";
+  const start = body.indexOf(summary);
+  const end = body.lastIndexOf("</details>");
+  if (start < 0 || end < start) return false;
+  return body.slice(start, end).includes("… truncated");
+}
+
+/** Prefer the stored original when the brief had to cut it to fit the forge limit. */
+export function restoreIssueBody(liveBody: string, storedBody: string): string {
+  if (!hasIssueBotMarker(liveBody)) return liveBody || storedBody;
+  if (briefOriginalTruncated(liveBody) && storedBody && !hasIssueBotMarker(storedBody)) return storedBody;
+  const extracted = originalFromBrief(liveBody);
+  if (extracted && !hasIssueBotMarker(extracted)) return extracted;
+  if (storedBody && !hasIssueBotMarker(storedBody)) return storedBody;
+  return extracted.replaceAll(ISSUE_BOT_MARKER, "").trim();
 }
 
 export function issueBotBackoffMs(attempt: number): number {
@@ -1271,7 +1342,143 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     return { ok: true, detail: "Queued by the operator." };
   }
 
-  return { handleWebhook, handleGitlabWebhook, handleForgejoWebhook, forceRewrite, processDue, start, stop };
+  async function clearEruWriteBack(job: IssueRefineJob, token: string | undefined, sheet: string): Promise<void> {
+    const match = (body: string) => isEruComment(body, sheet);
+    if (job.forge === FORGE_GITLAB) {
+      const gitlab = opts.gitlab;
+      if (!gitlab) throw new Error("gitlab:unconfigured");
+      await gitlabRemoveMatchingNotes(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, match, fetchImpl);
+      await gitlabRemoveLabels(gitlab.origin, gitlab.token, job.owner, job.name, job.issueNumber, ERU_LABELS, fetchImpl);
+      return;
+    }
+    if (job.forge === FORGE_FORGEJO) {
+      const forgejo = opts.forgejo;
+      if (!forgejo) throw new Error("forgejo:unconfigured");
+      await forgejoRemoveMatchingComments(
+        forgejo.origin,
+        forgejo.token,
+        job.owner,
+        job.name,
+        job.issueNumber,
+        match,
+        fetchImpl,
+      );
+      await forgejoRemoveLabels(forgejo.origin, forgejo.token, job.owner, job.name, job.issueNumber, ERU_LABELS, fetchImpl);
+      return;
+    }
+    if (!token) throw new Error("github:unconfigured");
+    await deleteGithubEruComments(token, job, match);
+    await deleteGithubLabels(token, job, ERU_LABELS);
+    await deleteGithubEyes(token, job).catch(() => {});
+  }
+
+  async function deleteGithubEruComments(
+    token: string,
+    job: IssueRefineJob,
+    match: (body: string) => boolean,
+  ): Promise<void> {
+    const ids: number[] = [];
+    for (let page = 1; page <= 5; page++) {
+      const comments = await githubJson<Array<{ id?: unknown; body?: unknown }>>(
+        fetchImpl,
+        apiBase,
+        token,
+        "GET",
+        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}/comments?per_page=100&page=${page}`,
+      );
+      for (const comment of comments) {
+        if (typeof comment.body === "string" && typeof comment.id === "number" && match(comment.body)) ids.push(comment.id);
+      }
+      if (comments.length < 100) break;
+    }
+    for (const id of ids) {
+      const res = await githubRequest(
+        fetchImpl,
+        apiBase,
+        token,
+        "DELETE",
+        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/comments/${id}`,
+      );
+      if (res.status !== 204 && res.status !== 200 && res.status !== 404) throw new Error(`comment-delete:${res.status}`);
+    }
+  }
+
+  async function deleteGithubLabels(token: string, job: IssueRefineJob, labels: string[]): Promise<void> {
+    for (const name of labels) {
+      const res = await githubRequest(
+        fetchImpl,
+        apiBase,
+        token,
+        "DELETE",
+        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}/labels/${encodeURIComponent(name)}`,
+      );
+      if (res.status !== 200 && res.status !== 204 && res.status !== 404) throw new Error(`label-delete:${res.status}`);
+    }
+  }
+
+  async function deleteGithubEyes(token: string, job: IssueRefineJob): Promise<void> {
+    const botUserId = config?.botUserId;
+    if (!botUserId) return;
+    const reactions = await githubJson<Array<{ id?: unknown; content?: unknown; user?: { id?: unknown } }>>(
+      fetchImpl,
+      apiBase,
+      token,
+      "GET",
+      `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}/reactions`,
+    );
+    for (const reaction of reactions) {
+      if (reaction.content !== "eyes" || typeof reaction.id !== "number") continue;
+      if (reaction.user?.id !== botUserId) continue;
+      const res = await githubRequest(
+        fetchImpl,
+        apiBase,
+        token,
+        "DELETE",
+        `/repos/${encodeURIComponent(job.owner)}/${encodeURIComponent(job.name)}/issues/${job.issueNumber}/reactions/${reaction.id}`,
+      );
+      if (res.status !== 204 && res.status !== 200 && res.status !== 404) throw new Error(`reaction-delete:${res.status}`);
+    }
+  }
+
+  async function rerun(job: IssueRefineJob): Promise<RerunResult> {
+    if (job.status === "running") return { ok: false, detail: "Eru is already reading this issue." };
+    if (!isConnected(job.forge, job.owner, job.name)) {
+      return { ok: false, detail: "Connect the repository before running Eru again." };
+    }
+    let live: { title: string; body: string; token?: string };
+    try {
+      live = await liveIssue(job);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "failed";
+      return { ok: false, detail: `Eru could not read the issue (${clipError(message)}).` };
+    }
+    const original = restoreIssueBody(live.body, job.body);
+    const sheet = job.refined ? answerSheet(job.refined) : "";
+    try {
+      await clearEruWriteBack(job, live.token, sheet);
+      const fresh = await liveIssue(job);
+      if (fresh.body !== live.body) {
+        return { ok: false, detail: "The issue changed while Eru was clearing the last pass. Nothing was rewritten." };
+      }
+      if (fresh.body !== original) await writeIssue(job, original, fresh.token ?? live.token);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "failed";
+      return { ok: false, detail: `Eru could not clear its last pass (${clipError(message)}).` };
+    }
+    const at = iso();
+    const restarted = restartIssueRefineJob(db, job.id, at, {
+      title: live.title || job.title,
+      body: original,
+      installationId: job.installationId,
+    });
+    if (!restarted) return { ok: false, detail: "Eru is already reading this issue." };
+    requeueWebhookLogsForJob(db, job.id, "Queued again by the operator.");
+    console.log(`issuebot: operator rerun ${job.forge}:${job.owner}/${job.name}#${job.issueNumber}`);
+    if (!stopped) void processDue();
+    return { ok: true, detail: "Queued again by the operator." };
+  }
+
+  return { handleWebhook, handleGitlabWebhook, handleForgejoWebhook, forceRewrite, rerun, processDue, start, stop };
 }
 
 const ISSUE_BOT_WORKSPACE_CONFIG = {

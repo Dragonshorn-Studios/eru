@@ -6,10 +6,13 @@ import { describe, expect, it, vi } from "vitest";
 import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import { loadConfig } from "./config.js";
 import {
+  completeIssueRefineJob,
   enqueueIssueRefineJob,
+  getIssueRefineJob,
   getPrimaryRepo,
   getSetting,
   getWebhookLog,
+  insertWebhookLog,
   listIssueRefineJobs,
   listWebhookLogs,
   openDb,
@@ -24,6 +27,7 @@ import {
   COMMENT_NEEDS_INFO,
   answerSheet,
   GITHUB_ISSUE_BODY_MAX,
+  ISSUE_BOT_COMMENT_MARKER,
   ISSUE_BOT_MARKER,
   ISSUE_BOT_MAX_BODY_BYTES,
   LABEL_AGENT_READY,
@@ -33,6 +37,7 @@ import {
   ALLOWED_SENDER_IDS_KEY,
   composeIssueBody,
   createIssueBot,
+  restoreIssueBody,
   createIssueRefiner,
   type PrepareIssueSource,
   emptyWebhookFacts,
@@ -41,6 +46,8 @@ import {
   issueIsThin,
   refinePrompt,
   hasIssueBotMarker,
+  isEruComment,
+  originalFromBrief,
   openQuestionsEmpty,
   parseRefinedMarkdown,
   shouldEnqueueForgejoIssue,
@@ -424,7 +431,8 @@ describe("refined body", () => {
     const comment = forgeComment(COMMENT_COMPLETE, huge);
     expect(comment.length).toBeLessThanOrEqual(GITHUB_ISSUE_BODY_MAX);
     expect(comment.endsWith(".")).toBe(true);
-    expect(comment.startsWith(COMMENT_COMPLETE)).toBe(true);
+    expect(comment.startsWith(ISSUE_BOT_COMMENT_MARKER)).toBe(true);
+    expect(comment).toContain(COMMENT_COMPLETE);
     expect(eruTake(huge, { code: true, map: false }).length).toBeGreaterThan(GITHUB_ISSUE_BODY_MAX);
   });
 
@@ -907,7 +915,7 @@ describe("issue refine worker", () => {
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_REFINED))).toBe(true);
     expect(labelAdds.some((c) => JSON.stringify(c.body).includes(LABEL_AGENT_READY))).toBe(true);
     const comment = calls.find((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comment?.body).toEqual({ body: COMMENT_COMPLETE });
+    expect(comment?.body).toEqual({ body: forgeComment(COMMENT_COMPLETE, "") });
   });
 
   it("posts the question list when a marked issue still has open questions", async () => {
@@ -933,7 +941,10 @@ describe("issue refine worker", () => {
     );
     await bot.processDue();
     const comments = calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"));
-    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([COMMENT_NEEDS_INFO, "What wattage?"]);
+    expect(comments.map((c) => (c.body as { body: string }).body)).toEqual([
+      forgeComment(COMMENT_NEEDS_INFO, ""),
+      "What wattage?",
+    ]);
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
@@ -1432,9 +1443,8 @@ describe("operator force rewrite", () => {
     const page = await (await app.request(`/log/${entry.id}`, { headers: { Cookie: auth.cookie } })).text();
     expect(page).toContain("Rewrite this issue");
     expect(page).toContain("Allow nagato and rewrite");
-    const refine = await (await app.request(`/refine/log/${entry.id}`, { headers: { Cookie: auth.cookie } })).text();
-    expect(refine).toContain(`action="/log/${entry.id}/allow"`);
-    expect(refine).toContain(`value="/refine/log/${entry.id}"`);
+    const refine = await app.request(`/refine/log/${entry.id}`, { headers: { Cookie: auth.cookie } });
+    expect(refine.status).toBe(404);
 
     const forced = await postForce(app, entry.id, auth, true);
     expect(forced.status).toBe(302);
@@ -1524,5 +1534,278 @@ describe("operator force rewrite", () => {
     const forced = await postForce(app, dup.id, auth, false);
     expect(forced.headers.get("location")).toContain("already%20running");
     expect(listIssueRefineJobs(db)[0]).toMatchObject({ status: "running", title: "The lights flicker" });
+  });
+});
+
+describe("rerun", () => {
+  const original = "The hallway lamp is dead.\n\n@eru-issue-bot\n";
+
+  it("pulls the original issue back out of the brief", () => {
+    const composed = composeIssueBody(refinedTemplate("What wattage?"), original);
+    expect(originalFromBrief(composed)).toBe(original);
+    expect(isEruComment(forgeComment(COMMENT_NEEDS_INFO, "Found the lamp."))).toBe(true);
+    expect(isEruComment("What wattage?", "What wattage?")).toBe(true);
+    expect(isEruComment("A person answered.", "What wattage?")).toBe(false);
+    expect(isEruComment("Curious about this one. Did you check the breaker?")).toBe(false);
+    const huge = "tail-marker\n" + "a".repeat(80_000);
+    const truncated = composeIssueBody(refinedTemplate(), huge);
+    expect(truncated).toContain("… truncated");
+    expect(restoreIssueBody(truncated, huge)).toBe(huge);
+  });
+
+  it("clears Eru's brief, comments, and labels, then analyzes the original again", async () => {
+    const composed = composeIssueBody(refinedTemplate("What wattage?"), original);
+    let body = composed;
+    const comments = [
+      { id: 1, body: forgeComment(COMMENT_NEEDS_INFO, "Found the lamp.") },
+      { id: 2, body: "What wattage?" },
+      { id: 3, body: "A person answered." },
+    ];
+    const deletedLabels: string[] = [];
+    const deletedReactions: number[] = [];
+    let seen = "";
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/reactions") && method === "GET") {
+        return json(200, [
+          { id: 9, content: "eyes", user: { id: BOT_USER_ID } },
+          { id: 10, content: "eyes", user: { id: 42 } },
+        ]);
+      }
+      if (path.includes("/reactions/") && method === "DELETE") {
+        deletedReactions.push(Number(path.split("/").pop()));
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/comments") && method === "GET") return json(200, comments);
+      if (/\/comments\/\d+$/.test(path) && method === "DELETE") {
+        const id = Number(path.split("/").pop());
+        const index = comments.findIndex((comment) => comment.id === id);
+        if (index >= 0) comments.splice(index, 1);
+        return new Response(null, { status: 204 });
+      }
+      if (/\/labels\/[^/]+$/.test(path) && method === "DELETE") {
+        deletedLabels.push(decodeURIComponent(path.split("/").pop() ?? ""));
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/reactions") && method === "POST") return json(201, { id: 1 });
+      if (path.endsWith("/labels") && method === "POST") return json(200, []);
+      if (path.endsWith("/comments") && method === "POST") {
+        comments.push({ id: 10 + comments.length, body: (parsed as { body: string }).body });
+        return json(201, { id: 2 });
+      }
+      if (/\/labels$/.test(path) && method === "POST") return json(201, { name: (parsed as { name?: string })?.name });
+      if (/\/issues\/\d+$/.test(path) && method === "GET") return json(200, { title: "The lights flicker", body });
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
+        body = (parsed as { body: string }).body;
+        return json(200, { body });
+      }
+      return json(404, { message: path });
+    };
+    const { app, db, bot } = testApp({
+      fetchImpl,
+      refine: async (input) => {
+        seen = input.body;
+        return refinedTemplate("");
+      },
+    });
+    const jobId = enqueueIssueRefineJob(
+      db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    )!;
+    completeIssueRefineJob(db, jobId, "2026-01-01T00:01:00Z", {
+      outcome: "needs-info",
+      refined: refinedTemplate("What wattage?"),
+      why: "Open questions still need an answer.",
+      note: "Found the lamp.",
+    });
+    const logId = insertWebhookLog(db, {
+      at: "2026-01-01T00:00:00Z",
+      forge: "github",
+      owner: "acme",
+      name: "box",
+      issueNumber: 12,
+      outcome: "needs-info",
+      reason: "needs-info",
+      detail: "Open questions still need an answer.",
+      title: "The lights flicker",
+      jobId,
+    });
+
+    const loggedIn = await app.request("/login", {
+      method: "POST",
+      body: new URLSearchParams({ password: "test-ui-password" }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    });
+    const line = loggedIn.headers.getSetCookie().find((entry) => entry.startsWith(`${SESSION_COOKIE}=`));
+    if (!line) throw new Error("missing session cookie");
+    const token = line.split(";")[0].slice(SESSION_COOKIE.length + 1);
+    const csrf = verifySession("test-session-secret", token)!.csrf;
+    const page = await (
+      await app.request(`/log/${logId}`, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } })
+    ).text();
+    expect(page).toContain("Run Eru again");
+
+    const posted = await app.request(`/refine/${jobId}/rerun`, {
+      method: "POST",
+      headers: { Cookie: `${SESSION_COOKIE}=${token}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf, return: `/log/${logId}` }),
+      redirect: "manual",
+    });
+    expect(posted.status).toBe(302);
+    expect(posted.headers.get("location")).toBe(`/log/${logId}`);
+    expect(body).toBe(original);
+    expect(comments.map((comment) => comment.body)).toEqual(["A person answered."]);
+    expect(deletedLabels).toEqual(expect.arrayContaining([LABEL_REFINED, LABEL_AGENT_READY, LABEL_NEEDS_INFO, LABEL_FAILED]));
+    expect(deletedReactions).toEqual([9]);
+    expect(getIssueRefineJob(db, jobId)).toMatchObject({ status: "pending", body: original, note: null, outcome: null });
+    expect(getWebhookLog(db, logId)).toMatchObject({ outcome: "queued", reason: "rerun" });
+
+    await bot.processDue();
+    expect(seen).toBe(original);
+    expect(hasIssueBotMarker(body)).toBe(true);
+    expect(body).toContain("The hallway light is out.");
+    expect(comments.some((comment) => comment.body.includes("Curious about this one"))).toBe(true);
+    expect(comments.some((comment) => comment.body === "A person answered.")).toBe(true);
+    expect(getIssueRefineJob(db, jobId)?.outcome).toBe("agent-ready");
+  });
+
+  it("does not rewrite an issue that changed while the last pass was being cleared", async () => {
+    const composed = composeIssueBody(refinedTemplate(""), original);
+    let reads = 0;
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/comments") && method === "GET") return json(200, []);
+      if (path.endsWith("/reactions") && method === "GET") return json(200, []);
+      if (/\/labels\/[^/]+$/.test(path) && method === "DELETE") return new Response(null, { status: 204 });
+      if (/\/issues\/\d+$/.test(path) && method === "GET") {
+        reads += 1;
+        return json(200, { title: "The lights flicker", body: reads === 1 ? composed : `${composed}\nedited` });
+      }
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") return json(500, { message: "should not patch" });
+      return json(404, {});
+    };
+    const { db, bot } = testApp({ fetchImpl });
+    const jobId = enqueueIssueRefineJob(
+      db,
+      { installationId: "555", owner: "acme", name: "box", issueNumber: 12, title: "The lights flicker", body: original },
+      "2026-01-01T00:00:00Z",
+    )!;
+    completeIssueRefineJob(db, jobId, "2026-01-01T00:01:00Z", { outcome: "agent-ready", why: "done", refined: refinedTemplate("") });
+    const result = await bot.rerun(getIssueRefineJob(db, jobId)!);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("changed");
+    expect(getIssueRefineJob(db, jobId)?.status).toBe("done");
+  });
+
+  it("deletes only Eru's GitLab notes and keeps a person's reply", async () => {
+    const composed = composeIssueBody(refinedTemplate(""), original);
+    const deleted: number[] = [];
+    let description = composed;
+    const puts: unknown[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body && init.body !== "undefined") parsed = JSON.parse(init.body);
+      if (path.includes("/notes") && method === "GET") {
+        return json(200, [
+          { id: 1, body: forgeComment(COMMENT_COMPLETE, "lamp"), system: false },
+          { id: 2, body: "A person answered.", system: false },
+          { id: 3, body: forgeComment(COMMENT_FAILED, ""), system: true },
+        ]);
+      }
+      if (path.includes("/notes/") && method === "DELETE") {
+        deleted.push(Number(path.split("/").pop()));
+        return new Response(null, { status: 204 });
+      }
+      if (method === "GET" && path.includes("/issues/12")) return json(200, { title: "The lights flicker", description });
+      if (method === "PUT" && path.includes("/issues/12")) {
+        puts.push(parsed);
+        if (parsed && typeof parsed === "object" && "description" in (parsed as object)) {
+          description = (parsed as { description: string }).description;
+        }
+        return json(200, {});
+      }
+      return json(404, { path });
+    };
+    const { db, bot } = testApp({
+      fetchImpl,
+      gitlab: { origin: "https://git.example", token: "glpat-x", webhookSecret: "gitlab-webhook-16+" },
+    });
+    const jobId = enqueueIssueRefineJob(
+      db,
+      {
+        forge: "gitlab",
+        origin: "https://git.example",
+        installationId: "-",
+        owner: "acme",
+        name: "box",
+        issueNumber: 12,
+        title: "The lights flicker",
+        body: original,
+      },
+      "2026-01-01T00:00:00Z",
+    )!;
+    completeIssueRefineJob(db, jobId, "2026-01-01T00:01:00Z", {
+      outcome: "agent-ready",
+      why: "done",
+      refined: refinedTemplate(""),
+    });
+    const result = await bot.rerun(getIssueRefineJob(db, jobId)!);
+    expect(result.ok).toBe(true);
+    expect(deleted).toEqual([1]);
+    expect(puts).toEqual(expect.arrayContaining([{ remove_labels: expect.stringContaining("eru:refined") }]));
+    expect(description).toBe(original);
+  });
+
+  it("redirects with a notice when a rerun is refused", async () => {
+    const { app, db } = testApp({ fetchImpl: async () => json(500, {}) });
+    const jobId = enqueueIssueRefineJob(
+      db,
+      { installationId: "555", owner: "acme", name: "box", issueNumber: 12, title: "Lamp", body: original },
+      "2026-01-01T00:00:00Z",
+    )!;
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'running' WHERE id = ?`).run(jobId);
+    const loggedIn = await app.request("/login", {
+      method: "POST",
+      body: new URLSearchParams({ password: "test-ui-password" }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    });
+    const line = loggedIn.headers.getSetCookie().find((entry) => entry.startsWith(`${SESSION_COOKIE}=`));
+    if (!line) throw new Error("missing session cookie");
+    const token = line.split(";")[0].slice(SESSION_COOKIE.length + 1);
+    const csrf = verifySession("test-session-secret", token)!.csrf;
+    const posted = await app.request(`/refine/${jobId}/rerun`, {
+      method: "POST",
+      headers: { Cookie: `${SESSION_COOKIE}=${token}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ [CSRF_FIELD]: csrf, return: `/refine/${jobId}` }),
+      redirect: "manual",
+    });
+    expect(posted.status).toBe(302);
+    expect(posted.headers.get("location")).toContain("already%20reading");
+    const page = await (
+      await app.request(posted.headers.get("location")!, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } })
+    ).text();
+    expect(page).toContain("Eru is already reading this issue.");
   });
 });
