@@ -3,10 +3,13 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { CSRF_FIELD, SESSION_COOKIE, verifySession } from "./auth.js";
 import { loadConfig } from "./config.js";
 import {
   enqueueIssueRefineJob,
   getPrimaryRepo,
+  getSetting,
+  getWebhookLog,
   listIssueRefineJobs,
   listWebhookLogs,
   openDb,
@@ -27,11 +30,15 @@ import {
   LABEL_FAILED,
   LABEL_NEEDS_INFO,
   LABEL_REFINED,
+  ALLOWED_SENDER_IDS_KEY,
   composeIssueBody,
   createIssueBot,
   createIssueRefiner,
   type PrepareIssueSource,
+  emptyWebhookFacts,
   explainWebhookDecision,
+  issueIsThin,
+  refinePrompt,
   hasIssueBotMarker,
   openQuestionsEmpty,
   parseRefinedMarkdown,
@@ -106,7 +113,7 @@ function openedPayload(opts: {
   installationId?: number;
   owner?: string;
   repo?: string;
-}): Record<string, unknown> {
+} = {}): Record<string, unknown> {
   return {
     action: opts.action ?? "opened",
     installation: { id: opts.installationId ?? 555 },
@@ -317,6 +324,9 @@ describe("enqueue filter", () => {
     expect(
       shouldEnqueueIssue(openedPayload({ body: "no mention here", title: "please @eru-issue-bot" }), opts).enqueue,
     ).toBe(true);
+    expect(
+      shouldEnqueueIssue(openedPayload({ body: "", title: "hallway lamp @eru-issue-bot" }), opts).enqueue,
+    ).toBe(true);
   });
 
   it("enqueues an allowlisted bot even when author_association is NONE", () => {
@@ -359,7 +369,7 @@ describe("enqueue filter", () => {
   });
 
   it("tells GitLab that only an open is rewritten", () => {
-    const facts = { owner: "acme", name: "box", issueNumber: 12, title: "", action: "update", association: "", sender: "" };
+    const facts = { ...emptyWebhookFacts(), owner: "acme", name: "box", issueNumber: 12, action: "update" };
     expect(explainWebhookDecision("action", facts, "gitlab")).toContain("when it is opened");
     expect(explainWebhookDecision("action", facts, "gitlab")).not.toContain("edited");
     expect(explainWebhookDecision("action", facts, "github")).toContain("opened or edited");
@@ -1317,5 +1327,184 @@ describe("POST /webhooks/gitlab and /webhooks/forgejo", () => {
     });
     expect((await app.request("/webhooks/gitlab", { method: "POST", body: "{}" })).status).toBe(404);
     expect((await app.request("/webhooks/forgejo", { method: "POST", body: "{}" })).status).toBe(404);
+  });
+});
+
+describe("title-only brief", () => {
+  it("asks the model to explore the checkout when the body is empty or only a few words", () => {
+    expect(issueIsThin("")).toBe(true);
+    expect(issueIsThin("@eru-issue-bot\n")).toBe(true);
+    expect(issueIsThin("The hallway lamp is dead.\n\n@eru-issue-bot")).toBe(true);
+    expect(issueIsThin(`${"word ".repeat(30)}@eru-issue-bot`)).toBe(false);
+    const titleOnly = refinePrompt("hallway lamp @eru-issue-bot", "", true, true);
+    expect(titleOnly).toContain("The issue is only a title.");
+    expect(titleOnly).toContain("Explore ./checkout");
+    expect(titleOnly).toContain("Problem, Where, Is, Want, Context, and Done when");
+    expect(refinePrompt("t", "The hallway lamp is dead.\n\n@eru-issue-bot", true, true)).toContain("only a few words");
+    expect(refinePrompt("hallway lamp", "x".repeat(80), true, true)).not.toContain("only a title");
+    const noCode = refinePrompt("hallway lamp", "", false, false);
+    expect(noCode).toContain("no checkout");
+    expect(noCode).not.toContain("Explore ./checkout");
+  });
+});
+
+describe("operator force rewrite", () => {
+  async function session(app: ReturnType<typeof createApp>) {
+    const loggedIn = await app.request("/login", {
+      method: "POST",
+      body: new URLSearchParams({ password: "test-ui-password" }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    });
+    const cookies =
+      typeof loggedIn.headers.getSetCookie === "function"
+        ? loggedIn.headers.getSetCookie()
+        : [loggedIn.headers.get("set-cookie") ?? ""];
+    const line = cookies.find((entry) => entry.startsWith(`${SESSION_COOKIE}=`));
+    if (!line) throw new Error("missing session cookie");
+    const token = line.split(";")[0].slice(SESSION_COOKIE.length + 1);
+    const csrf = verifySession("test-session-secret", token)!.csrf;
+    return { cookie: `${SESSION_COOKIE}=${token}`, csrf };
+  }
+
+  function postForce(
+    app: ReturnType<typeof createApp>,
+    id: number,
+    auth: { cookie: string; csrf: string },
+    allow: boolean,
+  ) {
+    return app.request(`/log/${id}/${allow ? "allow" : "rewrite"}`, {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ [CSRF_FIELD]: auth.csrf, return: `/log/${id}` }),
+      redirect: "manual",
+    });
+  }
+
+  it("allowlists the sender and writes a title-only issue from the checkout", async () => {
+    const calls: GhCall[] = [];
+    let seen: { body: string; checkout?: string } | undefined;
+    const { app, db, bot } = testApp({
+      fetchImpl: githubMock({ issueBody: "", issueTitle: "hallway lamp @eru-issue-bot", calls }),
+      prepareSource: async () => ({
+        ok: true,
+        source: { dir: "/tmp/eru-checkout", pages: [], mapped: false, cleanup: async () => {} },
+      }),
+      refine: async (input) => {
+        seen = { body: input.body, checkout: input.checkout };
+        return refinedTemplate("");
+      },
+    });
+    const ignored = await postWebhook(
+      app,
+      openedPayload({
+        association: "NONE",
+        senderId: STRANGER_ID,
+        senderLogin: "nagato",
+        body: "",
+        title: "hallway lamp @eru-issue-bot",
+      }),
+      { "X-GitHub-Delivery": "d-title" },
+    );
+    expect(await ignored.json()).toMatchObject({ outcome: "ignored", reason: "author", issue: 12 });
+    const entry = listWebhookLogs(db)[0];
+    expect(entry).toMatchObject({ senderId: STRANGER_ID, senderLogin: "nagato", installationId: "555" });
+
+    const auth = await session(app);
+    const page = await (await app.request(`/log/${entry.id}`, { headers: { Cookie: auth.cookie } })).text();
+    expect(page).toContain("Rewrite this issue");
+    expect(page).toContain("Allow nagato and rewrite");
+    const refine = await (await app.request(`/refine/log/${entry.id}`, { headers: { Cookie: auth.cookie } })).text();
+    expect(refine).toContain(`action="/log/${entry.id}/allow"`);
+    expect(refine).toContain(`value="/refine/log/${entry.id}"`);
+
+    const forced = await postForce(app, entry.id, auth, true);
+    expect(forced.status).toBe(302);
+    expect(forced.headers.get("location")).toBe(`/log/${entry.id}`);
+    expect(getSetting(db, ALLOWED_SENDER_IDS_KEY)).toBe(String(STRANGER_ID));
+    expect(getWebhookLog(db, entry.id)).toMatchObject({
+      outcome: "queued",
+      reason: "forced",
+      detail: "Queued by the operator. nagato is on the allowlist.",
+    });
+    expect(listIssueRefineJobs(db)[0]).toMatchObject({ title: "hallway lamp @eru-issue-bot", body: "" });
+
+    await bot.processDue();
+    expect(seen).toEqual({ body: "", checkout: "/tmp/eru-checkout" });
+    expect(calls.some((call) => call.method === "PATCH")).toBe(true);
+    expect(listIssueRefineJobs(db)[0].outcome).toBe("agent-ready");
+
+    const again = await postWebhook(
+      app,
+      openedPayload({
+        association: "NONE",
+        senderId: STRANGER_ID,
+        senderLogin: "nagato",
+        body: "",
+        title: "second lamp @eru-issue-bot",
+        number: 21,
+      }),
+      { "X-GitHub-Delivery": "d-again" },
+    );
+    expect(await again.json()).toMatchObject({ outcome: "queued", reason: "queued", issue: 21 });
+  });
+
+  it("rewrites once without putting the sender on the allowlist", async () => {
+    const calls: GhCall[] = [];
+    const { app, db } = testApp({
+      fetchImpl: githubMock({ issueBody: "please", calls }),
+    });
+    await postWebhook(
+      app,
+      openedPayload({ association: "NONE", senderId: STRANGER_ID, senderLogin: "nagato" }),
+      { "X-GitHub-Delivery": "d-once" },
+    );
+    const entry = listWebhookLogs(db)[0];
+    const auth = await session(app);
+    const forced = await postForce(app, entry.id, auth, false);
+    expect(forced.headers.get("location")).toBe(`/log/${entry.id}`);
+    expect(getSetting(db, ALLOWED_SENDER_IDS_KEY)).toBeUndefined();
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
+    const later = await postWebhook(
+      app,
+      openedPayload({ association: "NONE", senderId: STRANGER_ID, number: 22 }),
+      { "X-GitHub-Delivery": "d-later" },
+    );
+    expect(await later.json()).toMatchObject({ outcome: "ignored", reason: "author" });
+    expect(listIssueRefineJobs(db)).toHaveLength(1);
+  });
+
+  it("does not offer a rewrite for an unconnected repo or a rejected signature", async () => {
+    const { app, db } = testApp({});
+    await postWebhook(app, openedPayload({ owner: "other", repo: "cart" }), { "X-GitHub-Delivery": "d-far" });
+    const far = listWebhookLogs(db)[0];
+    const auth = await session(app);
+    const page = await (await app.request(`/log/${far.id}`, { headers: { Cookie: auth.cookie } })).text();
+    expect(page).toContain("not connected");
+    expect(page).not.toContain("Rewrite this issue");
+
+    await postWebhook(app, openedPayload(), { "X-GitHub-Delivery": "d-bad", "X-Hub-Signature-256": "sha256=00" });
+    const rejected = listWebhookLogs(db).find((entry) => entry.outcome === "rejected");
+    expect(rejected).toBeTruthy();
+    const bad = await (
+      await app.request(`/log/${rejected!.id}`, { headers: { Cookie: auth.cookie } })
+    ).text();
+    expect(bad).not.toContain("Rewrite this issue");
+  });
+
+  it("leaves a running rewrite alone", async () => {
+    const calls: GhCall[] = [];
+    const { app, db } = testApp({
+      fetchImpl: githubMock({ issueBody: "The hallway lamp is dead.\n\n@eru-issue-bot\n", calls }),
+    });
+    await postWebhook(app, openedPayload(), { "X-GitHub-Delivery": "d-run" });
+    const job = listIssueRefineJobs(db)[0];
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'running' WHERE id = ?`).run(job.id);
+    await postWebhook(app, openedPayload(), { "X-GitHub-Delivery": "d-dup" });
+    const dup = listWebhookLogs(db).find((entry) => entry.reason === "duplicate")!;
+    const auth = await session(app);
+    const forced = await postForce(app, dup.id, auth, false);
+    expect(forced.headers.get("location")).toContain("already%20running");
+    expect(listIssueRefineJobs(db)[0]).toMatchObject({ status: "running", title: "The lights flicker" });
   });
 });

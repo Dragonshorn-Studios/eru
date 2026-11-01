@@ -431,6 +431,14 @@ a.issue-link:hover { background: color-mix(in srgb, var(--lavender) 65%, white);
   border-color: color-mix(in srgb, white 55%, var(--moss));
 }
 .refine-verdict p { margin: 0 0 0.7rem; line-height: 1.5; }
+.refine-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0 0 1.1rem;
+}
+.refine-actions form { margin: 0; }
+.refine-actions .refresh-run { width: auto; }
 .refine-error {
   margin: 0.7rem 0 0;
   font-family: var(--font-mono);

@@ -10,6 +10,7 @@ import {
   deleteStalePages,
   completeIssueRefineJob,
   enqueueIssueRefineJob,
+  enqueueOrRestartIssueRefineJob,
   listIssueRefineJobsForRepo,
   getForgeCredential,
   getIssueRefineJob,
@@ -21,6 +22,7 @@ import {
   getWebhookLog,
   insertWebhookLog,
   listWebhookLogs,
+  queueWebhookLog,
   WEBHOOK_LOG_KEEP,
   WEBHOOK_REJECTED_KEEP,
   listPages,
@@ -58,7 +60,7 @@ describe("sqlite stub schema", () => {
     db.close();
     const again = openDb(join(dir, "eru.sqlite"));
     const migrations = again.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(12);
+    expect(migrations.n).toBe(13);
     again.close();
   });
 
@@ -103,7 +105,7 @@ describe("sqlite stub schema", () => {
     expect(tables.map((t) => t.name)).not.toContain("github_webhook_deliveries");
     expect(getPrimaryRepo(legacy)).toMatchObject({ owner: "legacy", name: "repo", lastMappedRef: "main" });
     const migrations = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(migrations.n).toBe(12);
+    expect(migrations.n).toBe(13);
 
     // The legacy row is primary while it is the only row; a new connect
     // displaces it (NULL connected_at sorts last under DESC).
@@ -112,7 +114,7 @@ describe("sqlite stub schema", () => {
 
     migrate(legacy);
     const after = legacy.prepare(`SELECT COUNT(*) AS n FROM schema_migrations`).get() as { n: number };
-    expect(after.n).toBe(12);
+    expect(after.n).toBe(13);
     legacy.close();
   });
 });
@@ -611,5 +613,91 @@ describe("webhook log", () => {
       reason: "needs-info",
       detail: "Open questions still need an answer, so Eru left this as needs-info.",
     });
+  });
+
+  it("keeps the sender id and can mark that row queued again", () => {
+    const db = openDb(":memory:");
+    const id = insertWebhookLog(db, {
+      ...row("Ignored. GitHub author association was NONE for nagato."),
+      owner: "acme",
+      name: "box",
+      issueNumber: 4,
+      reason: "author",
+      senderId: 13,
+      senderLogin: "nagato",
+      installationId: "555",
+    });
+    expect(getWebhookLog(db, id)).toMatchObject({
+      senderId: 13,
+      senderLogin: "nagato",
+      installationId: "555",
+      outcome: "ignored",
+    });
+    const job = enqueueIssueRefineJob(
+      db,
+      { installationId: "555", owner: "acme", name: "box", issueNumber: 4, title: "lamp", body: "" },
+      "2026-01-02T00:00:00Z",
+    )!;
+    const earlier = insertWebhookLog(db, {
+      ...row("Open questions still need an answer."),
+      owner: "acme",
+      name: "box",
+      issueNumber: 4,
+      outcome: "needs-info",
+      reason: "needs-info",
+      jobId: job,
+    });
+    queueWebhookLog(db, id, job, "Queued by the operator. nagato is on the allowlist.");
+    expect(getWebhookLog(db, id)).toMatchObject({
+      outcome: "queued",
+      reason: "forced",
+      jobId: job,
+      detail: "Queued by the operator. nagato is on the allowlist.",
+    });
+    expect(getWebhookLog(db, earlier)).toMatchObject({
+      outcome: "queued",
+      reason: "forced",
+      detail: "Queued by the operator. nagato is on the allowlist.",
+    });
+    db.close();
+  });
+});
+
+describe("issue refine restart", () => {
+  it("resets a finished job and leaves a running job alone", () => {
+    const db = openDb(":memory:");
+    const at = "2026-01-01T00:00:00Z";
+    const id = enqueueIssueRefineJob(
+      db,
+      { installationId: "1", owner: "acme", name: "box", issueNumber: 3, title: "old", body: "old body" },
+      at,
+    )!;
+    completeIssueRefineJob(db, id, at, { outcome: "needs-info", why: "wait", refined: "x" });
+    const again = enqueueOrRestartIssueRefineJob(
+      db,
+      { installationId: "2", owner: "acme", name: "box", issueNumber: 3, title: "new", body: "" },
+      "2026-01-02T00:00:00Z",
+    );
+    expect(again).toBe(id);
+    expect(getIssueRefineJob(db, id)).toMatchObject({
+      status: "pending",
+      title: "new",
+      body: "",
+      installationId: "2",
+      outcome: null,
+      attempts: 0,
+      why: null,
+      note: null,
+    });
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'running' WHERE id = ?`).run(id);
+    expect(
+      enqueueOrRestartIssueRefineJob(
+        db,
+        { installationId: "2", owner: "acme", name: "box", issueNumber: 3, title: "newer", body: "no" },
+        "2026-01-03T00:00:00Z",
+      ),
+    ).toBeUndefined();
+    expect(getIssueRefineJob(db, id)?.title).toBe("new");
+    db.close();
   });
 });

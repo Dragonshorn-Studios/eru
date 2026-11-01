@@ -1014,7 +1014,33 @@ function webhookLogList(logs: WebhookLogEntry[], focusId: number | undefined, hr
   return `<nav><ul class="toc refine-toc">${items}</ul></nav>`;
 }
 
-function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined): string {
+function forceForms(entry: WebhookLogEntry, csrf: string, back: string): string {
+  if (entry.outcome !== "ignored") return "";
+  if (!entry.issueNumber || !entry.owner || !entry.name) return "";
+  if (entry.reason === "unconnected" || entry.reason === "own-bot") return "";
+  const rewrite = `<form method="post" action="/log/${entry.id}/rewrite">
+        ${csrfInput(csrf)}
+        <input type="hidden" name="return" value="${escapeHtml(back)}"/>
+        <button class="refresh-run" type="submit">Rewrite this issue</button>
+      </form>`;
+  const allow =
+    entry.reason === "author" && entry.senderId
+      ? `<form method="post" action="/log/${entry.id}/allow">
+        ${csrfInput(csrf)}
+        <input type="hidden" name="return" value="${escapeHtml(back)}"/>
+        <button class="refresh-run" type="submit">Allow ${escapeHtml(entry.senderLogin || "this sender")} and rewrite</button>
+      </form>`
+      : "";
+  return `<div class="refine-actions">${rewrite}${allow}</div>`;
+}
+
+function webhookLogStory(
+  entry: WebhookLogEntry,
+  job: IssueRefineJob | undefined,
+  csrf: string,
+  back: string,
+  notice: string,
+): string {
   const tone = logTone(entry);
   const where = entry.owner && entry.name ? `${entry.owner}/${entry.name}` : "no repository on the delivery";
   const settled =
@@ -1030,9 +1056,12 @@ function webhookLogStory(entry: WebhookLogEntry, job: IssueRefineJob | undefined
           <p>${escapeHtml(entry.detail)}</p>
           <span class="refine-pill ${tone.tone}">${tone.label}</span>
         </div>`;
+  const flash = notice ? `<p class="flash">${escapeHtml(notice)}</p>` : "";
   return `<p class="refine-kicker">Webhook · ${escapeHtml(entry.forge)} · ${escapeHtml(tone.label)}</p>
         <h2 class="page-title">${escapeHtml(entry.title.trim() || entry.event || "Webhook")}</h2>
         <p class="path">${escapeHtml(where)}${entry.issueNumber ? ` · ${issueNumberLink({ forge: entry.forge, origin: entry.origin, owner: entry.owner, name: entry.name, issueNumber: entry.issueNumber })}` : ""} · ${escapeHtml(entry.at)}</p>
+        ${flash}
+        ${forceForms(entry, csrf, back)}
         ${verdict}
         ${job ? refineStory(job, true) : ""}`;
 }
@@ -1044,6 +1073,7 @@ export function refinePage(
   logs: WebhookLogEntry[] = [],
   focusLogId?: number,
   scope: "repo" | "all" = "repo",
+  notice = "",
 ): string {
   const all = scope === "all";
   const focusLog =
@@ -1057,7 +1087,8 @@ export function refinePage(
   let article: string;
   if (focusLog) {
     const job = focusLog.jobId ? jobs.find((item) => item.id === focusLog.jobId) : undefined;
-    article = webhookLogStory(focusLog, job);
+    const back = `${all ? "/log" : "/refine/log"}/${focusLog.id}`;
+    article = webhookLogStory(focusLog, job, model.csrf, back, notice);
   } else if (all) {
     article = `<h2 class="page-title">No webhooks yet</h2>
         <p class="page-lead">Every delivery Eru receives is listed here, for every repository, including the ones it ignores.</p>`;
