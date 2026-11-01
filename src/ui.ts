@@ -31,8 +31,10 @@ export interface ChromeModel {
   csrf: string;
   pages: PageTocEntry[];
   page: MapPage | null;
-  /** A map refresh is in flight for the selected repo (survives navigation). */
+  /** A map refresh or issue checkout is in flight for the selected repo (survives navigation). */
   mapping?: boolean;
+  /** map = operator refresh. explore = Eru reading a checkout for an issue. */
+  mappingKind?: "map" | "explore";
   refreshNotice?: string;
 }
 
@@ -778,7 +780,29 @@ export function appPage(model: ChromeModel): string {
       <article class="card" aria-label="Page">
         ${pageArticle(model)}
       </article>
-      <section class="mapping-pane"${model.mapping ? "" : " hidden"} aria-live="polite" aria-label="Refresh in progress">
+      ${mappingPane(model)}
+    </main>
+    ${mappingScript(model)}
+    ${foot(model)}
+  </div>
+</body>`,
+  );
+}
+
+function mappingPane(model: ChromeModel): string {
+  const exploring = model.mappingKind === "explore";
+  const where = model.repo ? `${model.repo.owner}/${model.repo.name}` : "";
+  const sub = where
+    ? exploring
+      ? `reading ${where} for an issue`
+      : `mapping ${where} @${model.repo?.defaultBranch ?? "main"}`
+    : exploring
+      ? "reading the repository"
+      : "mapping the repository";
+  const note = exploring
+    ? "Eru is reading the checkout for an issue — this can take a few minutes."
+    : "OpenCode is reading the checkout — this can take a few minutes.";
+  return `<section class="mapping-pane"${model.mapping ? "" : " hidden"} aria-live="polite" aria-label="Reading in progress">
         <div class="mapping-fx" aria-hidden="true">
           <svg class="fx-strands fx-left" viewBox="0 0 220 900" preserveAspectRatio="none">
             <path d="M215 -20 C 150 120, 235 250, 165 400 S 205 640, 140 920"/>
@@ -799,12 +823,14 @@ export function appPage(model: ChromeModel): string {
         </div>
         <img class="mapping-icon" src="/assets/eru-icon.png" width="72" height="72" alt=""/>
         <h2 id="mapping-line">Getting curious about this repo…</h2>
-        <p class="mapping-sub">${model.repo ? `mapping ${escapeHtml(model.repo.owner)}/${escapeHtml(model.repo.name)} @${escapeHtml(model.repo.defaultBranch ?? "main")}` : "mapping the repository"}</p>
+        <p class="mapping-sub">${escapeHtml(sub)}</p>
         <div class="mapping-bar"><div class="mapping-fill"></div></div>
-        <p class="field-hint mapping-note">OpenCode is reading the checkout — this can take a few minutes.</p>
-      </section>
-    </main>
-    <script>
+        <p class="field-hint mapping-note">${escapeHtml(note)}</p>
+      </section>`;
+}
+
+function mappingScript(model: ChromeModel): string {
+  return `<script>
     (() => {
       const stage = document.getElementById("main");
       const form = stage?.querySelector(".refresh-form");
@@ -864,11 +890,7 @@ export function appPage(model: ChromeModel): string {
         if (e.detail?.failed) stopMappingView();
       });
     })();
-    </script>
-    ${foot(model)}
-  </div>
-</body>`,
-  );
+    </script>`;
 }
 
 function refineTone(job: IssueRefineJob): { tone: string; label: string } {
@@ -1125,16 +1147,19 @@ export function refinePage(
   <div class="shell">
     ${topbar(model)}
     ${masthead(model)}
-    <main id="main" class="stage">
+    <main id="main" class="stage${model.mapping ? " mapping" : ""}">
       <aside class="card" aria-label="Webhook log">
         ${repoLine}
         <hr class="rule"/>
         ${list}
       </aside>
       <article class="card" aria-label="Webhook decision">
+        ${model.refreshNotice ? `<p class="refresh-result">${escapeHtml(model.refreshNotice)}</p>` : ""}
         ${article}
       </article>
+      ${mappingPane(model)}
     </main>
+    ${mappingScript(model)}
     ${foot(model)}
   </div>
 </body>`,
@@ -1167,11 +1192,14 @@ export function askPage(model: ChromeModel): string {
   <div class="shell">
     ${topbar(model)}
     ${masthead(model)}
-    <main id="main" class="stage ask-stage">
+    <main id="main" class="stage ask-stage${model.mapping ? " mapping" : ""}">
+      ${model.refreshNotice ? `<p class="refresh-result">${escapeHtml(model.refreshNotice)}</p>` : ""}
       <section class="card ask-island" aria-label="Ask">
         <div id="ask-root">${askFallback(model)}</div>
       </section>
+      ${mappingPane(model)}
     </main>
+    ${mappingScript(model)}
     ${foot(model)}
   </div>
   <script>window.__ERU_ASK__ = ${bootstrap};</script>

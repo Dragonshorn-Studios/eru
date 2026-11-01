@@ -395,6 +395,18 @@ describe("refined body", () => {
     expect(composed.indexOf(ISSUE_BOT_MARKER)).toBeLessThan(composed.indexOf("<details>"));
     const refinedPart = composed.slice(0, composed.indexOf("<details>"));
     expect(refinedPart).not.toMatch(/@eru-issue-bot/);
+    expect(refinedPart).toContain("![lamp](https://img.example/lamp.png)");
+    const already = composeIssueBody(`${refinedTemplate()}\n![lamp](https://img.example/lamp.png)\n`, original);
+    const alreadyBrief = already.slice(0, already.indexOf("<details>"));
+    expect(alreadyBrief.split("![lamp](https://img.example/lamp.png)")).toHaveLength(2);
+    const htmlShot = '<img src="https://img.example/hall.gif" alt="hall">';
+    const withHtml = composeIssueBody(refinedTemplate(), `${htmlShot}\n![x](javascript:alert(1))\n`);
+    const htmlBrief = withHtml.slice(0, withHtml.indexOf("<details>"));
+    expect(htmlBrief).toContain(htmlShot);
+    expect(htmlBrief).not.toContain("javascript:");
+    const paren = "![shot](https://en.wikipedia.org/wiki/A_(b))";
+    const withParen = composeIssueBody(refinedTemplate(), paren);
+    expect(withParen.slice(0, withParen.indexOf("<details>"))).toContain(paren);
   });
 
   it("treats blank / None Open questions as agent-ready", () => {

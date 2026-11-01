@@ -12,7 +12,7 @@ The gate. Single password field (`ERU_UI_PASSWORD`), throttled, timing-safe comp
 
 The home view. Top bar: Eru seal, the active repo (`owner / name`), `last mapped @ref`, a refresh icon button (re-maps the default branch, with a progress view while it runs), the segmented **Brief / Ask / Refine** tabs, **Config**, and the operator pill (GitHub avatar when `ERU_UI_USER` or the Operator setting names a login). Left column is the page table of contents; the right column renders the selected page.
 
-With no repo connected, the empty state points at `/connect`. With a repo that has no pages yet, it points at the refresh button.
+With no repo connected, the empty state points at `/connect`. With a repo that has no pages yet, it points at the refresh button. If Eru is reading that repo for an issue, Brief, Ask, and Refine show the same progress pane as a map refresh, and it stays up if you leave and come back.
 
 ![brief home](ui/brief-home.png)
 

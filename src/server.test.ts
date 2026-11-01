@@ -29,6 +29,7 @@ import { insertThread } from "./askthreads.js";
 import type { ModelDiscovery } from "./opencode.js";
 import type { OpenCodeServe } from "./askserver.js";
 import type { RefreshRunner } from "./refresh.js";
+import { createMappingTracker, type MappingTracker } from "./mapping.js";
 
 function gatedConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -65,6 +66,7 @@ function app(
   providerStore?: ProviderCredentialStore,
   modelDiscovery?: ModelDiscovery,
   oauthFetch?: typeof fetch,
+  mappingTracker?: MappingTracker,
 ) {
   const config = gatedConfig(overrides);
   const db = openDb(":memory:");
@@ -80,6 +82,7 @@ function app(
       refreshRunner,
       providerStore,
       modelDiscovery,
+      mappingTracker,
       issueBotAutoStart: false,
     }),
     config,
@@ -1897,6 +1900,45 @@ describe("github oauth login", () => {
     const res = await instance.request("/login/github", { redirect: "manual" });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/login");
+  });
+});
+
+describe("repo reading progress", () => {
+  it("shows the progress pane on Brief, Ask, and Refine while Eru is reading the selected repo", async () => {
+    const tracker = createMappingTracker();
+    const instance = app({}, undefined, undefined, undefined, undefined, undefined, undefined, tracker);
+    const repoId = upsertConnectedRepo(instance.db, { forge: "github", owner: "acme", name: "box" }, "2026-01-01T00:00:00Z");
+    expect(tracker.start(repoId, Date.now(), "explore")).toBe(true);
+    const loggedIn = await login(instance.app);
+    const cookie = cookieLine(loggedIn).split(";")[0];
+    for (const path of ["/", "/ask", "/refine"]) {
+      const html = await (await instance.app.request(path, { headers: { Cookie: cookie } })).text();
+      expect(html, path).toContain("reading acme/box for an issue");
+      expect(html, path).toContain("Eru is reading the checkout for an issue");
+      expect(html, path).toContain('class="stage');
+      expect(html, path).toContain(" mapping");
+      expect(html, path).not.toContain('class="mapping-pane" hidden');
+    }
+    const status = await instance.app.request("/refresh/status", { headers: { Cookie: cookie } });
+    await expect(status.json()).resolves.toMatchObject({ status: "running" });
+
+    const token = cookieValue(cookieLine(loggedIn));
+    const session = verifySession(instance.config.sessionSecret, token)!;
+    const refresh = await instance.app.request("/refresh", {
+      method: "POST",
+      body: new URLSearchParams({ [CSRF_FIELD]: session.csrf }),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
+        "HX-Request": "true",
+      },
+    });
+    const refreshHtml = await refresh.text();
+    expect(refreshHtml).toContain("already reading this repo for an issue");
+    expect(refreshHtml).not.toContain("Mapping —");
+    await expect(
+      (await instance.app.request("/refresh/status", { headers: { Cookie: cookie } })).json(),
+    ).resolves.toMatchObject({ status: "running" });
   });
 });
 
