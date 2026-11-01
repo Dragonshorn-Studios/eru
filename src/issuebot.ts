@@ -141,7 +141,12 @@ const TEMPLATE_HEADINGS = [
   "Out of scope",
   "Open questions",
 ] as const;
-const EMPTY_OPEN_QUESTIONS = /^(none|n\/a|na|nil|-|—|–)?$/i;
+/** A whole line that means "nothing to ask". Trailing punctuation is stripped before this runs. */
+const PLACEHOLDER_QUESTION =
+  /^(?:none|n\/a|n\.a|na|nil|null|nothing|nope|no|not applicable|-+|—|–)$/i;
+/** A short sentence that also means the section is empty. */
+const PLACEHOLDER_PHRASE =
+  /^(?:there(?:'s| is| are) )?(?:no|none|zero) (?:open |remaining |further |more |blocking )?(?:questions?|blockers?)(?: (?:remain(?:ing)?|left|open|here|at this time))?$|^nothing (?:else|open|left|remaining|blocking|to ask)(?: at this time)?$|^(?:all )?(?:open )?questions? (?:are )?(?:answered|resolved|clear)$|^none (?:remaining|left|open|at this time)$/i;
 const MENTION_RE = /@eru-issue-bot\b/gi;
 const AT_MENTION_RE =
   /(^|[^A-Za-z0-9_`])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\/[A-Za-z0-9._-]+)?)/g;
@@ -663,16 +668,38 @@ export function eruTake(note: string, source: { code: boolean; map: boolean }): 
 export function openQuestionsEmpty(markdown: string): boolean {
   const section = headingSection(markdown, "Open questions");
   if (section === undefined) return false;
-  const trimmed = section.trim();
-  if (EMPTY_OPEN_QUESTIONS.test(trimmed)) return true;
   return openQuestionLines(section).length === 0;
+}
+
+/** The question text, without a list marker, checkbox, or wrapping quotes. */
+function visibleQuestionLine(line: string): string {
+  return line
+    .replace(/^\s*(?:[-*+•]|\d+[.)])\s*/, "")
+    .replace(/^\[[ xX]\]\s*/, "")
+    .replace(/^[\s>"'`*_[(]+|[\s>"'`*_\])]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * "None." is not a question. A line that starts "None." and never asks anything
+ * is the model saying the section is empty. "None of the paths…" is still a gap.
+ */
+function isPlaceholderQuestion(line: string): boolean {
+  const text = visibleQuestionLine(line);
+  if (!text) return true;
+  const bare = text.replace(/[.!?…]+$/g, "").trim();
+  if (PLACEHOLDER_QUESTION.test(bare) || PLACEHOLDER_PHRASE.test(bare)) return true;
+  if (text.includes("?")) return false;
+  if (/^(?:none|no|n\/a|n\.a|nothing|nil)[.!?…](?:\s|$)/i.test(text)) return true;
+  return /^(?:none|no|n\/a|nothing)\s*[-—–:]\s+\S/i.test(text);
 }
 
 function openQuestionLines(section: string): string[] {
   return section
     .split("\n")
-    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
-    .filter((line) => line.length > 0 && !EMPTY_OPEN_QUESTIONS.test(line));
+    .map((line) => visibleQuestionLine(line))
+    .filter((line) => line.length > 0 && !isPlaceholderQuestion(line));
 }
 
 export interface QuoteAnswer {
@@ -1918,7 +1945,7 @@ export function refinePrompt(
     "",
     TEMPLATE_HEADINGS.map((h) => `## ${h}`).join("\n"),
     "",
-    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty (or write \"None\").",
+    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty, or write None. A period is fine. Do not put a question there unless a person still has to decide.",
     "If the issue includes images, keep each image in the brief. Do not leave screenshots only in the original.",
     ...(answers && answers.length > 0
       ? [

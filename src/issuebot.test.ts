@@ -415,8 +415,18 @@ describe("refined body", () => {
   it("treats blank / None Open questions as agent-ready", () => {
     expect(openQuestionsEmpty(refinedTemplate(""))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("None"))).toBe(true);
-    expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("- None."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate('"None."'))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("N/A."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("No open questions."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("There are no open questions."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("Nothing blocking."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None. The code already decides this."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None of the image paths are documented."))).toBe(false);
+    expect(openQuestionsEmpty(refinedTemplate("None. Which file should the preview use?"))).toBe(false);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
+    expect(answerSheet(refinedTemplate("None.\nWhat wattage?"))).toBe("What wattage?");
     expect(answerSheet(refinedTemplate("What wattage?\n- Which fixture?"))).toBe("What wattage?\n\nWhich fixture?");
     const many = Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`).join("\n");
     expect(answerSheet(refinedTemplate(`${many}\n*None`)).split("\n\n")).toEqual(
