@@ -86,10 +86,36 @@ export const COMMENT_NEEDS_INFO =
   "Curious about this one, but a few things are still open. On GitHub, use Quote reply on the list below and write your answer under each question. I'll refine this when every question has an answer.";
 export const COMMENT_FAILED = "I got curious and tried. I couldn't rewrite this one, so your issue is untouched.";
 
-/** The forge comment: the curious line, then Eru's short take when there is one. */
+/** The model's take as one paragraph. Kept whole — a mid-sentence cut hides the point. */
+function noteParagraph(note: string): string {
+  return note.replace(/\s+/g, " ").trim();
+}
+
+/** Stop on a sentence so a forge-sized comment is not cut mid-word. */
+function clipToForgeComment(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const window = text.slice(0, max);
+  let end = -1;
+  for (let i = window.length - 1; i >= 0; i--) {
+    const ch = window[i];
+    if ((ch === "." || ch === "!" || ch === "?") && (i === window.length - 1 || /\s/.test(window[i + 1] ?? " "))) {
+      end = i;
+      break;
+    }
+  }
+  if (end >= 80) return window.slice(0, end + 1).trim();
+  const word = window.lastIndexOf(" ");
+  return (word >= 80 ? window.slice(0, word) : window).trim();
+}
+
+/** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
-  const take = note.replace(/\s+/g, " ").trim().slice(0, 400);
-  return take ? `${base}\n\n${take}` : base;
+  const take = noteParagraph(note);
+  const text = take ? `${base}\n\n${take}` : base;
+  if (text.length <= GITHUB_ISSUE_BODY_MAX) return text;
+  const room = GITHUB_ISSUE_BODY_MAX - base.length - 2;
+  if (!take || room < 1) return base.slice(0, GITHUB_ISSUE_BODY_MAX);
+  return `${base}\n\n${clipToForgeComment(take, room)}`;
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -537,7 +563,7 @@ const CODE_EMPTY_NOTE = "I read the code. The reply did not say which names matc
 
 /** Keep a model take. Say plainly when the code or the map was missing. */
 export function eruTake(note: string, source: { code: boolean; map: boolean }): string {
-  const take = note.replace(/\s+/g, " ").trim().slice(0, 400);
+  const take = noteParagraph(note);
   if (take) return take;
   if (source.code) return CODE_EMPTY_NOTE;
   if (source.map) return MAP_ONLY_NOTE;
@@ -590,7 +616,7 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string; not
   }
   const split = splitEruNote(text);
   text = neutralizeAtMentions(stripIssueBotMention(split.text)).trim();
-  const note = neutralizeAtMentions(stripIssueBotMention(split.note)).replace(/\s+/g, " ").trim().slice(0, 400);
+  const note = noteParagraph(neutralizeAtMentions(stripIssueBotMention(split.note)));
   if (!text) return { ok: false, error: "empty" };
   return { ok: true, text, note };
 }
