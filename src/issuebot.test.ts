@@ -36,6 +36,7 @@ import {
   createIssueRefiner,
   type PrepareIssueSource,
   emptyWebhookFacts,
+  eruTake,
   explainWebhookDecision,
   issueIsThin,
   refinePrompt,
@@ -408,6 +409,17 @@ describe("refined body", () => {
       expect(withNote.text).not.toContain("## Eru");
       expect(withNote.text).not.toContain("OAuthToken");
     }
+  });
+
+  it("keeps Eru's whole take, including the sentence that used to be cut", () => {
+    const take =
+      "Found in code: UniversalVtt, MapBackground, MapDocument, MapBackgroundController, importUniversalVtt, applyImportedMap, loadBackground, backgroundUrl, and the chapters.map-background route — all real. I filled in the root cause the issue only hinted at: loadBackground re-loads a page-render-time config.backgroundUrl that no longer matches the freshly stored file. Left as unknown because the page still holds the old url.";
+    expect(take.length).toBeGreaterThan(400);
+    expect(eruTake(take, { code: true, map: false })).toBe(take);
+    expect(forgeComment(COMMENT_NEEDS_INFO, take)).toContain(take);
+    const parsed = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\n${take}\n`);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.note).toBe(take);
   });
 
   it("truncates a long original so the composed body stays under GitHub's limit", () => {

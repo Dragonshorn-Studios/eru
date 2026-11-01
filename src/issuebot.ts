@@ -86,9 +86,14 @@ export const COMMENT_NEEDS_INFO =
   "Curious about this one, but a few things are still open. On GitHub, use Quote reply on the list below and write your answer under each question. I'll refine this when every question has an answer.";
 export const COMMENT_FAILED = "I got curious and tried. I couldn't rewrite this one, so your issue is untouched.";
 
-/** The forge comment: the curious line, then Eru's short take when there is one. */
+/** The model's take as one paragraph. Kept whole — a mid-sentence cut hides the point. */
+function noteParagraph(note: string): string {
+  return note.replace(/\s+/g, " ").trim();
+}
+
+/** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
-  const take = note.replace(/\s+/g, " ").trim().slice(0, 400);
+  const take = noteParagraph(note);
   return take ? `${base}\n\n${take}` : base;
 }
 
@@ -537,7 +542,7 @@ const CODE_EMPTY_NOTE = "I read the code. The reply did not say which names matc
 
 /** Keep a model take. Say plainly when the code or the map was missing. */
 export function eruTake(note: string, source: { code: boolean; map: boolean }): string {
-  const take = note.replace(/\s+/g, " ").trim().slice(0, 400);
+  const take = noteParagraph(note);
   if (take) return take;
   if (source.code) return CODE_EMPTY_NOTE;
   if (source.map) return MAP_ONLY_NOTE;
@@ -590,7 +595,7 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string; not
   }
   const split = splitEruNote(text);
   text = neutralizeAtMentions(stripIssueBotMention(split.text)).trim();
-  const note = neutralizeAtMentions(stripIssueBotMention(split.note)).replace(/\s+/g, " ").trim().slice(0, 400);
+  const note = noteParagraph(neutralizeAtMentions(stripIssueBotMention(split.note)));
   if (!text) return { ok: false, error: "empty" };
   return { ok: true, text, note };
 }
