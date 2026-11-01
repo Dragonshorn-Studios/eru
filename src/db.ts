@@ -235,6 +235,14 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    name: "0014_issue_refine_pass.sql",
+    apply(db) {
+      const columns = db.prepare(`PRAGMA table_info(issue_refine_jobs)`).all() as { name: string }[];
+      if (columns.length === 0 || columns.some((col) => col.name === "pass")) return;
+      db.exec(`ALTER TABLE issue_refine_jobs ADD COLUMN pass TEXT NOT NULL DEFAULT ''`);
+    },
+  },
 ];
 
 // Ask threads (#33): one row per Eru thread. The thread's OpenCode session and
@@ -550,6 +558,8 @@ export interface IssueRefineJob {
   refined: string | null;
   why: string | null;
   note: string | null;
+  /** `answers` when a comment reply should be folded into the brief. */
+  pass: string;
   attempts: number;
   runAfter: string;
   lastError: string | null;
@@ -557,7 +567,7 @@ export interface IssueRefineJob {
   updatedAt: string;
 }
 
-const ISSUE_JOB_COLUMNS = `id, forge, origin, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, outcome, refined, why, note, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
+const ISSUE_JOB_COLUMNS = `id, forge, origin, installation_id AS installationId, owner, name, issue_number AS issueNumber, title, body, status, outcome, refined, why, note, pass, attempts, run_after AS runAfter, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt`;
 
 /** Insert a job. Returns undefined when that issue is already queued. */
 export function enqueueIssueRefineJob(
@@ -630,7 +640,7 @@ export function enqueueOrRestartIssueRefineJob(
     .prepare(
       `UPDATE issue_refine_jobs
           SET status = 'pending', attempts = 0, title = ?, body = ?, installation_id = ?, origin = ?,
-              outcome = NULL, refined = NULL, why = NULL, note = NULL, last_error = NULL,
+              outcome = NULL, refined = NULL, why = NULL, note = NULL, pass = '', last_error = NULL,
               run_after = ?, updated_at = ?
         WHERE id = ? AND status != 'running'`,
     )
@@ -638,22 +648,26 @@ export function enqueueOrRestartIssueRefineJob(
   return updated.changes === 0 ? undefined : existing.id;
 }
 
+export function setIssueRefinePass(db: SqliteDb, id: number, pass: string): void {
+  db.prepare(`UPDATE issue_refine_jobs SET pass = ? WHERE id = ?`).run(pass, id);
+}
+
 /** Put a finished job back on the queue. A running job is left alone. */
 export function restartIssueRefineJob(
   db: SqliteDb,
   id: number,
   at: string,
-  job: { title: string; body: string; installationId: string },
+  job: { title: string; body: string; installationId: string; pass?: string },
 ): boolean {
   const updated = db
     .prepare(
       `UPDATE issue_refine_jobs
           SET status = 'pending', attempts = 0, title = ?, body = ?, installation_id = ?,
-              outcome = NULL, refined = NULL, why = NULL, note = NULL, last_error = NULL,
+              outcome = NULL, refined = NULL, why = NULL, note = NULL, pass = ?, last_error = NULL,
               run_after = ?, updated_at = ?
         WHERE id = ? AND status != 'running'`,
     )
-    .run(job.title, job.body, job.installationId, at, at, id);
+    .run(job.title, job.body, job.installationId, job.pass ?? "", at, at, id);
   return updated.changes > 0;
 }
 
@@ -719,19 +733,19 @@ export function claimDueIssueRefineJob(db: SqliteDb, at: string): IssueRefineJob
 
 export function completeIssueRefineJob(db: SqliteDb, id: number, at: string, story?: IssueRefineStory): void {
   if (!story) {
-    db.prepare(`UPDATE issue_refine_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?`).run(at, id);
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'done', pass = '', last_error = NULL, updated_at = ? WHERE id = ?`).run(at, id);
     return;
   }
   db.prepare(
     `UPDATE issue_refine_jobs
-     SET status = 'done', outcome = ?, refined = ?, why = ?, note = ?, last_error = NULL, updated_at = ?
+     SET status = 'done', outcome = ?, refined = ?, why = ?, note = ?, pass = '', last_error = NULL, updated_at = ?
      WHERE id = ?`,
   ).run(story.outcome, story.refined ?? null, story.why, story.note ?? null, at, id);
 }
 
 export function failIssueRefineJob(db: SqliteDb, id: number, at: string, error: string, why?: string): void {
   db.prepare(
-    `UPDATE issue_refine_jobs SET status = 'failed', outcome = 'failed', why = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+    `UPDATE issue_refine_jobs SET status = 'failed', outcome = 'failed', why = ?, pass = '', last_error = ?, updated_at = ? WHERE id = ?`,
   ).run(why ?? null, error, at, id);
 }
 

@@ -49,7 +49,10 @@ import {
   isEruComment,
   originalFromBrief,
   openQuestionsEmpty,
+  parseQuoteAnswers,
+  matchQuoteAnswers,
   parseRefinedMarkdown,
+  shouldAcceptIssueComment,
   shouldEnqueueForgejoIssue,
   shouldEnqueueGitlabIssue,
   shouldEnqueueIssue,
@@ -230,7 +233,7 @@ function json(status: number, body: unknown): Response {
 
 function testApp(opts: {
   fetchImpl?: FetchLike;
-  refine?: (input: { title: string; body: string; checkout?: string }) => Promise<string>;
+  refine?: (input: { title: string; body: string; checkout?: string; answers?: { question: string; answer: string }[] }) => Promise<string>;
   prepareSource?: PrepareIssueSource;
   now?: () => number;
   backoffMs?: () => number;
@@ -1819,5 +1822,156 @@ describe("rerun", () => {
       await app.request(posted.headers.get("location")!, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } })
     ).text();
     expect(page).toContain("Eru is already reading this issue.");
+  });
+});
+
+describe("issue comment answers", () => {
+  const q1 =
+    "Should `.ask-md img` in the Ask island get the same visual treatment (CSS-only) and click-to-preview (requires a change inside the island bundle), or is the issue scoped to SSR chrome only?";
+  const q2 =
+    "Should making images interactive come with routing image `src` through the same `safeHref` protocol allowlist that link hrefs already get in `src/markdown.ts:24`?";
+  const reply = `> 3\\. ${q1}\n\nAsk should have the same.\n\n>         ${q2}\n\nMaybe? I think yes.\n`;
+  const issueBody = composeIssueBody(refinedTemplate(`${q1}\n${q2}`), "Images need a frame.\n\n@eru-issue-bot\n");
+
+  it("maps a quote reply onto both open questions", () => {
+    const questions = [q1, q2];
+    const matched = matchQuoteAnswers(questions, parseQuoteAnswers(reply));
+    expect(matched.get(q1)).toBe("Ask should have the same.");
+    expect(matched.get(q2)).toBe("Maybe? I think yes.");
+  });
+
+  function commentPayload(body: string, senderId = 42) {
+    return {
+      action: "created",
+      installation: { id: 555 },
+      sender: { id: senderId, login: "owner", type: "User" },
+      comment: { id: 9, body, author_association: "MEMBER" },
+      repository: { name: "box", owner: { login: "acme" } },
+      issue: { number: 57, title: "Theme embedded images", body: issueBody, author_association: "NONE" },
+    };
+  }
+
+  it("ignores a deleted comment and a quote from someone who is not trusted", () => {
+    const deleted = commentPayload(reply);
+    deleted.action = "deleted";
+    expect(shouldAcceptIssueComment(deleted, { botUserId: 9001, trustedBotIds: [] })).toMatchObject({
+      enqueue: false,
+      reason: "comment-action",
+    });
+    const stranger = commentPayload(reply, 13);
+    stranger.comment.author_association = "NONE";
+    stranger.sender = { id: 13, login: "guest", type: "User" };
+    expect(shouldAcceptIssueComment(stranger, { botUserId: 9001, trustedBotIds: [] })).toMatchObject({
+      enqueue: false,
+      reason: "comment-author",
+    });
+    expect(explainWebhookDecision("comment-author", { ...emptyWebhookFacts(), association: "NONE", sender: "guest" })).toContain(
+      "trusted bot id",
+    );
+  });
+
+  it("queues a refine when every open question is quoted, and ignores Eru's own note", async () => {
+    let seenAnswers = "";
+    let patchedBody = "";
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/comments") && method === "GET") {
+        return json(200, [
+          { body: forgeComment(COMMENT_NEEDS_INFO, "note") },
+          { body: `${q1}\n\n${q2}` },
+          { body: reply },
+        ]);
+      }
+      if (path.endsWith("/reactions") && method === "POST") return json(201, { id: 1 });
+      if (path.endsWith("/comments") && method === "GET") return json(200, []);
+      if (path.endsWith("/comments") && method === "POST") return json(201, { id: 2 });
+      if (path.endsWith("/labels") && method === "POST") return json(200, []);
+      if (/\/labels$/.test(path) && method === "POST") return json(201, {});
+      if (/\/issues\/\d+$/.test(path) && method === "GET") {
+        return json(200, { title: "Theme embedded images", body: issueBody });
+      }
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
+        patchedBody = (parsed as { body?: string } | undefined)?.body ?? "";
+        return json(200, {});
+      }
+      return json(404, { path });
+    };
+    const { app, db, bot } = testApp({
+      fetchImpl,
+      refine: async (input) => {
+        seenAnswers = (input.answers ?? []).map((pair) => pair.answer).join("|");
+        return refinedTemplate("");
+      },
+    });
+    const own = await postWebhook(app, commentPayload(forgeComment(COMMENT_NEEDS_INFO, "note"), 9001), {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-own",
+    });
+    expect(await own.json()).toMatchObject({ outcome: "ignored", reason: "own-bot" });
+    const chatter = await postWebhook(app, commentPayload("looks good to me"), {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-chat",
+    });
+    expect(await chatter.json()).toMatchObject({ outcome: "ignored", reason: "comment" });
+    const accepted = await postWebhook(app, commentPayload(reply), {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-yes",
+    });
+    expect(await accepted.json()).toMatchObject({ outcome: "queued", reason: "answers", issue: 57 });
+    expect(listIssueRefineJobs(db)[0]?.pass).toBe("answers");
+    await bot.processDue();
+    expect(seenAnswers).toBe("Ask should have the same.|Maybe? I think yes.");
+    expect(listIssueRefineJobs(db)[0]?.outcome).toBe("agent-ready");
+    expect(listIssueRefineJobs(db)[0]?.pass).toBe("");
+    expect(patchedBody).toContain("Images need a frame.");
+    expect(patchedBody).toContain(ISSUE_BOT_MARKER);
+    expect(patchedBody.match(/<summary>Original<\/summary>/g)).toHaveLength(1);
+  });
+
+  it("does not rewrite the issue when a comment answers only one question", async () => {
+    const partial = `> ${q1}\n\nAsk should have the same.\n`;
+    const posted: string[] = [];
+    let patched = false;
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/comments") && method === "GET") return json(200, [{ body: partial }]);
+      if (path.endsWith("/comments") && method === "POST") {
+        posted.push((parsed as { body: string }).body);
+        return json(201, { id: 3 });
+      }
+      if (path.endsWith("/labels") && method === "POST") return json(200, []);
+      if (/\/labels$/.test(path) && method === "POST") return json(201, {});
+      if (/\/issues\/\d+$/.test(path) && method === "GET") {
+        return json(200, { title: "Theme embedded images", body: issueBody });
+      }
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
+        patched = true;
+        return json(200, {});
+      }
+      return json(404, {});
+    };
+    const { app, db, bot } = testApp({ fetchImpl, refine: async () => refinedTemplate("") });
+    const res = await postWebhook(app, commentPayload(partial), {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-part",
+    });
+    expect(await res.json()).toMatchObject({ outcome: "queued", reason: "answers" });
+    await bot.processDue();
+    expect(patched).toBe(false);
+    expect(posted.some((body) => body.includes(q2))).toBe(true);
+    expect(posted.some((body) => body.includes(q1))).toBe(false);
+    expect(listIssueRefineJobs(db)[0]?.outcome).toBe("needs-info");
   });
 });
