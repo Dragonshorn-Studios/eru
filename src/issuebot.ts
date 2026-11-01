@@ -114,14 +114,18 @@ function clipToForgeComment(text: string, max: number): string {
   return (word >= 80 ? window.slice(0, word) : window).trim();
 }
 
+/** Hidden marker so a rerun can delete Eru's comments without matching a person's sentence. */
+export const ISSUE_BOT_COMMENT_MARKER = "<!-- eru-issue-bot:comment -->";
+
 /** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
   const take = noteParagraph(note);
-  const text = take ? `${base}\n\n${take}` : base;
+  const lead = `${ISSUE_BOT_COMMENT_MARKER}\n${base}`;
+  const text = take ? `${lead}\n\n${take}` : lead;
   if (text.length <= GITHUB_ISSUE_BODY_MAX) return text;
-  const room = GITHUB_ISSUE_BODY_MAX - base.length - 2;
-  if (!take || room < 1) return base.slice(0, GITHUB_ISSUE_BODY_MAX);
-  return `${base}\n\n${clipToForgeComment(take, room)}`;
+  const room = GITHUB_ISSUE_BODY_MAX - lead.length - 2;
+  if (!take || room < 1) return lead.slice(0, GITHUB_ISSUE_BODY_MAX);
+  return `${lead}\n\n${clipToForgeComment(take, room)}`;
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -655,11 +659,12 @@ export function composeIssueBody(refined: string, original: string): string {
 }
 
 const ERU_COMMENT_PREFIXES = [
-  "Curious about this one",
-  "I got curious and tried",
-  "Couldn't rewrite this one",
-  "Rewrote this so an agent can pick it up",
-  "Not enough here to pin this down",
+  "Curious about this one. I rewrote it",
+  "Curious about this one, but a few things are still open.",
+  "I got curious and tried.",
+  "Couldn't rewrite this one.",
+  "Rewrote this so an agent can pick it up.",
+  "Not enough here to pin this down.",
 ];
 
 const ERU_LABELS = [LABEL_REFINED, LABEL_AGENT_READY, LABEL_NEEDS_INFO, LABEL_FAILED];
@@ -668,8 +673,10 @@ const ERU_LABELS = [LABEL_REFINED, LABEL_AGENT_READY, LABEL_NEEDS_INFO, LABEL_FA
 export function isEruComment(body: string, sheet = ""): boolean {
   const text = body.replace(/\r\n/g, "\n").trim();
   if (!text) return false;
-  if (ERU_COMMENT_PREFIXES.some((prefix) => text.startsWith(prefix))) return true;
-  return Boolean(sheet.trim()) && text === sheet.trim();
+  if (text.includes(ISSUE_BOT_COMMENT_MARKER)) return true;
+  const visible = text.replace(ISSUE_BOT_COMMENT_MARKER, "").trim();
+  if (ERU_COMMENT_PREFIXES.some((prefix) => visible.startsWith(prefix))) return true;
+  return Boolean(sheet.trim()) && visible === sheet.trim();
 }
 
 /** The issue text from before Eru wrote the brief. The collapsed Original block is that text. */
@@ -686,8 +693,19 @@ export function originalFromBrief(body: string): string {
   return original.replace(/&lt;\/details&gt;/gi, "</details>");
 }
 
-function restoreIssueBody(liveBody: string, storedBody: string): string {
+function briefOriginalTruncated(body: string): boolean {
+  if (!hasIssueBotMarker(body)) return false;
+  const summary = "<summary>Original</summary>";
+  const start = body.indexOf(summary);
+  const end = body.lastIndexOf("</details>");
+  if (start < 0 || end < start) return false;
+  return body.slice(start, end).includes("… truncated");
+}
+
+/** Prefer the stored original when the brief had to cut it to fit the forge limit. */
+export function restoreIssueBody(liveBody: string, storedBody: string): string {
   if (!hasIssueBotMarker(liveBody)) return liveBody || storedBody;
+  if (briefOriginalTruncated(liveBody) && storedBody && !hasIssueBotMarker(storedBody)) return storedBody;
   const extracted = originalFromBrief(liveBody);
   if (extracted && !hasIssueBotMarker(extracted)) return extracted;
   if (storedBody && !hasIssueBotMarker(storedBody)) return storedBody;
@@ -1399,7 +1417,9 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
   }
 
   async function deleteGithubEyes(token: string, job: IssueRefineJob): Promise<void> {
-    const reactions = await githubJson<Array<{ id?: unknown; content?: unknown }>>(
+    const botUserId = config?.botUserId;
+    if (!botUserId) return;
+    const reactions = await githubJson<Array<{ id?: unknown; content?: unknown; user?: { id?: unknown } }>>(
       fetchImpl,
       apiBase,
       token,
@@ -1408,6 +1428,7 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     );
     for (const reaction of reactions) {
       if (reaction.content !== "eyes" || typeof reaction.id !== "number") continue;
+      if (reaction.user?.id !== botUserId) continue;
       const res = await githubRequest(
         fetchImpl,
         apiBase,
@@ -1435,7 +1456,11 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
     const sheet = job.refined ? answerSheet(job.refined) : "";
     try {
       await clearEruWriteBack(job, live.token, sheet);
-      if (live.body !== original) await writeIssue(job, original, live.token);
+      const fresh = await liveIssue(job);
+      if (fresh.body !== live.body) {
+        return { ok: false, detail: "The issue changed while Eru was clearing the last pass. Nothing was rewritten." };
+      }
+      if (fresh.body !== original) await writeIssue(job, original, fresh.token ?? live.token);
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed";
       return { ok: false, detail: `Eru could not clear its last pass (${clipError(message)}).` };

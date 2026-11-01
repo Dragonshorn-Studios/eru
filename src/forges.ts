@@ -687,17 +687,25 @@ export async function forgejoRemoveLabels(
   fetchImpl: FetchLike,
 ): Promise<void> {
   if (labels.length === 0) return;
-  const list = await jsonFetch(
-    fetchImpl,
-    `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/labels?limit=50`,
-    forgejoHeaders(token),
-  );
-  if ("error" in list || !Array.isArray(list.body)) throw new Error("forgejo:labels");
   const wanted = new Set(labels);
-  for (const row of list.body) {
-    const label = row as { id?: unknown; name?: unknown };
-    const id = typeof label.id === "number" ? label.id : Number(label.id);
-    if (typeof label.name !== "string" || !wanted.has(label.name) || !Number.isInteger(id) || id <= 0) continue;
+  const ids: number[] = [];
+  for (let page = 1; page <= COMMENT_PAGE_CAP && wanted.size > 0; page++) {
+    const list = await jsonFetch(
+      fetchImpl,
+      `${forgeApiRoot(origin, "forgejo")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/labels?limit=50&page=${page}`,
+      forgejoHeaders(token),
+    );
+    if ("error" in list || !Array.isArray(list.body)) throw new Error("forgejo:labels");
+    for (const row of list.body) {
+      const label = row as { id?: unknown; name?: unknown };
+      const id = typeof label.id === "number" ? label.id : Number(label.id);
+      if (typeof label.name !== "string" || !wanted.has(label.name) || !Number.isInteger(id) || id <= 0) continue;
+      ids.push(id);
+      wanted.delete(label.name);
+    }
+    if (list.body.length < 50) break;
+  }
+  for (const id of ids) {
     const res = await forgejoRequest(
       origin,
       token,

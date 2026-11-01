@@ -1729,11 +1729,6 @@ async function refreshNotice(
   }
 }
 
-function clipNotice(value: string | undefined): string {
-  if (!value) return "";
-  return value.replace(/\s+/g, " ").trim().slice(0, 240);
-}
-
 function logReturnPath(value: string | undefined, id: number): string {
   if (value === `/log/${id}` || value === `/refine/log/${id}`) return value;
   return `/log/${id}`;
