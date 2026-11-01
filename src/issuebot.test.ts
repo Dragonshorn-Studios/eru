@@ -36,6 +36,9 @@ import {
   LABEL_REFINED,
   ALLOWED_SENDER_IDS_KEY,
   composeIssueBody,
+  QUESTION_MARKER,
+  QUESTIONS_NONE_MARKER,
+  stampOpenQuestions,
   createIssueBot,
   restoreIssueBody,
   createIssueRefiner,
@@ -415,8 +418,37 @@ describe("refined body", () => {
   it("treats blank / None Open questions as agent-ready", () => {
     expect(openQuestionsEmpty(refinedTemplate(""))).toBe(true);
     expect(openQuestionsEmpty(refinedTemplate("None"))).toBe(true);
-    expect(openQuestionsEmpty(refinedTemplate("- None"))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("- None."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate('"None."'))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("N/A."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("No open questions."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("There are no open questions."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("Nothing blocking."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None. The code already decides this."))).toBe(true);
+    expect(openQuestionsEmpty(refinedTemplate("None of the image paths are documented."))).toBe(false);
+    expect(openQuestionsEmpty(refinedTemplate("None. Which file should the preview use?"))).toBe(false);
     expect(openQuestionsEmpty(refinedTemplate("What wattage?"))).toBe(false);
+    expect(answerSheet(refinedTemplate("None.\nWhat wattage?"))).toBe("What wattage?");
+    const empty = stampOpenQuestions(refinedTemplate("None."));
+    expect(empty).toContain(QUESTIONS_NONE_MARKER);
+    expect(empty).not.toContain(QUESTION_MARKER);
+    expect(openQuestionsEmpty(empty)).toBe(true);
+    expect(answerSheet(empty)).toBe("");
+    expect(stampOpenQuestions(empty)).toBe(empty);
+    const asked = stampOpenQuestions(refinedTemplate("What wattage?\n- Which fixture?"));
+    expect(asked).toContain(`${QUESTION_MARKER}\nWhat wattage?`);
+    expect(asked).toContain(`${QUESTION_MARKER}\nWhich fixture?`);
+    expect(asked).not.toContain(QUESTIONS_NONE_MARKER);
+    expect(answerSheet(asked)).toBe("What wattage?\n\nWhich fixture?");
+    expect(stampOpenQuestions(asked)).toBe(asked);
+    const hidden = `## Open questions\n${QUESTIONS_NONE_MARKER}\nThe code already decides the path.\n`;
+    expect(openQuestionsEmpty(hidden)).toBe(true);
+    const beside = `## Open questions\n${QUESTIONS_NONE_MARKER}\nWhich file should the preview use?\n`;
+    expect(answerSheet(beside)).toBe("Which file should the preview use?");
+    const composed = composeIssueBody(refinedTemplate("None."), "original");
+    expect(composed).toContain(QUESTIONS_NONE_MARKER);
+    expect(composed.indexOf(QUESTIONS_NONE_MARKER)).toBeLessThan(composed.indexOf("<details>"));
     expect(answerSheet(refinedTemplate("What wattage?\n- Which fixture?"))).toBe("What wattage?\n\nWhich fixture?");
     const many = Array.from({ length: 13 }, (_, i) => `Question ${i + 1}?`).join("\n");
     expect(answerSheet(refinedTemplate(`${many}\n*None`)).split("\n\n")).toEqual(

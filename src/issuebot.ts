@@ -118,6 +118,10 @@ function clipToForgeComment(text: string, max: number): string {
 
 /** Hidden marker so a rerun can delete Eru's comments without matching a person's sentence. */
 export const ISSUE_BOT_COMMENT_MARKER = "<!-- eru-issue-bot:comment -->";
+/** Hidden marker in the brief. GitHub does not render it. It means Open questions is empty. */
+export const QUESTIONS_NONE_MARKER = "<!-- eru-issue-bot:questions none -->";
+/** Hidden marker on the line before one open question. */
+export const QUESTION_MARKER = "<!-- eru-issue-bot:question -->";
 
 /** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
@@ -141,7 +145,12 @@ const TEMPLATE_HEADINGS = [
   "Out of scope",
   "Open questions",
 ] as const;
-const EMPTY_OPEN_QUESTIONS = /^(none|n\/a|na|nil|-|—|–)?$/i;
+/** A whole line that means "nothing to ask". Trailing punctuation is stripped before this runs. */
+const PLACEHOLDER_QUESTION =
+  /^(?:none|n\/a|n\.a|na|nil|null|nothing|nope|no|not applicable|-+|—|–)$/i;
+/** A short sentence that also means the section is empty. */
+const PLACEHOLDER_PHRASE =
+  /^(?:there(?:'s| is| are) )?(?:no|none|zero) (?:open |remaining |further |more |blocking )?(?:questions?|blockers?)(?: (?:remain(?:ing)?|left|open|here|at this time))?$|^nothing (?:else|open|left|remaining|blocking|to ask)(?: at this time)?$|^(?:all )?(?:open )?questions? (?:are )?(?:answered|resolved|clear)$|^none (?:remaining|left|open|at this time)$/i;
 const MENTION_RE = /@eru-issue-bot\b/gi;
 const AT_MENTION_RE =
   /(^|[^A-Za-z0-9_`])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\/[A-Za-z0-9._-]+)?)/g;
@@ -663,16 +672,91 @@ export function eruTake(note: string, source: { code: boolean; map: boolean }): 
 export function openQuestionsEmpty(markdown: string): boolean {
   const section = headingSection(markdown, "Open questions");
   if (section === undefined) return false;
-  const trimmed = section.trim();
-  if (EMPTY_OPEN_QUESTIONS.test(trimmed)) return true;
   return openQuestionLines(section).length === 0;
 }
 
+/** Write the hidden question markers Eru reads back. A model-written copy is not kept. */
+export function stampOpenQuestions(markdown: string): string {
+  const section = headingSection(markdown, "Open questions");
+  if (section === undefined) return markdown;
+  const questions = openQuestionLines(stripQuestionMarkers(section));
+  const body =
+    questions.length === 0
+      ? `\n${QUESTIONS_NONE_MARKER}\nNone.\n`
+      : `\n${questions.map((question) => `${QUESTION_MARKER}\n${question}`).join("\n\n")}\n`;
+  return replaceHeadingSection(markdown, "Open questions", body);
+}
+
+function stripQuestionMarkers(text: string): string {
+  return text
+    .replaceAll(QUESTIONS_NONE_MARKER, "")
+    .replaceAll(QUESTION_MARKER, "");
+}
+
+/** The question text, without a list marker, checkbox, or wrapping quotes. */
+function visibleQuestionLine(line: string): string {
+  return line
+    .replace(/^\s*(?:[-*+•]|\d+[.)])\s*/, "")
+    .replace(/^\[[ xX]\]\s*/, "")
+    .replace(/^[\s>"'`*_[(]+|[\s>"'`*_\])]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * "None." is not a question. A line that starts "None." and never asks anything
+ * is the model saying the section is empty. "None of the paths…" is still a gap.
+ */
+function isPlaceholderQuestion(line: string): boolean {
+  const text = visibleQuestionLine(line);
+  if (!text) return true;
+  const bare = text.replace(/[.!?…]+$/g, "").trim();
+  if (PLACEHOLDER_QUESTION.test(bare) || PLACEHOLDER_PHRASE.test(bare)) return true;
+  if (text.includes("?")) return false;
+  if (/^(?:none|no|n\/a|n\.a|nothing|nil)[.!?…](?:\s|$)/i.test(text)) return true;
+  return /^(?:none|no|n\/a|nothing)\s*[-—–:]\s+\S/i.test(text);
+}
+
 function openQuestionLines(section: string): string[] {
-  return section
+  const marked = markedQuestionLines(section);
+  if (marked.length > 0) {
+    const seen = new Set(marked.map((question) => normalizeQuestion(question)));
+    for (const question of heuristicQuestionLines(section)) {
+      if (question.includes("?") && !seen.has(normalizeQuestion(question))) marked.push(question);
+    }
+    return marked;
+  }
+  if (section.includes(QUESTIONS_NONE_MARKER)) {
+    const asked = heuristicQuestionLines(section).filter((question) => question.includes("?"));
+    if (asked.length === 0) return [];
+    return asked;
+  }
+  return heuristicQuestionLines(section);
+}
+
+/** The line after each question marker. That line is the question. */
+function markedQuestionLines(section: string): string[] {
+  const lines = section.split("\n");
+  const questions: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!(lines[i] ?? "").includes(QUESTION_MARKER)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const raw = lines[j] ?? "";
+      if (raw.includes(QUESTION_MARKER) || raw.includes(QUESTIONS_NONE_MARKER)) break;
+      const text = visibleQuestionLine(raw);
+      if (!text) continue;
+      questions.push(text);
+      break;
+    }
+  }
+  return questions;
+}
+
+function heuristicQuestionLines(section: string): string[] {
+  return stripQuestionMarkers(section)
     .split("\n")
-    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
-    .filter((line) => line.length > 0 && !EMPTY_OPEN_QUESTIONS.test(line));
+    .map((line) => visibleQuestionLine(line))
+    .filter((line) => line.length > 0 && !isPlaceholderQuestion(line));
 }
 
 export interface QuoteAnswer {
@@ -781,7 +865,7 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string; not
     }
   }
   const split = splitEruNote(text);
-  text = neutralizeAtMentions(stripIssueBotMention(split.text)).trim();
+  text = stripQuestionMarkers(neutralizeAtMentions(stripIssueBotMention(split.text))).trim();
   const note = noteParagraph(neutralizeAtMentions(stripIssueBotMention(split.note)));
   if (!text) return { ok: false, error: "empty" };
   return { ok: true, text, note };
@@ -878,7 +962,7 @@ export function issueImages(text: string): string[] {
 }
 
 export function composeIssueBody(refined: string, original: string): string {
-  const brief = stripIssueBotMention(refined).trim();
+  const brief = stampOpenQuestions(stripIssueBotMention(refined).trim());
   const pictures = issueImages(original).filter((image) => !brief.includes(image));
   const head = [
     ISSUE_BOT_MARKER,
@@ -1918,7 +2002,7 @@ export function refinePrompt(
     "",
     TEMPLATE_HEADINGS.map((h) => `## ${h}`).join("\n"),
     "",
-    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty (or write \"None\").",
+    "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty, or write None. A period is fine. Do not put a question there unless a person still has to decide. Do not write an HTML comment; Eru marks that section.",
     "If the issue includes images, keep each image in the brief. Do not leave screenshots only in the original.",
     ...(answers && answers.length > 0
       ? [
@@ -2091,6 +2175,17 @@ function labelColor(name: string): string {
     default:
       return "ededed";
   }
+}
+
+function replaceHeadingSection(markdown: string, heading: string, body: string): string {
+  const re = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "im");
+  const match = re.exec(markdown);
+  if (!match || match.index === undefined) return markdown;
+  const start = match.index + match[0].length;
+  const rest = markdown.slice(start);
+  const next = /^##\s+/im.exec(rest);
+  const end = next ? start + next.index : markdown.length;
+  return `${markdown.slice(0, start)}${body.endsWith("\n") ? body : `${body}\n`}${markdown.slice(end)}`;
 }
 
 function headingSection(markdown: string, heading: string): string | undefined {
