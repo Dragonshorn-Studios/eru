@@ -839,9 +839,18 @@ function pruneWebhookLog(db: SqliteDb, outcome: WebhookLogOutcome): void {
 
 /** The operator asked to rewrite this delivery. Settle-on-read copies the job outcome later. */
 export function queueWebhookLog(db: SqliteDb, id: number, jobId: number, detail: string): void {
+  const text = detail.slice(0, 500);
   db.prepare(
     `UPDATE webhook_log SET outcome = 'queued', reason = 'forced', detail = ?, job_id = ? WHERE id = ?`,
-  ).run(detail.slice(0, 500), jobId, id);
+  ).run(text, jobId, id);
+  // Rows that already settled from this job would otherwise keep the old pill
+  // after the same job is rewritten.
+  db.prepare(
+    `UPDATE webhook_log
+        SET outcome = 'queued', reason = 'forced', detail = ?
+      WHERE job_id = ? AND id != ?
+        AND outcome IN ('agent-ready', 'needs-info', 'failed', 'skipped')`,
+  ).run(text, jobId, id);
 }
 
 /** A queued row keeps that label forever unless we copy the finished job onto it. */

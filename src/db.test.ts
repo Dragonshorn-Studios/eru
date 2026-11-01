@@ -638,11 +638,25 @@ describe("webhook log", () => {
       { installationId: "555", owner: "acme", name: "box", issueNumber: 4, title: "lamp", body: "" },
       "2026-01-02T00:00:00Z",
     )!;
+    const earlier = insertWebhookLog(db, {
+      ...row("Open questions still need an answer."),
+      owner: "acme",
+      name: "box",
+      issueNumber: 4,
+      outcome: "needs-info",
+      reason: "needs-info",
+      jobId: job,
+    });
     queueWebhookLog(db, id, job, "Queued by the operator. nagato is on the allowlist.");
     expect(getWebhookLog(db, id)).toMatchObject({
       outcome: "queued",
       reason: "forced",
       jobId: job,
+      detail: "Queued by the operator. nagato is on the allowlist.",
+    });
+    expect(getWebhookLog(db, earlier)).toMatchObject({
+      outcome: "queued",
+      reason: "forced",
       detail: "Queued by the operator. nagato is on the allowlist.",
     });
     db.close();
