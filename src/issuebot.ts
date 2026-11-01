@@ -91,10 +91,31 @@ function noteParagraph(note: string): string {
   return note.replace(/\s+/g, " ").trim();
 }
 
+/** Stop on a sentence so a forge-sized comment is not cut mid-word. */
+function clipToForgeComment(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const window = text.slice(0, max);
+  let end = -1;
+  for (let i = window.length - 1; i >= 0; i--) {
+    const ch = window[i];
+    if ((ch === "." || ch === "!" || ch === "?") && (i === window.length - 1 || /\s/.test(window[i + 1] ?? " "))) {
+      end = i;
+      break;
+    }
+  }
+  if (end >= 80) return window.slice(0, end + 1).trim();
+  const word = window.lastIndexOf(" ");
+  return (word >= 80 ? window.slice(0, word) : window).trim();
+}
+
 /** The forge comment: the curious line, then Eru's take when there is one. */
 export function forgeComment(base: string, note: string): string {
   const take = noteParagraph(note);
-  return take ? `${base}\n\n${take}` : base;
+  const text = take ? `${base}\n\n${take}` : base;
+  if (text.length <= GITHUB_ISSUE_BODY_MAX) return text;
+  const room = GITHUB_ISSUE_BODY_MAX - base.length - 2;
+  if (!take || room < 1) return base.slice(0, GITHUB_ISSUE_BODY_MAX);
+  return `${base}\n\n${clipToForgeComment(take, room)}`;
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);

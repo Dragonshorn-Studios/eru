@@ -420,6 +420,12 @@ describe("refined body", () => {
     const parsed = parseRefinedMarkdown(`${refinedTemplate("")}\n## Eru\n${take}\n`);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.note).toBe(take);
+    const huge = "This name is real. ".repeat(8_000);
+    const comment = forgeComment(COMMENT_COMPLETE, huge);
+    expect(comment.length).toBeLessThanOrEqual(GITHUB_ISSUE_BODY_MAX);
+    expect(comment.endsWith(".")).toBe(true);
+    expect(comment.startsWith(COMMENT_COMPLETE)).toBe(true);
+    expect(eruTake(huge, { code: true, map: false }).length).toBeGreaterThan(GITHUB_ISSUE_BODY_MAX);
   });
 
   it("truncates a long original so the composed body stays under GitHub's limit", () => {
