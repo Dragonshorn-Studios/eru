@@ -1974,4 +1974,121 @@ describe("issue comment answers", () => {
     expect(posted.some((body) => body.includes(q1))).toBe(false);
     expect(listIssueRefineJobs(db)[0]?.outcome).toBe("needs-info");
   });
+
+  it("binds a quote to the shorter question when a longer one contains it", () => {
+    const shorter = "Should the image preview use the same safe href allowlist?";
+    const longer = `${shorter} Or should it stay as plain markdown?`;
+    const matched = matchQuoteAnswers(
+      [longer, shorter],
+      parseQuoteAnswers(`> ${shorter}\n\nYes, the same allowlist.\n`),
+    );
+    expect(matched.get(shorter)).toBe("Yes, the same allowlist.");
+    expect(matched.has(longer)).toBe(false);
+  });
+
+  it("keeps the stored original when a comment restarts a truncated brief", async () => {
+    const huge = `tail-marker\n${"a".repeat(80_000)}`;
+    const brief = composeIssueBody(refinedTemplate(`${q1}\n${q2}`), huge);
+    expect(brief).toContain("… truncated");
+    let patched = "";
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/comments") && method === "GET") return json(200, [{ body: reply }]);
+      if (path.endsWith("/comments") && method === "POST") return json(201, { id: 4 });
+      if (path.endsWith("/reactions") && method === "POST") return json(201, { id: 1 });
+      if (path.endsWith("/labels") && method === "POST") return json(200, []);
+      if (/\/labels$/.test(path) && method === "POST") return json(201, {});
+      if (/\/issues\/\d+$/.test(path) && method === "GET") {
+        return json(200, { title: "Theme embedded images", body: brief });
+      }
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
+        patched = (parsed as { body?: string }).body ?? "";
+        return json(200, {});
+      }
+      return json(404, {});
+    };
+    const { app, db, bot } = testApp({ fetchImpl, refine: async () => refinedTemplate("") });
+    enqueueIssueRefineJob(
+      db,
+      {
+        installationId: "555",
+        owner: "acme",
+        name: "box",
+        issueNumber: 57,
+        title: "Theme embedded images",
+        body: huge,
+      },
+      "2026-01-01T00:00:00Z",
+    );
+    db.prepare(`UPDATE issue_refine_jobs SET status = 'done' WHERE issue_number = 57`).run();
+    const res = await postWebhook(app, { ...commentPayload(reply), issue: { ...commentPayload(reply).issue, body: brief } }, {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-huge",
+    });
+    expect(await res.json()).toMatchObject({ outcome: "queued", reason: "answers" });
+    expect(listIssueRefineJobs(db)[0]?.body).toBe(huge);
+    await bot.processDue();
+    expect(patched).toContain("tail-marker");
+    expect(patched).toContain("… truncated");
+    expect(listIssueRefineJobs(db)[0]?.body).toBe(huge);
+  });
+
+  it("does not refine again when a retry finds the questions already folded", async () => {
+    let refineCalls = 0;
+    let patches = 0;
+    let commentPosts = 0;
+    let live = issueBody;
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = new URL(url).pathname;
+      let parsed: unknown;
+      if (typeof init?.body === "string" && init.body) parsed = JSON.parse(init.body);
+      if (path.endsWith("/access_tokens") && method === "POST") {
+        return json(201, { token: "ghs_install", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (path.endsWith("/comments") && method === "GET") return json(200, [{ body: reply }]);
+      if (path.endsWith("/comments") && method === "POST") {
+        commentPosts += 1;
+        if (commentPosts === 1) return json(500, { message: "boom" });
+        return json(201, { id: 5 });
+      }
+      if (path.endsWith("/reactions") && method === "POST") return json(201, { id: 1 });
+      if (path.endsWith("/labels") && method === "POST") return json(200, []);
+      if (/\/labels$/.test(path) && method === "POST") return json(201, {});
+      if (/\/issues\/\d+$/.test(path) && method === "GET") {
+        return json(200, { title: "Theme embedded images", body: live });
+      }
+      if (/\/issues\/\d+$/.test(path) && method === "PATCH") {
+        patches += 1;
+        live = (parsed as { body?: string }).body ?? live;
+        return json(200, {});
+      }
+      return json(404, {});
+    };
+    const { app, db, bot } = testApp({
+      fetchImpl,
+      backoffMs: () => 0,
+      refine: async () => {
+        refineCalls += 1;
+        return refinedTemplate("");
+      },
+    });
+    const res = await postWebhook(app, commentPayload(reply), {
+      "X-GitHub-Event": "issue_comment",
+      "X-GitHub-Delivery": "c-retry",
+    });
+    expect(await res.json()).toMatchObject({ outcome: "queued", reason: "answers" });
+    await bot.processDue();
+    expect(refineCalls).toBe(1);
+    expect(patches).toBe(1);
+    expect(commentPosts).toBe(2);
+    expect(listIssueRefineJobs(db)[0]?.outcome).toBe("agent-ready");
+    expect(live).toContain(ISSUE_BOT_MARKER);
+  });
 });

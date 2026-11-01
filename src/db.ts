@@ -686,6 +686,18 @@ export function countRecentIssueRefineJobs(
   return row.n;
 }
 
+export function findIssueRefineJob(
+  db: SqliteDb,
+  job: { forge: string; owner: string; name: string; issueNumber: number },
+): IssueRefineJob | undefined {
+  return db
+    .prepare(
+      `SELECT ${ISSUE_JOB_COLUMNS} FROM issue_refine_jobs
+        WHERE forge = ? AND owner = ? AND name = ? AND issue_number = ?`,
+    )
+    .get(job.forge, job.owner, job.name, job.issueNumber) as IssueRefineJob | undefined;
+}
+
 export function getIssueRefineJob(db: SqliteDb, id: number): IssueRefineJob | undefined {
   return db.prepare(`SELECT ${ISSUE_JOB_COLUMNS} FROM issue_refine_jobs WHERE id = ?`).get(id) as
     | IssueRefineJob

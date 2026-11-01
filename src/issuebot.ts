@@ -19,6 +19,7 @@ import {
   countRecentIssueRefineJobs,
   enqueueIssueRefineJob,
   enqueueOrRestartIssueRefineJob,
+  findIssueRefineJob,
   failIssueRefineJob,
   findConnectedRepo,
   getSetting,
@@ -718,17 +719,34 @@ export function normalizeQuestion(text: string): string {
     .toLowerCase();
 }
 
-/** Map quoted lines onto the brief's open questions. Later answers win. */
+/** A containment match has to be nearly the same length, so a short question cannot claim a longer one. */
+const QUOTE_MATCH_RATIO = 0.8;
+
+function quoteDistance(quoted: string, normalized: string): number | undefined {
+  if (!normalized) return undefined;
+  if (quoted === normalized) return 0;
+  const shorter = Math.min(quoted.length, normalized.length);
+  const longer = Math.max(quoted.length, normalized.length);
+  if (shorter < 12 || shorter / longer < QUOTE_MATCH_RATIO) return undefined;
+  if (normalized.includes(quoted) || quoted.includes(normalized)) return longer - shorter;
+  return undefined;
+}
+
+/** Map quoted lines onto the brief's open questions. An exact match wins. Later answers win. */
 export function matchQuoteAnswers(questions: string[], pairs: QuoteAnswer[]): Map<string, string> {
   const matched = new Map<string, string>();
+  const normalized = questions.map((question) => ({ question, key: normalizeQuestion(question) }));
   for (const pair of pairs) {
     const quoted = normalizeQuestion(pair.question);
-    if (quoted.length < 12) continue;
-    const hit = questions.find((question) => {
-      const normalized = normalizeQuestion(question);
-      return normalized === quoted || normalized.includes(quoted) || quoted.includes(normalized);
-    });
-    if (hit && pair.answer.trim()) matched.set(hit, pair.answer.trim());
+    const answer = pair.answer.trim();
+    if (quoted.length < 12 || !answer) continue;
+    let best: { question: string; distance: number } | undefined;
+    for (const item of normalized) {
+      const distance = quoteDistance(quoted, item.key);
+      if (distance === undefined) continue;
+      if (!best || distance < best.distance) best = { question: item.question, distance };
+    }
+    if (best) matched.set(best.question, answer);
   }
   return matched;
 }
@@ -1145,7 +1163,11 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
         return jsonOk(recordWebhook({ forge: FORGE_GITHUB, outcome: "ignored", reason: "unconnected", event, delivery: deliveryId, facts }));
       }
       const at = iso();
-      const id = enqueueOrRestartIssueRefineJob(db, { ...parsed, origin: connectedOrigin(parsed.forge) }, at);
+      const stored = findIssueRefineJob(db, parsed);
+      // Keep the pre-brief original. The comment payload's issue body is the brief, and storing that
+      // would throw away the full text when the collapsed Original had to be truncated.
+      const body = restoreIssueBody(parsed.body, stored?.body ?? "");
+      const id = enqueueOrRestartIssueRefineJob(db, { ...parsed, body, origin: connectedOrigin(parsed.forge) }, at);
       if (!id) {
         return jsonOk(recordWebhook({ forge: FORGE_GITHUB, outcome: "ignored", reason: "duplicate", event, delivery: deliveryId, facts }));
       }
@@ -1440,10 +1462,16 @@ export function createIssueBot(opts: IssueBotOptions): IssueBot {
           });
           return;
         }
-        const comments = await listGithubComments(live.token, job);
-        const pairs = comments.filter((comment) => !isEruComment(comment.body)).flatMap((comment) => parseQuoteAnswers(comment.body));
         const refined = refinedPortion(liveBody);
         const questions = openQuestionLines(headingSection(refined, "Open questions") ?? "");
+        if (questions.length === 0) {
+          await finishForgeWriteBack(job, true, live.token, "", refined);
+          completeIssueRefineJob(db, job.id, iso(), refineStory(true, refined, ""));
+          console.log(`issuebot: answers already in the brief ${label}`);
+          return;
+        }
+        const comments = await listGithubComments(live.token, job);
+        const pairs = comments.filter((comment) => !isEruComment(comment.body)).flatMap((comment) => parseQuoteAnswers(comment.body));
         const matched = matchQuoteAnswers(questions, pairs);
         const remaining = questions.filter((question) => !matched.has(question));
         if (remaining.length > 0) {
