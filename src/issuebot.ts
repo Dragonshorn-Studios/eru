@@ -638,12 +638,43 @@ export function parseRefinedMarkdown(raw: string): { ok: true; text: string; not
   return { ok: true, text, note };
 }
 
+function imageSrcIsKept(src: string): boolean {
+  const value = src.trim();
+  if (!value || value.length > 2_000 || /[\s<>]/.test(value)) return false;
+  return !/^(?:javascript|data|vbscript):/i.test(value);
+}
+
+/** Images from the issue, in order, so a rewrite can keep them above the collapsed original. */
+export function issueImages(text: string): string[] {
+  const markdownImage = /!\[[^\]]*\]\(([^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
+  const htmlImage = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi;
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const add = (token: string) => {
+    const image = token.trim();
+    if (!image || seen.has(image)) return;
+    seen.add(image);
+    found.push(image);
+  };
+  for (const match of text.matchAll(markdownImage)) {
+    if (match[1] && imageSrcIsKept(match[1])) add(match[0]);
+  }
+  for (const match of text.matchAll(htmlImage)) {
+    const src = match[1] || match[2];
+    if (src && imageSrcIsKept(src)) add(match[0]);
+  }
+  return found;
+}
+
 export function composeIssueBody(refined: string, original: string): string {
+  const brief = stripIssueBotMention(refined).trim();
+  const pictures = issueImages(original).filter((image) => !brief.includes(image));
   const head = [
     ISSUE_BOT_MARKER,
     "",
-    stripIssueBotMention(refined).trim(),
+    brief,
     "",
+    ...(pictures.length > 0 ? [pictures.join("\n\n"), ""] : []),
     "<details>",
     "<summary>Original</summary>",
     "",
@@ -1571,6 +1602,7 @@ export function refinePrompt(title: string, body: string, hadMap: boolean, hadCo
     TEMPLATE_HEADINGS.map((h) => `## ${h}`).join("\n"),
     "",
     "Fill each section from the issue and from the code or the map when you have them. If a fact is missing, say so. If nothing is blocking, leave Open questions empty (or write \"None\").",
+    "If the issue includes images, keep each image in the brief. Do not leave screenshots only in the original.",
     "After those headings, add one more:",
     "",
     "## Eru",

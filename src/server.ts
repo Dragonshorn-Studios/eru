@@ -219,7 +219,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
           timeoutMs: () => resolveTimeout(config, db).value,
           model: () => resolveModel(config, db, "ask").value,
         },
-        prepareSource: (job) => prepareIssueSource(db, config, fetchImpl, refresh, now, githubApp, job),
+        prepareSource: (job) => prepareIssueSource(db, config, fetchImpl, refresh, now, githubApp, mapping, job),
         now,
       });
       if (opts.issueBotAutoStart !== false) liveBot.start();
@@ -496,6 +496,7 @@ export function createApp(opts: AppOptions): Hono<Env> {
       const job = mapping.get(model.repo.id);
       if (job?.status === "running") {
         model.mapping = true;
+        model.mappingKind = job.kind;
       } else {
         const done = mapping.consume(model.repo.id);
         if (done && !model.refreshNotice) model.refreshNotice = done.notice;
@@ -1651,12 +1652,20 @@ async function prepareIssueSource(
   refresh: RefreshRunner,
   now: () => number,
   githubAppFactory: () => GithubAppClient | null,
+  mapping: MappingTracker,
   job: { forge: string; origin: string; owner: string; name: string },
 ): ReturnType<PrepareIssueSource> {
   const repo = findConnectedRepo(db, job);
   if (!repo) return { ok: false, detail: "repo is not connected" };
+  const startedHere = mapping.start(repo.id, now(), "explore");
+  const finish = (status: "done" | "failed", notice: string) => {
+    if (startedHere) mapping.finish(repo.id, status, notice, now());
+  };
   const opened = await openCheckout(db, config, fetchImpl, githubAppFactory, repo);
-  if (!opened.ok) return { ok: false, detail: opened.notice };
+  if (!opened.ok) {
+    finish("failed", opened.notice);
+    return { ok: false, detail: opened.notice };
+  }
   try {
     let mapped = false;
     let pages = listAllPages(db, repo.id);
@@ -1677,17 +1686,24 @@ async function prepareIssueSource(
       }
     }
     await rm(joinPath(opened.checkoutDir, "opencode.json"), { force: true }).catch(() => {});
+    const notice = mapped
+      ? `Created a map of ${repo.owner}/${repo.name} while reading an issue.`
+      : `Finished reading ${repo.owner}/${repo.name}.`;
     return {
       ok: true,
       source: {
         dir: opened.workdir,
         pages,
         mapped,
-        cleanup: () => rm(opened.workdir, { recursive: true, force: true }).then(() => undefined),
+        cleanup: () =>
+          rm(opened.workdir, { recursive: true, force: true }).then(() => {
+            finish("done", notice);
+          }),
       },
     };
   } catch (err) {
     await rm(opened.workdir, { recursive: true, force: true }).catch(() => {});
+    finish("failed", "Eru could not read the checkout.");
     throw err;
   }
 }
